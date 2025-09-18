@@ -33,7 +33,7 @@ class StructuredFactorVAE(nn.Module):
         If True, decoder learns per-gene log variance.
     """
     def __init__(self, n_genes: int, n_latent: int,
-                 hidden_dims=None, 
+                 hidden_dims=None,
                  dropout: float = 0.1,
                  mask: torch.Tensor = None,
                  init_sd: float = 0.02,
@@ -75,9 +75,9 @@ class StructuredFactorVAE(nn.Module):
     def laplacian_penalty(self, L: torch.Tensor, lap_strength: float = 1e-3):
         return self.decoder.laplacian_penalty(L, lap_strength)
 
-    def reset_parameters(self):
+    def reset_parameters(self, activation: str = "relu"):
         """Reset all learnable parameters with custom init."""
-        self.apply(weights_init)
+        self.apply(lambda m: weights_init(m, activation=activation))
 
     def sample_latent(self, x):
         """Return a latent sample z given input x."""
