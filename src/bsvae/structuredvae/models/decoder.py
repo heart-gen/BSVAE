@@ -1,3 +1,6 @@
+"""
+Decoder for StructuredFactorVAE
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,10 +26,12 @@ class StructuredDecoder(nn.Module):
     """
     def __init__(self, n_genes: int, n_latent: int,
                  mask: torch.Tensor = None,
-                 init_sd: float = 0.02):
+                 init_sd: float = 0.02,
+                 log_var: torch.Tensor = None):
         super().__init__()
         self.n_genes = n_genes
         self.n_latent = n_latent
+        self.log_var = log_var
 
         # Weight matrix W: (G, K)
         self.W = nn.Parameter(torch.randn(n_genes, n_latent) * init_sd)
