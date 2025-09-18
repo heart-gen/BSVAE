@@ -60,7 +60,6 @@ class StructuredFactorVAE(nn.Module):
             eps = torch.randn_like(std)
             return mu + std * eps
         else:
-            # Use mean for deterministic inference
             return mu
 
     def forward(self, x: torch.Tensor):
@@ -69,17 +68,18 @@ class StructuredFactorVAE(nn.Module):
         recon_x, log_var = self.decoder(z)
         return recon_x, mu, logvar, z, log_var
 
-    def group_sparsity_penalty(self, l1_strength: float = 1e-3):
-        return self.decoder.group_sparsity_penalty(l1_strength)
-
-    def laplacian_penalty(self, L: torch.Tensor, lap_strength: float = 1e-3):
-        return self.decoder.laplacian_penalty(L, lap_strength)
-
     def reset_parameters(self, activation: str = "relu"):
         """Reset all learnable parameters with custom init."""
-        self.apply(lambda m: weights_init(m, activation=activation))
+        self.activation = activation
+        self.apply(lambda m: weights_init(m, activation=self.activation))
 
     def sample_latent(self, x):
         """Return a latent sample z given input x."""
         mu, logvar = self.encoder(x)
         return self.reparameterize(mu, logvar)
+
+    def group_sparsity_penalty(self, l1_strength: float = 1e-3):
+        return self.decoder.group_sparsity_penalty(l1_strength)
+
+    def laplacian_penalty(self, L: torch.Tensor, lap_strength: float = 1e-3):
+        return self.decoder.laplacian_penalty(L, lap_strength)

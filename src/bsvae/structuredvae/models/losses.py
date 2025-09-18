@@ -11,9 +11,11 @@ LOSSES = ["VAE", "beta"]
 
 def get_loss_f(loss_name: str = "VAE",
                beta: float = 1.0,
+               l1_strength: float = 1e-3,
+               lap_strength: float = 1e-4,
                **kwargs) -> BaseLoss:
     """
-    Return the StructuredFactorVAE loss function.
+    Factory function for StructuredFactorVAE loss.
 
     Parameters
     ----------
@@ -21,6 +23,10 @@ def get_loss_f(loss_name: str = "VAE",
         Loss type name ("VAE" or "beta").
     beta : float
         KL scaling factor (for beta-VAE style).
+    l1_strength : float
+        Strength of group sparsity penalty.
+    lap_strength : float
+        Strength of Laplacian smoothness penalty.
     kwargs : dict
         Extra kwargs (ignored, for API compatibility).
 
@@ -31,19 +37,23 @@ def get_loss_f(loss_name: str = "VAE",
     if loss_name not in LOSSES:
         raise ValueError(f"Unknown loss: {loss_name}. Must be one of {LOSSES}.")
 
-    if loss_name == "VAE":
-        return BaseLoss(beta=1.0)   # standard ELBO
-    elif loss_name == "beta":
-        return BaseLoss(beta=beta)  # scaled KL
+    return BaseLoss(beta=beta,
+                    l1_strength=l1_strength,
+                    lap_strength=lap_strength)
 
 
 class BaseLoss(nn.Module):
     """
-    Base class for VAE losses with biological regularizers.
+    Base loss for StructuredFactorVAE with biological regularizers.
     """
-    def __init__(self, beta: float = 1.0, record_loss_every: int = 50):
+    def __init__(self, beta: float = 1.0,
+                 l1_strength: float = 1e-3,
+                 lap_strength: float = 1e-4,
+                 record_loss_every: int = 50):
         super().__init__()
         self.beta = beta
+        self.l1_strength = l1_strength
+        self.lap_strength = lap_strength
         self.n_train_steps = 0
         self.record_loss_every = record_loss_every
 
@@ -52,7 +62,7 @@ class BaseLoss(nn.Module):
                 recon_x: torch.Tensor,
                 mu: torch.Tensor,
                 logvar: torch.Tensor,
-                decoder: nn.Module,
+                model: nn.Module,
                 L: Optional[torch.Tensor] = None,
                 storer: Optional[Dict[str, list]] = None,
                 is_train: bool = True) -> torch.Tensor:
@@ -69,7 +79,7 @@ class BaseLoss(nn.Module):
             Latent mean (batch, K).
         logvar : torch.Tensor
             Latent log variance (batch, K).
-        decoder : nn.Module
+        model : nn.Module
             Structured decoder (with sparsity/laplacian methods).
         L : torch.Tensor or None
             Graph Laplacian for Laplacian penalty (optional).
@@ -85,19 +95,20 @@ class BaseLoss(nn.Module):
         """
 
         # Reconstruction loss: Gaussian NLL if available, else MSE
-        if hasattr(decoder, "log_var"):
-            recon_loss = gaussian_nll(x, recon_x, log_var=decoder.log_var, reduction="mean")
+        if hasattr(model.decoder, "log_var") and model.decoder.log_var is not None:
+            recon_loss = gaussian_nll(x, recon_x, log_var=model.decoder.log_var,
+                                      reduction="mean")
         else:
             recon_loss = F.mse_loss(recon_x, x, reduction="mean")
 
         # KL divergence
         kl_loss = kl_normal_loss(mu, logvar, reduction="mean")
 
-        # Regularizers
-        sparsity_loss = decoder.group_sparsity_penalty(l1_strength=1e-3)
-        laplacian_loss = decoder.laplacian_penalty(L, lap_strength=1e-4) if L is not None else 0.0
+        # Biological regularizers
+        sparsity_loss = model.decoder.group_sparsity_penalty(self.l1_strength)
+        laplacian_loss = model.decoder.laplacian_penalty(L, self.lap_strength) if L is not None else 0.0
 
-        # Combine
+        # Total loss
         loss = recon_loss + self.beta * kl_loss + sparsity_loss + laplacian_loss
 
         # Logging
@@ -131,8 +142,7 @@ def gaussian_nll(x, recon_x, log_var=None, reduction="mean"):
         return F.mse_loss(recon_x, x, reduction=reduction)
 
     var = torch.exp(log_var)
-    nll = 0.5 * (torch.log(2 * torch.pi * var) +
-                 (x - recon_x) ** 2 / var)
+    nll = 0.5 * (torch.log(2 * torch.pi * var) + (x - recon_x) ** 2 / var)
     if reduction == "mean":
         return nll.mean()
     elif reduction == "sum":
