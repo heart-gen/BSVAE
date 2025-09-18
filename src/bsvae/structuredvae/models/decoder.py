@@ -27,11 +27,11 @@ class StructuredDecoder(nn.Module):
     def __init__(self, n_genes: int, n_latent: int,
                  mask: torch.Tensor = None,
                  init_sd: float = 0.02,
-                 log_var: torch.Tensor = None):
+                 learn_var: bool = False):
         super().__init__()
         self.n_genes = n_genes
         self.n_latent = n_latent
-        self.log_var = log_var
+        self.learn_var = learn_var
 
         # Weight matrix W: (G, K)
         self.W = nn.Parameter(torch.randn(n_genes, n_latent) * init_sd)
@@ -45,7 +45,10 @@ class StructuredDecoder(nn.Module):
             self.mask = None
 
         # Gene-specific variance (optional)
-        self.log_theta = nn.Parameter(torch.zeros(n_genes))
+        if self.learn_var:
+            self.log_var = nn.Parameter(torch.zeros(n_genes))
+        else:
+            self.log_var = None
 
     def forward(self, z: torch.Tensor):
         """
@@ -85,3 +88,4 @@ class StructuredDecoder(nn.Module):
         LW = torch.sparse.mm(L, W_eff) if L.is_sparse else torch.matmul(L, W_eff)
         penalty = torch.sum(W_eff * LW)  # trace approx
         return lap_strength * penalty
+
