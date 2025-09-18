@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from .encoder import StructuredEncoder
 from .decoder import StructuredDecoder
-from ..utils.initialization import weights_init
+from bsvae.utils.initialization import weights_init
 
 class StructuredFactorVAE(nn.Module):
     """
