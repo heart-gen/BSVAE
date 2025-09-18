@@ -88,4 +88,3 @@ class StructuredDecoder(nn.Module):
         LW = torch.sparse.mm(L, W_eff) if L.is_sparse else torch.matmul(L, W_eff)
         penalty = torch.sum(W_eff * LW)  # trace approx
         return lap_strength * penalty
-

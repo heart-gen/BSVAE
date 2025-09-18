@@ -58,7 +58,7 @@ class StructuredFactorVAE(nn.Module):
         if self.training:
             std = torch.exp(0.5 * logvar)
             eps = torch.randn_like(std)
-            return mean + std * eps
+            return mu + std * eps
         else:
             # Use mean for deterministic inference
             return mu

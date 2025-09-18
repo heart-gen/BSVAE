@@ -129,7 +129,7 @@ def gaussian_nll(x, recon_x, log_var=None, reduction="mean"):
     """
     if log_var is None:
         return F.mse_loss(recon_x, x, reduction=reduction)
-      
+
     var = torch.exp(log_var)
     nll = 0.5 * (torch.log(2 * torch.pi * var) +
                  (x - recon_x) ** 2 / var)

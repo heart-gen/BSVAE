@@ -69,9 +69,4 @@ class StructuredEncoder(nn.Module):
         mu = self.fc_mu(h)
         logvar = self.fc_logvar(h)
 
-        # Reparameterization trick
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        z = mu + eps * std
-
-        return mu, logvar, z
+        return mu, logvar
