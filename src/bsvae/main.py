@@ -9,8 +9,8 @@ from configparser import ConfigParser
 import torch
 from torch import optim
 
-from bsvae.models.structured_vae import StructuredFactorVAE
-from bsvae.models.losses_structured import get_loss_f
+from bsvae.models import StructuredFactorVAE
+from bsvae.models.losses import get_loss_f
 from bsvae.utils.datasets import get_dataloaders
 from bsvae.utils.helpers import (
     set_seed,
