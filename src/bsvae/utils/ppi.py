@@ -9,6 +9,7 @@ import os
 import gzip
 import numpy as np
 import pandas as pd
+import networkx as nx
 import urllib.request
 import scipy.sparse as sp
 
@@ -18,9 +19,9 @@ DEFAULT_CACHE_DIR = os.path.expanduser(
 )
 
 STRING_URL_TEMPLATE = (
-    "https://stringdb-static.org/download/protein.links.detailed.v12.0/{taxid}.protein.links.detailed.v12.0.txt.gz"
+    "https://stringdb-static.org/download/protein.links.detailed.v12.0/"
+    "{taxid}.protein.links.detailed.v12.0.txt.gz"
 )
-
 
 def download_string(taxid: str = "9606", cache_dir: str = DEFAULT_CACHE_DIR) -> str:
     """
@@ -86,65 +87,66 @@ def load_string_ppi(
     return edges
 
 
-def make_laplacian(edges: pd.DataFrame, gene_list: list) -> sp.csr_matrix:
+def build_graph_from_ppi(edges: pd.DataFrame) -> nx.Graph:
+    """
+    Build a NetworkX graph from STRING edges.
+    """
+    G = nx.Graph()
+    for _, row in df.iterrows():
+        G.add_edge(row['protein1'], row['protein2'], weight=row["score"])
+    return G
+
+
+def graph_to_laplacian(G: nx.Graph, gene_list: list, sparse: bool = True,
+                       dtype: torch.dtype = torch.float32):
     """
     Construct normalized Laplacian aligned to a gene list.
 
     Parameters
     ----------
-    edges : pd.DataFrame
-        Columns: [protein1, protein2, score]
+    G : nx.Graph
+        Graph built from PPI.
     gene_list : list
         Ordered list of gene identifiers (Ensembl IDs recommended).
-
-    Returns
-    -------
-    L : scipy.sparse.csr_matrix
-        Laplacian (G x G).
+    sparse : bool
+        Whether to return sparse or dense Laplacian.
+    dtype : torch.dtype
+        Torch dtype for output tensor.
     """
-    gene_to_idx = {g: i for i, g in enumerate(gene_list)}
-    G = len(gene_list)
-
-    row, col, data = [], [], []
-    for _, (g1, g2, w) in edges.iterrows():
-        if g1 in gene_to_idx and g2 in gene_to_idx:
-            i, j = gene_to_idx[g1], gene_to_idx[g2]
-            row.extend([i, j])
-            col.extend([j, i])
-            data.extend([w, w])
-
-    A = sp.csr_matrix((data, (row, col)), shape=(G, G))
-
+    # Reindex graph adjacency to gene_list order
+    A = nx.to_scipy_sparse_array(G, nodelist=gene_list, weight="weight", dtype=np.float32)
     deg = np.array(A.sum(1)).ravel()
     D = sp.diags(deg)
     L = D - A
-    return L
+
+    if sparse:
+        coo = L.tocoo()
+        indices = torch.tensor([coo.row, coo.col], dtype=torch.long)
+        values = torch.tensor(coo.data, dtype=dtype)
+        L_torch = torch.sparse_coo_tensor(indices, values, coo.shape)
+        return L_torch.coalesce()
+    else:
+        return torch.tensor(L.toarray(), dtype=dtype)
 
 
 def load_ppi_laplacian(
         gene_list: list, taxid: str = "9606",
         min_score: int = 700,
-        cache_dir: str = DEFAULT_CACHE_DIR
-) -> sp.csr_matrix:
+        cache_dir: str = DEFAULT_CACHE_DIR,
+        sparse: bool = True
+):
     """
-    Convenience: download STRING → filter → Laplacian.
-
-    Parameters
-    ----------
-    gene_list : list
-        Genes in training data.
-    taxid : str
-        NCBI taxonomy ID (default: "9606"=human).
-    min_score : int
-        Minimum edge score (default: 700).
-    cache_dir : str
-        Local cache directory.
+    Convenience: download STRING → filter → Graph → Laplacian.
 
     Returns
     -------
-    L : scipy.sparse.csr_matrix
+    L : torch.Tensor
         Laplacian aligned with `gene_list`.
+    G : nx.Graph
+        Underlying PPI graph.
     """
     edges = load_string_ppi(taxid=taxid, min_score=min_score,
                             cache_dir=cache_dir)
-    return make_laplacian(edges, gene_list)
+    G = build_graph(edges)
+    L = graph_to_laplacian(G, gene_list, sparse=sparse)
+    return L, G

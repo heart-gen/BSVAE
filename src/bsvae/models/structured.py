@@ -37,7 +37,8 @@ class StructuredFactorVAE(BaseVAE):
                  hidden_dims=None, dropout: float = 0.1,
                  mask: torch.Tensor = None,
                  init_sd: float = 0.02,
-                 learn_var: bool = False):
+                 learn_var: bool = False,
+                 L: torch.Tensor = None):
         super().__init__(n_genes, n_latent)
 
         self.encoder = StructuredEncoder(
@@ -53,6 +54,7 @@ class StructuredFactorVAE(BaseVAE):
             init_sd=init_sd,
             learn_var=learn_var
         )
+        self.laplacian_matrix = L
 
     def forward(self, x: torch.Tensor):
         mu, logvar = self.encoder(x)
