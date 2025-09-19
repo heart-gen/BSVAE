@@ -126,3 +126,37 @@ def test_main_training_and_eval(monkeypatch, tmp_path, fake_dataset_csv):
     )
 
     main.main(args)  # should run without error
+
+
+def test_cli_entrypoint(monkeypatch, tmp_path, fake_dataset_csv):
+    """Test CLI-level call with sys.argv patched."""
+
+    # Reuse mocks from above
+    monkeypatch.setattr(main, "get_dataloaders",
+                        lambda *a, **k: torch.utils.data.DataLoader(
+                            [(torch.randn(3), "g1")], batch_size=1))
+    monkeypatch.setattr(main, "Trainer",
+                        lambda *a, **k: type("T", (), {"model": torch.nn.Linear(3, 2), "__call__": lambda s,*a,**k: None})())
+    monkeypatch.setattr(main, "Evaluator",
+                        lambda *a, **k: type("E", (), {"__call__": lambda s,*a,**k: {"loss": 0.0}})())
+    monkeypatch.setattr(main, "save_model", lambda *a, **k: None)
+    monkeypatch.setattr(main, "load_model", lambda *a, **k: torch.nn.Linear(3, 2))
+    monkeypatch.setattr(main, "load_metadata", lambda *a, **k: {"dummy": True})
+    monkeypatch.setattr(main, "load_ppi_laplacian", lambda *a, **k: (None, None))
+
+    # Write a minimal config file
+    ini = tmp_path / "hyper.ini"
+    with open(ini, "w") as f:
+        f.write("[Custom]\nseed=42\nno_cuda=True\n")
+
+    sys_argv_backup = sys.argv[:]
+    sys.argv = [
+        "main.py",
+        "exp_cli",
+        "--config", str(ini),
+        "--gene-expression-filename", fake_dataset_csv,
+    ]
+    try:
+        main.cli()  # Should run end-to-end
+    finally:
+        sys.argv = sys_argv_backup
