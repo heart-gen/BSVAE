@@ -86,12 +86,22 @@ class Trainer:
         return epoch_loss / len(data_loader)
 
     def _train_iteration(self, x, storer):
-        recon_x, mu, logvar, z, log_var = self.model(x)
+        x = x.to(self.device)
+        if hasattr(self.loss_f, "call_optimize"):
+            loss = self.loss_f.call_optimize(data, self.model,
+                                             self.optimizer, storer)
+        else:
+            recon_x, mu, logvar, z, log_var = self.model(x)
+            loss = self.loss_f(
+                x, recon_x, mu, logvar, self.model.decoder,
+                L=getattr(self.model, "laplacian_matrix", None),
+                storer=storer, is_train=self.model.training
+            )
 
-        loss = self.loss_f(
-            x, recon_x, mu, logvar, self.model.decoder,
-            L=None, storer=storer, is_train=self.model.training
-        )
+            if hasattr(self.model, "l1_strength"):
+                storer.setdefault("l1_strength", []).append(self.model.l1_strength)
+            if hasattr(self.model, "lap_strength"):
+                storer.setdefault("lap_strength", []).append(self.model.lap_strength)
 
         self.optimizer.zero_grad()
         loss.backward()

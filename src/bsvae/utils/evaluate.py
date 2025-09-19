@@ -52,7 +52,6 @@ class Evaluator:
 
     def compute_losses(self, dataloader):
         storer = defaultdict(list)
-
         with torch.no_grad():
             for data in tqdm(dataloader, leave=False,
                              disable=not self.is_progress_bar):
@@ -60,11 +59,20 @@ class Evaluator:
                     data = data[0]
                 data = data.to(self.device)
 
-                recon_x, mu, logvar, z, log_var = self.model(data)
-                _ = self.loss_f(
-                    data, recon_x, mu, logvar, self.model.decoder,
-                    L=None, storer=storer, is_train=False
-                )
+                if hasattr(self.loss_f, "call_optimize"):
+                    _ = self.loss_f.call_optimize(data, self.model, None, storer)
+                else:
+                    recon_batch, mu, logvar, z, log_var = self.model(data)
+                    _ = self.loss_f(data, recon_batch, mu, logvar,
+                                    self.model.decoder,
+                                    L=getattr(self.model, "laplacian_matrix", None),
+                                    is_train=self.model.training,
+                                    storer=storer)
+
+                    if hasattr(self.model, "l1_strength"):
+                        storer.setdefault("l1_strength", []).append(self.model.l1_strength)
+                    if hasattr(self.model, "lap_strength"):
+                        storer.setdefault("lap_strength", []).append(self.model.lap_strength)
 
         losses = {k: sum(v) / len(v) for k, v in storer.items()}
         return losses
