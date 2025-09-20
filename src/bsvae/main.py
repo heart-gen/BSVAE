@@ -66,8 +66,8 @@ def parse_arguments(cli_args):
 
     # General
     parser.add_argument("name", type=str, help="Experiment name.")
-    parser.add_argument("--seed", type=int, default=default_config["seed"])
-    parser.add_argument("--no-cuda", action="store_true", default=default_config["no_cuda"])
+    parser.add_argument("--seed", type=int, default=config["seed"])
+    parser.add_argument("--no-cuda", action="store_true", default=config["no_cuda"])
 
     # Training
     parser.add_argument("--epochs", type=int, default=config.get("epochs", 100))
@@ -139,7 +139,7 @@ def setup_logging():
 def main(args):
     logger = setup_logging()
     set_seed(args.seed)
-    device = get_device(is_gpu=not args.no_cuda)
+    device = get_device(use_gpu=not args.no_cuda)
     exp_dir = join(RES_DIR, args.name)
     logger.info(f"Experiment directory: {exp_dir}")
 

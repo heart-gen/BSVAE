@@ -55,6 +55,7 @@ class BaseLoss(nn.Module):
                 x: torch.Tensor, recon_x: torch.Tensor,
                 mu: torch.Tensor, logvar: torch.Tensor,
                 model: nn.Module,
+                L: Optional[torch.Tensor] = None,
                 storer: Optional[Dict[str, list]] = None,
                 is_train: bool = True) -> torch.Tensor:
         """

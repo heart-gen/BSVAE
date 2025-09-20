@@ -40,7 +40,8 @@ class StructuredFactorVAE(BaseVAE):
                  learn_var: bool = False,
                  L: torch.Tensor = None):
         super().__init__(n_genes, n_latent)
-
+        self.hidden_dims = hidden_dims or [512, 256, 128]
+        self.dropout = dropout
         self.encoder = StructuredEncoder(
             n_genes=n_genes,
             n_latent=n_latent,
