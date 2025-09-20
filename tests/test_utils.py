@@ -42,8 +42,8 @@ def test_geneexpression_split_and_presplit(tmp_path):
 
 
 def test_get_dataloaders(tmp_path):
-    df = pd.DataFrame(np.random.randn(6, 3),
-                      index=[f"g{i}" for i in range(6)],
+    df = pd.DataFrame(np.random.randn(36, 3),
+                      index=[f"g{i}" for i in range(36)],
                       columns=[f"s{i}" for i in range(3)])
     csv_path = tmp_path / "expr.csv"
     df.to_csv(csv_path)
