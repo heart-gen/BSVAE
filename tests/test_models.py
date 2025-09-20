@@ -86,7 +86,7 @@ def test_losses_end_to_end():
 
     loss_f = BaseLoss(beta=1.0, l1_strength=1e-2, lap_strength=1e-3)
     storer = {}
-    loss = loss_f(x, recon_x, mu, logvar, vae, storer)
+    loss = loss_f(x, recon_x, mu, logvar, vae, storer=storer)
 
     assert torch.is_tensor(loss)
     assert loss.dim() == 0
