@@ -63,8 +63,7 @@ class Evaluator:
                     _ = self.loss_f.call_optimize(data, self.model, None, storer)
                 else:
                     recon_batch, mu, logvar, z, log_var = self.model(data)
-                    _ = self.loss_f(data, recon_batch, mu, logvar,
-                                    self.model.decoder,
+                    _ = self.loss_f(data, recon_batch, mu, logvar, self.model,
                                     L=getattr(self.model, "laplacian_matrix", None),
                                     is_train=self.model.training,
                                     storer=storer)

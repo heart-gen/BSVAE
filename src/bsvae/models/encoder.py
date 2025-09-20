@@ -28,9 +28,8 @@ class StructuredEncoder(nn.Module):
         super().__init__()
         self.n_genes = n_genes
         self.n_latent = n_latent
-
-        if hidden_dims is None:
-            hidden_dims = [512, 256, 128]
+        self.hidden_dims = hidden_dims if hidden_dims is not None else [512, 256, 128]
+        self.dropout = dropout
 
         # Build feedforward encoder network
         modules = []

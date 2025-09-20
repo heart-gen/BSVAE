@@ -86,8 +86,8 @@ def parse_arguments(cli_args):
                         default=config.get("dropout", 0.1))
     parser.add_argument("--learn-var", action="store_true",
                         default=config.get("learn_var", False))
-    # parser.add_argument("--init-sd", type=float,
-    #                     default=config.get("init_sd", 0.02))
+    parser.add_argument("--init-sd", type=float,
+                        default=config.get("init_sd", 0.02))
 
     # Loss
     parser.add_argument("--loss", type=str, default=config.get("loss", "VAE"),
