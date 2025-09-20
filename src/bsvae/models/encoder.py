@@ -34,7 +34,7 @@ class StructuredEncoder(nn.Module):
         # Build feedforward encoder network
         modules = []
         input_dim = n_genes
-        for h_dim in hidden_dims:
+        for h_dim in self.hidden_dims:
             modules.append(nn.Linear(input_dim, h_dim))
             modules.append(nn.ReLU())
             if dropout > 0:

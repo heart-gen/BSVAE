@@ -93,7 +93,7 @@ class Trainer:
         else:
             recon_x, mu, logvar, z, log_var = self.model(x)
             loss = self.loss_f(
-                x, recon_x, mu, logvar, self.model.decoder,
+                x, recon_x, mu, logvar, self.model,
                 L=getattr(self.model, "laplacian_matrix", None),
                 storer=storer, is_train=self.model.training
             )

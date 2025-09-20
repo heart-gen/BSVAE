@@ -108,9 +108,9 @@ class BaseLoss(nn.Module):
         if storer is not None:
             storer.setdefault("recon_loss", []).append(recon_loss.item())
             storer.setdefault("kl_loss", []).append(kl_loss.item())
-            storer.setdefault("sparsity_loss", []).append(float(sparsity_loss))
+            storer.setdefault("sparsity_loss", []).append(sparsity_loss.detach().item())
             if model.laplacian_matrix is not None:
-                storer.setdefault("laplacian_loss", []).append(float(laplacian_loss))
+                storer.setdefault("laplacian_loss", []).append(laplacian_loss.detach().item())
             storer.setdefault("loss", []).append(loss.item())
 
         return loss

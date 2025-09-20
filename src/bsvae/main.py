@@ -66,8 +66,9 @@ def parse_arguments(cli_args):
 
     # General
     parser.add_argument("name", type=str, help="Experiment name.")
-    parser.add_argument("--seed", type=int, default=config["seed"])
-    parser.add_argument("--no-cuda", action="store_true", default=config["no_cuda"])
+    parser.add_argument("--seed", type=int, default=config.get("seed", 13))
+    parser.add_argument("--no-cuda", action="store_true",
+                        default=config.get("no_cuda", False))
 
     # Training
     parser.add_argument("--epochs", type=int, default=config.get("epochs", 100))
@@ -75,7 +76,7 @@ def parse_arguments(cli_args):
                         default=config.get("batch_size", 64))
     parser.add_argument("--lr", type=float, default=config.get("lr", 5e-4))
     parser.add_argument("--checkpoint-every", type=int,
-                        default=config.get("checkpoint_every"))
+                        default=config.get("checkpoint_every", 10))
 
     # Model
     parser.add_argument("--latent-dim", "-z", type=int,
