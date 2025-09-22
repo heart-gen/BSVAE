@@ -93,7 +93,7 @@ def build_graph_from_ppi(edges: pd.DataFrame) -> nx.Graph:
     Build a NetworkX graph from STRING edges.
     """
     G = nx.Graph()
-    for _, row in df.iterrows():
+    for _, row in edges.iterrows():
         G.add_edge(row['protein1'], row['protein2'], weight=row["score"])
     return G
 
