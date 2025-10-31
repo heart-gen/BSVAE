@@ -148,6 +148,6 @@ def load_ppi_laplacian(
     """
     edges = load_string_ppi(taxid=taxid, min_score=min_score,
                             cache_dir=cache_dir)
-    G = build_graph(edges)
+    G = build_graph_from_ppi(edges)
     L = graph_to_laplacian(G, gene_list, sparse=sparse)
     return L, G
