@@ -1,24 +1,58 @@
 #!/usr/bin/env bash
 
-# RUN every element in the blocks in parallel ! Remove `&` at the end if don't
-# want all in parallel
+set -euo pipefail
 
-logger="train_all.out"
-echo "STARTING" > $logger
-for loss in  betaB #factor btcvae betaH VAE
-do
-    echo " " >> $logger
-    echo $loss >> $logger
-    for dataset in dsprites celeba chairs mnist
-    do
-        echo $dataset >> $logger
-        python main.py "$loss"_"$dataset" -x "$loss"_"$dataset"  --no-progress-bar &
-    done
-    wait
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="${PYTHONPATH:-}:${REPO_ROOT}/src"
+PYTHON_BIN="${PYTHON:-python}"
+CONFIG_PATH="${BSVAE_CONFIG:-${REPO_ROOT}/src/bsvae/hyperparam.ini}"
+
+if [[ ! -f "${CONFIG_PATH}" ]]; then
+    echo "Config file not found: ${CONFIG_PATH}" >&2
+    exit 1
+fi
+
+DATA_ARGS=()
+if [[ -n "${BSVAE_GENE_DIR:-}" ]]; then
+    if [[ ! -d "${BSVAE_GENE_DIR}" ]]; then
+        echo "Gene expression directory not found: ${BSVAE_GENE_DIR}" >&2
+        exit 1
+    fi
+    DATA_ARGS+=("--gene-expression-dir" "${BSVAE_GENE_DIR}")
+elif [[ -n "${BSVAE_GENE_FILE:-}" ]]; then
+    if [[ ! -f "${BSVAE_GENE_FILE}" ]]; then
+        echo "Gene expression file not found: ${BSVAE_GENE_FILE}" >&2
+        exit 1
+    fi
+    DATA_ARGS+=("--gene-expression-filename" "${BSVAE_GENE_FILE}")
+else
+    cat >&2 <<'MSG'
+Set BSVAE_GENE_DIR or BSVAE_GENE_FILE to point to gene expression data.
+BSVAE_GENE_DIR should contain X_train.csv and X_test.csv.
+MSG
+    exit 1
+fi
+
+IFS=' ' read -r -a SECTIONS <<< "${BSVAE_TRAIN_SECTIONS:-VAE_genenet beta_genenet}"
+if [[ ${#SECTIONS[@]} -eq 0 ]]; then
+    echo "No config sections supplied via BSVAE_TRAIN_SECTIONS." >&2
+    exit 1
+fi
+
+LOGGER="${REPO_ROOT}/train_all.out"
+: > "${LOGGER}"
+
+for section in "${SECTIONS[@]}"; do
+    exp_name="${BSVAE_EXPERIMENT_PREFIX:-}${section}"
+    {
+        echo
+        echo "Training section: ${section}";
+        echo "Experiment name: ${exp_name}";
+    } >> "${LOGGER}"
+
+    "${PYTHON_BIN}" -m bsvae.main "${exp_name}" \
+        --config "${CONFIG_PATH}" \
+        --section "${section}" \
+        "${DATA_ARGS[@]}" \
+        "$@"
 done
-
-echo "best_celeba" >> $logger
-python main.py best_celeba -x best_celeba --no-progress-bar &
-
-echo "best_dsprites" >> $logger
-python main.py best_dsprites -x best_dsprites --no-progress-bar

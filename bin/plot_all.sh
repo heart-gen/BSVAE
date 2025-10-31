@@ -1,83 +1,90 @@
 #!/usr/bin/env bash
 
-# RUN every element in the blocks in parallel ! Remove `&` at the end if don't
-# want all in parallel
+set -euo pipefail
 
-logger="plot_all.out"
-echo "STARTING" > $logger
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="${PYTHONPATH:-}:${REPO_ROOT}/src"
+PYTHON_BIN="${PYTHON:-python}"
+OUTPUT_FILE="${BSVAE_SUMMARY_FILE:-${REPO_ROOT}/results/metrics_summary.csv}"
 
+IFS=' ' read -r -a SECTIONS <<< "${BSVAE_SUMMARY_SECTIONS:-VAE_genenet beta_genenet}"
+if [[ ${#SECTIONS[@]} -eq 0 ]]; then
+    echo "No config sections supplied via BSVAE_SUMMARY_SECTIONS." >&2
+    exit 1
+fi
 
-# many idcs sameas https://github.com/1Konny/FactorVAE/blob/master/solver.py
-# to compare
-cherry_celeba_idcs="88413 176606 179144 32260 191281 143307 101535 70059 87889 131612 "
-cherry_mnist_idcs="1 40 25 7 92 41001 90 41002 823 41219" # take every number in order
-cherry_dsprites_idcs="92595 339150 656090" #take every shape: square ellipse heart
-cherry_chairs_idcs="40919 5172 22330"
-
-
-echo "### GIF GRID ###" >> $logger
-kwargs="-s 1234 -c 3 -r 5 -t 2"
-for loss in factor btcvae betaB betaH VAE
-do
-    echo " " >> $logger
-    echo $loss >> $logger
-
-    python main_viz.py "$loss"_celeba gif-traversals -i $cherry_celeba_idcs $kwargs &
-    python main_viz.py "$loss"_chairs gif-traversals -i $cherry_chairs_idcs $kwargs &
-    python main_viz.py "$loss"_mnist gif-traversals -u 2 -i $cherry_mnist_idcs $kwargs &
-    python main_viz.py "$loss"_dsprites gif-traversals -i $cherry_dsprites_idcs $kwargs &
-
-    wait
+EXPERIMENTS=()
+for section in "${SECTIONS[@]}"; do
+    EXPERIMENTS+=("${BSVAE_EXPERIMENT_PREFIX:-}${section}")
 done
 
-python << END
-from utils.viz_helpers import plot_grid_gifs
-grid_files = [["results/{}_{}/posterior_traversals.gif".format(loss,data)
-               for data in ["dsprites","celeba","chairs", "mnist"]]
-              for loss in ["VAE", "betaH", "betaB", "factor", "btcvae"]]
-plot_grid_gifs("results/grid_posteriors.gif", grid_files)
-END
+LOGGER="${REPO_ROOT}/plot_all.out"
+: > "${LOGGER}"
 
+printf "Generating metrics summary for %s\n" "${EXPERIMENTS[*]}" | tee -a "${LOGGER}"
 
-# Has to do geenral plots after the gif grid as don't want the previous temporary plots
-echo "### General Plots ###" >> $logger
-kwargs="-s 1234 -c 10 -r 10 -t 2 --is-show-loss --is-posterior"
-for loss in  factor btcvae betaB betaH VAE
-do
-    echo " " >> $logger
-    echo $loss >> $logger
-
-    python main_viz.py "$loss"_celeba all -i $cherry_celeba_idcs $kwargs &
-    python main_viz.py "$loss"_chairs all -i $cherry_chairs_idcs $kwargs &
-    python main_viz.py "$loss"_mnist all -i $cherry_mnist_idcs $kwargs &
-    python main_viz.py "$loss"_dsprites all -i $cherry_dsprites_idcs $kwargs &
-
-    wait
+for exp in "${EXPERIMENTS[@]}"; do
+    if [[ ! -f "${REPO_ROOT}/results/${exp}/test_losses.log" ]]; then
+        echo "Missing evaluation logs for ${exp}; skipping." | tee -a "${LOGGER}" >&2
+    fi
 done
 
-python main_viz.py best_celeba all -i $cherry_celeba_idcs $kwargs
-python main_viz.py best_dsprites all -i $cherry_dsprites_idcs $kwargs
+"${PYTHON_BIN}" - <<'PY' "${OUTPUT_FILE}" "${REPO_ROOT}" "${LOGGER}" "${EXPERIMENTS[@]}"
+import csv
+import os
+import sys
+from typing import Dict, Any
 
+try:
+    import torch
+except ImportError as exc:
+    raise SystemExit(f"torch is required to load evaluation logs: {exc}")
 
-echo "### GIF GRID MUTUAL INFO ###" >> $logger
-kwargs="-s 1234 -c 3 -r 5 -t 2"
-for dataset in dsprites celeba
-do
-    echo " " >> $logger
-    echo $dataset >> $logger
+output_path = sys.argv[1]
+repo_root = sys.argv[2]
+logger_path = sys.argv[3]
+experiments = sys.argv[4:]
 
-    for alpha in -5 -1 0 1 5
-    do
-        cherry=cherry_"$dataset"_idcs
-        python main_viz.py btcvae_"$dataset"_a$alpha gif-traversals -i ${!cherry} $kwargs &
-    done
-    wait
-done
+results_dir = os.path.join(repo_root, "results")
+os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-python << END
-from utils.viz_helpers import plot_grid_gifs
-grid_files = [["results/btcvae_{}_a{}/posterior_traversals.gif".format(data, alpha)
-               for data in ["dsprites","celeba"]]
-              for alpha in [-5, -1, 0, 1, 5]]
-plot_grid_gifs("results/grid_posteriors_mutual_info.gif", grid_files)
-END
+rows = []
+missing = []
+keys = set()
+for exp in experiments:
+    log_path = os.path.join(results_dir, exp, "test_losses.log")
+    if not os.path.exists(log_path):
+        missing.append(exp)
+        continue
+    losses: Dict[str, Any] = torch.load(log_path, map_location="cpu")
+    row = {"experiment": exp}
+    for key, value in sorted(losses.items()):
+        if hasattr(value, "item"):
+            value = value.item()
+        row[key] = float(value)
+        keys.add(key)
+    rows.append(row)
+
+fieldnames = ["experiment"] + sorted(keys)
+with open(output_path, "w", newline="") as csvfile:
+    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+
+with open(logger_path, "a", encoding="utf-8") as log_file:
+    if rows:
+        log_file.write(f"\nWrote summary to {output_path}\n")
+        for row in rows:
+            summary = ", ".join(f"{k}={row.get(k, 'NA')}" for k in fieldnames)
+            log_file.write(summary + "\n")
+    else:
+        log_file.write("\nNo evaluation logs were found.\n")
+    if missing:
+        log_file.write("Missing experiments: " + ", ".join(missing) + "\n")
+
+if missing and len(missing) == len(experiments):
+    raise SystemExit("No metrics available; nothing to summarise.")
+PY
+
+printf "Summary written to %s\n" "${OUTPUT_FILE}" | tee -a "${LOGGER}"
