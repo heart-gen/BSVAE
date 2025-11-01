@@ -1,42 +1,28 @@
-[project]
-name = "bsvae"
-version = 0.0.0
-dynamic = ["version"]
-description = ""
-authors = [
-    {name = "Kynon J Benjamin",email = "kj.benjamin90@gmail.com"}
-]
-readme = "README.md"
-requires-python = ">=3.11,<3.14"
-dependencies = [
-    "torch (>=2.8.0,<3.0.0)",
-    "numpy (<2.3)",
-    "pandas (>=2.3.2,<3.0.0)",
-    "scikit-learn (>=1.7.2,<2.0.0)",
-    "tqdm (>=4.67.1,<5.0.0)",
-    "mygene (>=3.2.2,<4.0.0)",
-    "networkx (>=3.5,<4.0)",
-    "scipy (>=1.16.2,<2.0.0)"
-]
-
-[project.scripts]
-"bsvae-train" = "bsvae.main:cli"
-
 [tool.poetry]
-packages = [{include = "bsvae", from = "src"}]
+name = "bsvae"
+version = "0.0.0"
+description = ""
+readme = "README.md"
+authors = ["Kynon J Benjamin <kj.benjamin90@gmail.com>"]
+packages = [{ include = "bsvae", from = "src" }]
 
-[build-system]
-requires = [
-    "poetry-core>=2.0.0,<3.0.0",
-    "poetry-dynamic-versioning[plugin]"
-]
-build-backend = "poetry_dynamic_versioning.backend"
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+torch = ">=2.8.0,<3.0.0"
+numpy = "<2.3"
+pandas = ">=2.3.2,<3.0.0"
+scikit-learn = ">=1.7.2,<2.0.0"
+tqdm = ">=4.67.1,<5.0.0"
+mygene = ">=3.2.2,<4.0.0"
+networkx = ">=3.5,<4.0"
+scipy = ">=1.16.2,<2.0.0"
 
-[dependency-groups]
-dev = [
-    "pytest (>=8.4.2,<9.0.0)",
-    "pytest-cov (>=7.0.0,<8.0.0)"
-]
+[tool.poetry.scripts]
+bsvae-train = "bsvae.main:cli"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.4.2,<9.0.0"
+pytest-cov = ">=7.0.0,<8.0.0"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -44,4 +30,11 @@ pythonpath = ["src"]
 [tool.poetry-dynamic-versioning]
 enable = true
 style = "pep440"
-dirty = true
+dirty = false
+
+[build-system]
+requires = [
+    "poetry-core>=2.0.0,<3.0.0",
+    "poetry-dynamic-versioning[plugin]"
+]
+build-backend = "poetry_dynamic_versioning.backend"
