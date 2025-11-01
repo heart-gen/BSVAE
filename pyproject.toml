@@ -1,6 +1,6 @@
 [project]
 name = "bsvae"
-version = "0.1.0"
+version = "0.0.0" # placeholder, replaced dynamically
 description = ""
 authors = [
     {name = "Kynon J Benjamin",email = "kj.benjamin90@gmail.com"}
@@ -36,3 +36,8 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+
+[tool.poetry-dynamic-versioning]
+enable = true
+style = "pep440"
+dirty = true
