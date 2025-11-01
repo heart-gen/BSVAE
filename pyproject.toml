@@ -18,6 +18,9 @@ dependencies = [
     "scipy (>=1.16.2,<2.0.0)"
 ]
 
+[project.scripts]
+"bsvae-train" = "bsvae.main:cli"
+
 [tool.poetry]
 packages = [{include = "bsvae", from = "src"}]
 
