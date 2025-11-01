@@ -1,6 +1,6 @@
 [project]
 name = "bsvae"
-version = "0.0.0" # placeholder, replaced dynamically
+dynamic = ["version"]
 description = ""
 authors = [
     {name = "Kynon J Benjamin",email = "kj.benjamin90@gmail.com"}
@@ -25,8 +25,11 @@ dependencies = [
 packages = [{include = "bsvae", from = "src"}]
 
 [build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = [
+    "poetry-core>=2.0.0,<3.0.0",
+    "poetry-dynamic-versioning[plugin]"
+]
+build-backend = "poetry_dynamic_versioning.backend"
 
 [dependency-groups]
 dev = [
