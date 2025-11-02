@@ -17,6 +17,11 @@ mygene = ">=3.2.2,<4.0.0"
 networkx = ">=3.5,<4.0"
 scipy = ">=1.16.2,<2.0.0"
 
+[tool.poetry.urls]
+homepage = "https://bsvae.readthedocs.io/en/latest/"
+repository = "https://github.com/heart-gen/BSVAE"
+"Bug Tracker" = "https://github.com/heart-gen/BSVAE/issues"
+
 [tool.poetry.scripts]
 bsvae-train = "bsvae.main:cli"
 
