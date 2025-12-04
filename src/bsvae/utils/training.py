@@ -114,7 +114,9 @@ class LossesLogger:
     """Write training losses to log file."""
 
     def __init__(self, file_path_name):
-        os.makedirs(os.path.dirname(file_path_name), exist_ok=True)
+        dir_name = os.path.dirname(file_path_name)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
 
         if os.path.isfile(file_path_name):
             try:
