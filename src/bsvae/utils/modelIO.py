@@ -34,7 +34,7 @@ def save_model(model, directory, metadata=None, filename=MODEL_FILENAME):
 
     if metadata is None:
         metadata = dict(
-            model_type="sfvae",
+            model_type="StructuredFactorVAE",
             n_genes=model.encoder.n_genes,
             latent_dim=model.encoder.n_latent,
             hidden_dims=model.encoder.hidden_dims,
@@ -43,6 +43,9 @@ def save_model(model, directory, metadata=None, filename=MODEL_FILENAME):
             l1_strength=getattr(model, "l1_strength", 1e-3),
             lap_strength=getattr(model, "lap_strength", 1e-4),
         )
+    else:
+        metadata = dict(metadata)
+        metadata["model_type"] = _resolve_model_name(metadata)
 
     save_metadata(metadata, directory)
 
@@ -89,6 +92,21 @@ def load_model(directory, is_gpu=True, filename=MODEL_FILENAME):
     return model
 
 
+def _resolve_model_name(metadata):
+    """Resolve the model identifier used in metadata to a canonical name."""
+    model_type = metadata.get("model_type") or metadata.get("model")
+    if model_type is None:
+        return "StructuredFactorVAE"
+
+    if not isinstance(model_type, str):
+        raise ValueError(f"Invalid model_type: {model_type}")
+
+    if model_type.lower() in {"structuredfactorvae", "sfvae"}:
+        return "StructuredFactorVAE"
+
+    raise ValueError(f"Unknown model_type: {model_type}")
+
+
 def load_checkpoints(directory, is_gpu=True):
     """Load all checkpointed models (saved as model-<epoch>.pt)."""
     checkpoints = []
@@ -105,8 +123,7 @@ def load_checkpoints(directory, is_gpu=True):
 
 def _get_model(metadata, device, path_to_model):
     """Instantiate a StructuredFactorVAE from metadata + load weights."""
-    if metadata["model_type"].lower() != "sfvae":
-        raise ValueError(f"Unknown model_type: {metadata['model_type']}")
+    model_type = _resolve_model_name(metadata)
 
     model = StructuredFactorVAE(
         n_genes=metadata["n_genes"],
