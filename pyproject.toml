@@ -19,6 +19,7 @@ scipy = ">=1.16.2,<2.0.0"
 
 [tool.poetry.scripts]
 bsvae-train = "bsvae.main:cli"
+bsvae-download-ppi = "bsvae.ppi_cli:cli"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.4.2,<9.0.0"
