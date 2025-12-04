@@ -55,6 +55,16 @@ bsvae-train EXPERIMENT_NAME [options]
 - `--ppi-taxid` – NCBI taxonomy identifier for the PPI network (default `9606` for human).
 - `--ppi-cache` – Directory where downloaded STRING/IntAct PPI graphs are cached.
 
+## PPI cache downloader
+
+Download a STRING network into the configured cache without launching training:
+
+```bash
+bsvae-download-ppi --taxid 9606 --cache-dir ~/.bsvae/ppi
+```
+
+This command respects the same defaults as `bsvae-train` (taxid `9606`, cache `~/.bsvae/ppi`).
+
 ## Common Workflows
 
 Train with defaults using a CSV:

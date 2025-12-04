@@ -124,6 +124,14 @@ BSVAE supports automatic download & caching of **STRING v12.0 PPI networks**.
   * Fly (`7227`)
 * Cache location defaults to `~/.bsvae/ppi` (override via `--ppi-cache`).
 
+### Prefetch PPI cache from the CLI
+
+Use the lightweight downloader to cache a STRING network ahead of training:
+
+```bash
+poetry run bsvae-download-ppi --taxid 9606 --cache-dir ~/.bsvae/ppi
+```
+
 ---
 
 ## Citation
