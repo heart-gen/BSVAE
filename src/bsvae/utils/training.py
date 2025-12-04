@@ -114,8 +114,15 @@ class LossesLogger:
     """Write training losses to log file."""
 
     def __init__(self, file_path_name):
+        os.makedirs(os.path.dirname(file_path_name), exist_ok=True)
+
         if os.path.isfile(file_path_name):
-            os.remove(file_path_name)
+            try:
+                os.remove(file_path_name)
+            except FileNotFoundError:
+                # The file might disappear between the check and removal
+                # (e.g., when multiple runs share the same directory).
+                pass
 
         self.logger = logging.getLogger("losses_logger")
         self.logger.setLevel(1)  # always store
