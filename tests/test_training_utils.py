@@ -50,5 +50,16 @@ def test_losses_logger_creates_parent_directories(tmp_path):
     assert "loss" in log_path.read_text()
 
 
+def test_losses_logger_allows_bare_filename(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    logger = training.LossesLogger(training.TRAIN_LOSSES_LOGFILE)
+    logger.log(2, {"loss": [4.0, 2.0]})
+
+    log_path = tmp_path / training.TRAIN_LOSSES_LOGFILE
+    assert log_path.exists()
+    assert "loss" in log_path.read_text()
+
+
 # Silence noisy handlers that might persist across tests
 logging.getLogger("losses_logger").handlers.clear()
