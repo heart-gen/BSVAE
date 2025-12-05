@@ -46,6 +46,13 @@ def save_model(model, directory, metadata=None, filename=MODEL_FILENAME):
     else:
         metadata = dict(metadata)
         metadata["model_type"] = _resolve_model_name(metadata)
+        metadata.setdefault("n_genes", model.encoder.n_genes)
+        metadata.setdefault("latent_dim", model.encoder.n_latent)
+        metadata.setdefault("hidden_dims", model.encoder.hidden_dims)
+        metadata.setdefault("dropout", model.encoder.dropout)
+        metadata.setdefault("learn_var", model.decoder.learn_var)
+        metadata.setdefault("l1_strength", getattr(model, "l1_strength", 1e-3))
+        metadata.setdefault("lap_strength", getattr(model, "lap_strength", 1e-4))
 
     save_metadata(metadata, directory)
 
