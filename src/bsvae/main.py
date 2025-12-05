@@ -25,8 +25,6 @@ from bsvae.utils import Trainer, Evaluator
 from bsvae.utils.ppi import load_ppi_laplacian
 from bsvae.utils.modelIO import save_model, load_model, load_metadata
 
-RES_DIR = "results"
-
 def load_config(config_path: str, section: str = "Custom") -> dict:
     """Load hyperparameters from .ini file."""
     parser = ConfigParser()
@@ -66,6 +64,9 @@ def parse_arguments(cli_args):
 
     # General
     parser.add_argument("name", type=str, help="Experiment name.")
+    parser.add_argument("--outdir", type=str,
+                        default=config.get("outdir", "results"),
+                        help="Directory for experiment outputs (default: results).")
     parser.add_argument("--seed", type=int, default=config.get("seed", 13))
     parser.add_argument("--no-cuda", action="store_true",
                         default=config.get("no_cuda", False))
@@ -141,7 +142,7 @@ def main(args):
     logger = setup_logging()
     set_seed(args.seed)
     device = get_device(use_gpu=not args.no_cuda)
-    exp_dir = join(RES_DIR, args.name)
+    exp_dir = join(args.outdir, args.name)
     logger.info(f"Experiment directory: {exp_dir}")
 
     # Training
