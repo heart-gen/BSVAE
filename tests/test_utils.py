@@ -41,6 +41,35 @@ def test_geneexpression_split_and_presplit(tmp_path):
     assert len(ds_pre) == 10
 
 
+def test_geneexpression_supports_compressed(tmp_path):
+    df = pd.DataFrame(
+        np.random.randn(20, 5),
+        index=[f"gene{i}" for i in range(20)],
+        columns=[f"s{i}" for i in range(5)],
+    )
+
+    # Compressed TSV
+    tsv_gz_path = tmp_path / "expr.tsv.gz"
+    df.to_csv(tsv_gz_path, sep="\t", compression="gzip")
+
+    ds_train = datasets.GeneExpression(
+        gene_expression_filename=str(tsv_gz_path), fold_id=0, train=True
+    )
+    ds_test = datasets.GeneExpression(
+        gene_expression_filename=str(tsv_gz_path), fold_id=0, train=False
+    )
+    assert len(ds_train) + len(ds_test) == len(df)
+
+    # Compressed pre-split CSV files
+    split_dir = tmp_path / "split_compressed"
+    split_dir.mkdir()
+    df.iloc[:10].to_csv(split_dir / "X_train.csv.gz", compression="gzip")
+    df.iloc[10:].to_csv(split_dir / "X_test.csv.gz", compression="gzip")
+
+    ds_pre = datasets.GeneExpression(gene_expression_dir=str(split_dir), train=True)
+    assert len(ds_pre) == 10
+
+
 def test_get_dataloaders(tmp_path):
     df = pd.DataFrame(np.random.randn(36, 3),
                       index=[f"g{i}" for i in range(36)],
