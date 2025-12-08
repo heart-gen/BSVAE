@@ -210,6 +210,8 @@ def main(args):
         )
         trainer(train_loader, epochs=int(args.epochs),
                 checkpoint_every=int(args.checkpoint_every))
+        # Persist the input dimension so evaluation can verify compatibility.
+        args.n_genes = n_genes
         save_model(trainer.model, exp_dir, metadata=vars(args))
 
     # Evaluation
@@ -227,6 +229,17 @@ def main(args):
             gene_expression_filename=args.gene_expression_filename,
             gene_expression_dir=args.gene_expression_dir,
         )
+
+        # Validate that evaluation data matches the trained model input size
+        test_n_genes = test_loader.dataset[0][0].shape[-1]
+        expected_genes = metadata.get("n_genes")
+        if expected_genes is not None and test_n_genes != expected_genes:
+            raise ValueError(
+                "Gene dimension mismatch between evaluation data and trained model: "
+                f"data has {test_n_genes} genes but model expects {expected_genes}. "
+                "Please use evaluation data generated with the same gene set used for training "
+                "or point --gene-expression-... to the matching files."
+            )
         loss_f = BaseLoss(beta=args.beta,
                           l1_strength=args.l1_strength,
                           lap_strength=args.lap_strength)

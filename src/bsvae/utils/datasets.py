@@ -107,12 +107,26 @@ class GeneExpression(BaseDataset):
         if gene_expression_filename:
             self.logger.info(f"Loading and splitting from {gene_expression_filename}")
             full_df = self._read_expression_file(gene_expression_filename)
-            kf = KFold(n_splits=10, shuffle=True, random_state=random_state)
-            all_splits = list(kf.split(full_df))
-            if not (0 <= fold_id < 10):
-                raise ValueError(f"fold_id must be between 0 and 9, got {fold_id}")
+
+            # Split across samples (columns) so each dataset item corresponds to a
+            # sample profile (num_genes features).
+            sample_ids = np.array(full_df.columns)
+            n_samples = len(sample_ids)
+            n_splits = min(10, n_samples)
+            if n_splits < 2:
+                raise ValueError(
+                    "At least two samples are required to create train/test splits; "
+                    f"found {n_samples}."
+                )
+            kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+            all_splits = list(kf.split(sample_ids))
+            if not (0 <= fold_id < n_splits):
+                raise ValueError(
+                    f"fold_id must be between 0 and {n_splits - 1}, got {fold_id}"
+                )
             train_idx, test_idx = all_splits[fold_id]
-            self.dfx = full_df.iloc[train_idx] if train else full_df.iloc[test_idx]
+            chosen_samples = sample_ids[train_idx] if train else sample_ids[test_idx]
+            self.dfx = full_df[chosen_samples]
         else:
             self.logger.info(f"Loading pre-split data from {gene_expression_dir}")
             fname = "X_train" if train else "X_test"
