@@ -55,7 +55,11 @@ class StructuredFactorVAE(BaseVAE):
             init_sd=init_sd,
             learn_var=learn_var
         )
-        self.laplacian_matrix = L
+        if L is not None:
+            # Register Laplacian so it moves with the model across devices
+            self.register_buffer("laplacian_matrix", L)
+        else:
+            self.laplacian_matrix = None
 
     def forward(self, x: torch.Tensor):
         mu, logvar = self.encoder(x)
