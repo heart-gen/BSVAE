@@ -218,14 +218,14 @@ def main(args):
     if not args.no_test:
         model = load_model(exp_dir, is_gpu=not args.no_cuda)
         metadata = load_metadata(exp_dir)
-        eval_batch_size = args.eval_batchsize or args.batch_size
+        eval_batch_size = args.eval_batchsize or ( args.batch_size // 2 )
         test_loader = get_dataloaders(
             dataset="genenet",
             batch_size=eval_batch_size,
             shuffle=False,
             logger=logger,
             train=False,
-            drop_last=True,
+            drop_last=False,
             gene_expression_filename=args.gene_expression_filename,
             gene_expression_dir=args.gene_expression_dir,
         )
