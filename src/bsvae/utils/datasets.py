@@ -72,17 +72,17 @@ class GeneExpression(BaseDataset):
 
     Two modes:
     1. Splitting Mode:
-       Provide `gene_expression_filename` (CSV: genes × samples).
+       Provide `gene_expression_filename` (CSV/TSV: genes × samples).
        -> Creates reproducible 10-fold splits.
     2. Pre-split Mode:
-       Provide `gene_expression_dir` containing 'X_train.csv' and 'X_test.csv'.
+       Provide `gene_expression_dir` containing 'X_train.[csv|tsv]' and 'X_test.[csv|tsv]'.
 
     Parameters
     ----------
     gene_expression_filename : str, optional
-        Path to CSV file with full expression matrix.
+        Path to CSV/TSV file with full expression matrix.
     gene_expression_dir : str, optional
-        Directory containing 'X_train.csv' and 'X_test.csv'.
+        Directory containing 'X_train.[csv|tsv]' and 'X_test.[csv|tsv]'.
     fold_id : int, default=0
         Which CV fold to use (0–9).
     train : bool, default=True
@@ -105,7 +105,7 @@ class GeneExpression(BaseDataset):
 
         if gene_expression_filename:
             self.logger.info(f"Loading and splitting from {gene_expression_filename}")
-            full_df = pd.read_csv(gene_expression_filename, index_col=0)
+            full_df = self._read_expression_file(gene_expression_filename)
             kf = KFold(n_splits=10, shuffle=True, random_state=random_state)
             all_splits = list(kf.split(full_df))
             if not (0 <= fold_id < 10):
@@ -114,11 +114,14 @@ class GeneExpression(BaseDataset):
             self.dfx = full_df.iloc[train_idx] if train else full_df.iloc[test_idx]
         else:
             self.logger.info(f"Loading pre-split data from {gene_expression_dir}")
-            fname = "X_train.csv" if train else "X_test.csv"
-            path = os.path.join(gene_expression_dir, fname)
-            if not os.path.exists(path):
-                raise FileNotFoundError(f"Expected {path} not found.")
-            self.dfx = pd.read_csv(path, index_col=0)
+            fname = "X_train" if train else "X_test"
+            path = self._find_split_file(gene_expression_dir, fname)
+            if not path:
+                raise FileNotFoundError(
+                    f"Expected {fname}.csv or {fname}.tsv not found in "
+                    f"{gene_expression_dir}."
+                )
+            self.dfx = self._read_expression_file(path)
 
         # Convert to tensor
         self.data = torch.from_numpy(self.dfx.values.astype(np.float32))
@@ -141,3 +144,24 @@ class GeneExpression(BaseDataset):
     def download(self):
         """No-op (not applicable)."""
         pass
+
+    def _read_expression_file(self, path):
+        """Read a CSV or TSV expression matrix with gene IDs as index."""
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".csv":
+            sep = ","
+        elif ext == ".tsv":
+            sep = "\t"
+        else:
+            raise ValueError(
+                f"Unsupported file extension '{ext}'. Only .csv and .tsv are supported."
+            )
+        return pd.read_csv(path, index_col=0, sep=sep)
+
+    def _find_split_file(self, directory, base_name):
+        """Locate a split file with either CSV or TSV extension."""
+        for ext in (".csv", ".tsv"):
+            candidate = os.path.join(directory, f"{base_name}{ext}")
+            if os.path.exists(candidate):
+                return candidate
+        return None
