@@ -150,7 +150,14 @@ def _get_model(metadata, device, path_to_model):
     # buffer that is not registered in newly instantiated models unless a
     # Laplacian matrix is provided at construction time.
     if "laplacian_matrix" in state_dict:
-        model.register_buffer("laplacian_matrix", state_dict["laplacian_matrix"])
+        laplacian = state_dict["laplacian_matrix"]
+        if "laplacian_matrix" not in model._buffers:
+            # Remove placeholder attribute from __init__ so the buffer can be registered
+            if hasattr(model, "laplacian_matrix"):
+                delattr(model, "laplacian_matrix")
+            model.register_buffer("laplacian_matrix", laplacian)
+        else:
+            model.laplacian_matrix = laplacian
 
     model.load_state_dict(state_dict)
     model.eval()
