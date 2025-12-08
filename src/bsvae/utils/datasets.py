@@ -4,6 +4,7 @@ import logging
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold
+from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -118,8 +119,8 @@ class GeneExpression(BaseDataset):
             path = self._find_split_file(gene_expression_dir, fname)
             if not path:
                 raise FileNotFoundError(
-                    f"Expected {fname}.csv or {fname}.tsv not found in "
-                    f"{gene_expression_dir}."
+                    f"Expected {fname} with .csv or .tsv extension (optionally "
+                    f"compressed) not found in {gene_expression_dir}."
                 )
             self.dfx = self._read_expression_file(path)
 
@@ -147,21 +148,25 @@ class GeneExpression(BaseDataset):
 
     def _read_expression_file(self, path):
         """Read a CSV or TSV expression matrix with gene IDs as index."""
-        ext = os.path.splitext(path)[1].lower()
-        if ext == ".csv":
-            sep = ","
-        elif ext == ".tsv":
+        suffixes = [s.lower() for s in Path(path).suffixes]
+
+        # Preserve backward compatibility with compressed files (e.g., .csv.gz)
+        if ".tsv" in suffixes:
             sep = "\t"
         else:
-            raise ValueError(
-                f"Unsupported file extension '{ext}'. Only .csv and .tsv are supported."
-            )
+            # Default to CSV separator even if the extension is missing so pandas
+            # can still infer compression and handle the file.
+            sep = ","
+
         return pd.read_csv(path, index_col=0, sep=sep)
 
     def _find_split_file(self, directory, base_name):
-        """Locate a split file with either CSV or TSV extension."""
-        for ext in (".csv", ".tsv"):
-            candidate = os.path.join(directory, f"{base_name}{ext}")
-            if os.path.exists(candidate):
-                return candidate
+        """Locate a split file with CSV/TSV extension (optionally compressed)."""
+
+        compression_exts = ["", ".gz", ".bz2", ".zip", ".xz"]
+        for base_ext in (".csv", ".tsv"):
+            for comp_ext in compression_exts:
+                candidate = os.path.join(directory, f"{base_name}{base_ext}{comp_ext}")
+                if os.path.exists(candidate):
+                    return candidate
         return None
