@@ -46,8 +46,10 @@ class Trainer:
         self.save_dir = save_dir
         self.is_progress_bar = is_progress_bar
         self.logger = logger
-        self.losses_logger = LossesLogger(os.path.join(self.save_dir,
-                                                       TRAIN_LOSSES_LOGFILE))
+        self.losses_logger = LossesLogger(
+            os.path.join(self.save_dir, TRAIN_LOSSES_LOGFILE),
+            log_level=self.logger.level,
+        )
         self.logger.info(f"Training Device: {self.device}")
 
     def __call__(self, data_loader, epochs=10, checkpoint_every=10):
@@ -113,7 +115,7 @@ class Trainer:
 class LossesLogger:
     """Write training losses to log file."""
 
-    def __init__(self, file_path_name):
+    def __init__(self, file_path_name, log_level=logging.DEBUG):
         dir_name = os.path.dirname(file_path_name)
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
@@ -127,9 +129,9 @@ class LossesLogger:
                 pass
 
         self.logger = logging.getLogger("losses_logger")
-        self.logger.setLevel(1)  # always store
+        self.logger.setLevel(log_level)
         file_handler = logging.FileHandler(file_path_name)
-        file_handler.setLevel(1)
+        file_handler.setLevel(logging.NOTSET)
         self.logger.addHandler(file_handler)
         self.logger.debug("Epoch,Loss,Value")
 

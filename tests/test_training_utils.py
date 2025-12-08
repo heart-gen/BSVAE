@@ -61,5 +61,15 @@ def test_losses_logger_allows_bare_filename(tmp_path, monkeypatch):
     assert "loss" in log_path.read_text()
 
 
+def test_losses_logger_respects_log_level(tmp_path):
+    log_path = tmp_path / training.TRAIN_LOSSES_LOGFILE
+
+    logger = training.LossesLogger(str(log_path), log_level=logging.INFO)
+    logger.log(3, {"loss": [1.0]})
+
+    assert log_path.exists()
+    assert log_path.read_text() == ""
+
+
 # Silence noisy handlers that might persist across tests
 logging.getLogger("losses_logger").handlers.clear()
