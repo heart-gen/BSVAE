@@ -210,6 +210,8 @@ def main(args):
         )
         trainer(train_loader, epochs=int(args.epochs),
                 checkpoint_every=int(args.checkpoint_every))
+        # Persist the input dimension so evaluation can verify compatibility.
+        args.n_genes = n_genes
         save_model(trainer.model, exp_dir, metadata=vars(args))
 
     # Evaluation
