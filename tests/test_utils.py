@@ -19,9 +19,13 @@ from bsvae.models.losses import BaseLoss
 # --------------------------
 def test_geneexpression_split_and_presplit(tmp_path):
     # Create fake CSV (genes x samples)
-    df = pd.DataFrame(np.random.randn(20, 5),
-                      index=[f"gene{i}" for i in range(20)],
-                      columns=[f"s{i}" for i in range(5)])
+    n_genes = 20
+    n_samples = 12
+    df = pd.DataFrame(
+        np.random.randn(n_genes, n_samples),
+        index=[f"gene{i}" for i in range(n_genes)],
+        columns=[f"s{i}" for i in range(n_samples)],
+    )
     csv_path = tmp_path / "expr.csv"
     df.to_csv(csv_path)
 
@@ -29,23 +33,28 @@ def test_geneexpression_split_and_presplit(tmp_path):
                                        fold_id=0, train=True)
     ds_test = datasets.GeneExpression(gene_expression_filename=str(csv_path),
                                       fold_id=0, train=False)
-    assert len(ds_train) + len(ds_test) == len(df)
+    assert len(ds_train) + len(ds_test) == n_samples
+    assert ds_train[0][0].shape[0] == n_genes
 
     # Pre-split mode
     split_dir = tmp_path / "split"
     split_dir.mkdir()
-    df.iloc[:10].to_csv(split_dir / "X_train.csv")
-    df.iloc[10:].to_csv(split_dir / "X_test.csv")
+    train_samples = df.columns[:8]
+    test_samples = df.columns[8:]
+    df[train_samples].to_csv(split_dir / "X_train.csv")
+    df[test_samples].to_csv(split_dir / "X_test.csv")
 
     ds_pre = datasets.GeneExpression(gene_expression_dir=str(split_dir), train=True)
-    assert len(ds_pre) == 10
+    assert len(ds_pre) == len(train_samples)
 
 
 def test_geneexpression_supports_compressed(tmp_path):
+    n_genes = 20
+    n_samples = 12
     df = pd.DataFrame(
-        np.random.randn(20, 5),
-        index=[f"gene{i}" for i in range(20)],
-        columns=[f"s{i}" for i in range(5)],
+        np.random.randn(n_genes, n_samples),
+        index=[f"gene{i}" for i in range(n_genes)],
+        columns=[f"s{i}" for i in range(n_samples)],
     )
 
     # Compressed TSV
@@ -58,16 +67,19 @@ def test_geneexpression_supports_compressed(tmp_path):
     ds_test = datasets.GeneExpression(
         gene_expression_filename=str(tsv_gz_path), fold_id=0, train=False
     )
-    assert len(ds_train) + len(ds_test) == len(df)
+    assert len(ds_train) + len(ds_test) == n_samples
+    assert ds_train[0][0].shape[0] == n_genes
 
     # Compressed pre-split CSV files
     split_dir = tmp_path / "split_compressed"
     split_dir.mkdir()
-    df.iloc[:10].to_csv(split_dir / "X_train.csv.gz", compression="gzip")
-    df.iloc[10:].to_csv(split_dir / "X_test.csv.gz", compression="gzip")
+    train_samples = df.columns[:8]
+    test_samples = df.columns[8:]
+    df[train_samples].to_csv(split_dir / "X_train.csv.gz", compression="gzip")
+    df[test_samples].to_csv(split_dir / "X_test.csv.gz", compression="gzip")
 
     ds_pre = datasets.GeneExpression(gene_expression_dir=str(split_dir), train=True)
-    assert len(ds_pre) == 10
+    assert len(ds_pre) == len(train_samples)
 
 
 def test_get_dataloaders(tmp_path):
