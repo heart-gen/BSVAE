@@ -27,7 +27,7 @@ trainer(train_loader, epochs=100, checkpoint_every=10)
 ```
 
 ### `Evaluator`
-Runs evaluation loops with shared logging semantics. The evaluator saves averaged losses to `test_losses.log` and returns a dictionary of metrics.
+Runs evaluation loops with shared logging semantics. The evaluator saves averaged losses to `test_losses.pt` (a Torch-serialized dictionary) and returns a dictionary of metrics.
 
 ```python
 from bsvae.utils import Evaluator

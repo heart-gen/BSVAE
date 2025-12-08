@@ -1,3 +1,4 @@
+import io
 import logging
 import sys
 import types
@@ -68,7 +69,27 @@ def test_losses_logger_respects_log_level(tmp_path):
     logger.log(3, {"loss": [1.0]})
 
     assert log_path.exists()
-    assert log_path.read_text() == ""
+    contents = log_path.read_text()
+    assert "Epoch,Loss,Value" in contents
+    assert "loss" in contents
+
+
+def test_losses_logger_does_not_propagate(tmp_path):
+    log_path = tmp_path / training.TRAIN_LOSSES_LOGFILE
+    stream = io.StringIO()
+    root_logger = logging.getLogger()
+    handler = logging.StreamHandler(stream)
+    root_logger.addHandler(handler)
+    root_logger.setLevel(logging.INFO)
+
+    try:
+        logger = training.LossesLogger(str(log_path))
+        logger.log(4, {"loss": [5.0, 7.0]})
+    finally:
+        root_logger.removeHandler(handler)
+
+    assert stream.getvalue() == ""
+    assert "loss" in log_path.read_text()
 
 
 # Silence noisy handlers that might persist across tests
