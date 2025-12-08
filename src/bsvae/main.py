@@ -70,6 +70,9 @@ def parse_arguments(cli_args):
     parser.add_argument("--seed", type=int, default=config.get("seed", 13))
     parser.add_argument("--no-cuda", action="store_true",
                         default=config.get("no_cuda", False))
+    parser.add_argument("--log-level", type=str, default=config.get("log_level", "info"),
+                        choices=["debug", "info", "warning", "error", "critical"],
+                        help="Logging verbosity (default: info)")
 
     # Training
     parser.add_argument("--epochs", type=int, default=config.get("epochs", 100))
@@ -132,14 +135,18 @@ def parse_arguments(cli_args):
     return parser.parse_args(cli_args)
 
 
-def setup_logging():
+def setup_logging(level: str = "info"):
+    """Configure logging verbosity."""
+    numeric_level = getattr(logging, level.upper(), logging.INFO)
     log_fmt = "%(asctime)s %(levelname)s: %(message)s"
-    logging.basicConfig(level=logging.INFO, format=log_fmt)
-    return logging.getLogger(__name__)
+    logging.basicConfig(level=numeric_level, format=log_fmt)
+    logger = logging.getLogger(__name__)
+    logger.setLevel(numeric_level)
+    return logger
 
 
 def main(args):
-    logger = setup_logging()
+    logger = setup_logging(args.log_level)
     set_seed(args.seed)
     device = get_device(use_gpu=not args.no_cuda)
     exp_dir = join(args.outdir, args.name)
