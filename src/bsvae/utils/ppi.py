@@ -122,8 +122,13 @@ def graph_to_laplacian(G: nx.Graph, gene_list: list, sparse: bool = True,
 
     if sparse:
         coo = L.tocoo()
-        indices = torch.tensor([coo.row, coo.col], dtype=torch.long)
-        values = torch.tensor(coo.data, dtype=dtype)
+        indices = torch.stack(
+            (
+                torch.as_tensor(coo.row, dtype=torch.long),
+                torch.as_tensor(coo.col, dtype=torch.long),
+            )
+        )
+        values = torch.as_tensor(coo.data, dtype=dtype)
         L_torch = torch.sparse_coo_tensor(indices, values, coo.shape)
         return L_torch.coalesce()
     else:
