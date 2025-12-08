@@ -85,6 +85,8 @@ class StructuredDecoder(nn.Module):
         Laplacian smoothness: tr(W^T L W).
         """
         W_eff = self.W * self.mask if self.mask is not None else self.W
+        if L.device != W_eff.device:
+            L = L.to(W_eff.device)
         LW = torch.sparse.mm(L, W_eff) if L.is_sparse else torch.matmul(L, W_eff)
         penalty = torch.sum(W_eff * LW)  # trace approx
         return lap_strength * penalty
