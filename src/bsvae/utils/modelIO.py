@@ -132,19 +132,24 @@ def _get_model(metadata, device, path_to_model):
     """Instantiate a StructuredFactorVAE from metadata + load weights."""
     model_type = _resolve_model_name(metadata)
 
+    # Load checkpoint first to detect optional buffers (e.g., Laplacian)
+    state_dict = torch.load(path_to_model, map_location=device)
+    laplacian = state_dict.get("laplacian_matrix")
+
     model = StructuredFactorVAE(
         n_genes=metadata["n_genes"],
         n_latent=metadata["latent_dim"],
         hidden_dims=metadata.get("hidden_dims"),
         dropout=metadata.get("dropout", 0.1),
         learn_var=metadata.get("learn_var", False),
+        L=laplacian,
     ).to(device)
 
     # store reg strengths for reproducibility
     model.l1_strength = metadata.get("l1_strength", 1e-3)
     model.lap_strength = metadata.get("lap_strength", 1e-4)
 
-    model.load_state_dict(torch.load(path_to_model, map_location=device))
+    model.load_state_dict(state_dict)
     model.eval()
     return model
 
