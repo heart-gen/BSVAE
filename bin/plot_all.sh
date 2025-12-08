@@ -24,7 +24,7 @@ LOGGER="${REPO_ROOT}/plot_all.out"
 printf "Generating metrics summary for %s\n" "${EXPERIMENTS[*]}" | tee -a "${LOGGER}"
 
 for exp in "${EXPERIMENTS[@]}"; do
-    if [[ ! -f "${REPO_ROOT}/results/${exp}/test_losses.log" ]]; then
+    if [[ ! -f "${REPO_ROOT}/results/${exp}/test_losses.pt" ]]; then
         echo "Missing evaluation logs for ${exp}; skipping." | tee -a "${LOGGER}" >&2
     fi
 done
@@ -52,7 +52,7 @@ rows = []
 missing = []
 keys = set()
 for exp in experiments:
-    log_path = os.path.join(results_dir, exp, "test_losses.log")
+    log_path = os.path.join(results_dir, exp, "test_losses.pt")
     if not os.path.exists(log_path):
         missing.append(exp)
         continue

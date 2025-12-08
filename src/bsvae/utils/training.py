@@ -6,7 +6,7 @@ from collections import defaultdict
 
 import torch
 
-TRAIN_LOSSES_LOGFILE = "train_losses.log"
+TRAIN_LOSSES_LOGFILE = "train_losses.csv"
 
 
 class Trainer:
@@ -129,13 +129,15 @@ class LossesLogger:
                 pass
 
         self.logger = logging.getLogger("losses_logger")
+        self.logger.handlers.clear()
         self.logger.setLevel(log_level)
+        self.logger.propagate = False
         file_handler = logging.FileHandler(file_path_name)
         file_handler.setLevel(logging.NOTSET)
         self.logger.addHandler(file_handler)
-        self.logger.debug("Epoch,Loss,Value")
+        self.logger.info("Epoch,Loss,Value")
 
     def log(self, epoch, losses_storer):
         for k, v in losses_storer.items():
             mean_val = sum(v) / len(v)
-            self.logger.debug(f"{epoch},{k},{mean_val}")
+            self.logger.info(f"{epoch},{k},{mean_val}")

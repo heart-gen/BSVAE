@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 import torch
 
-TEST_LOSSES_FILE = "test_losses.log"
+TEST_LOSSES_FILE = "test_losses.pt"
 
 
 class Evaluator:
