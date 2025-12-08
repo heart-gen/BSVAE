@@ -124,23 +124,24 @@ class GeneExpression(BaseDataset):
                 )
             self.dfx = self._read_expression_file(path)
 
-        # Convert to tensor
-        self.data = torch.from_numpy(self.dfx.values.astype(np.float32))
+        # Convert to tensor: training happens at the **sample** level, so transpose
+        # the matrix (samples × genes).
+        self.data = torch.from_numpy(self.dfx.T.values.astype(np.float32))
         self.genes = list(self.dfx.index)
         self.samples = list(self.dfx.columns)
 
     def __getitem__(self, idx):
         """
-        Return one gene’s expression profile and its identifier.
+        Return one sample’s expression profile and its identifier.
 
         Returns
         -------
         profile : torch.Tensor
-            Expression vector for the gene (num_samples,).
-        gene_id : str
-            Identifier of the gene (e.g., Ensembl ID).
+            Expression vector for the sample (num_genes,).
+        sample_id : str
+            Identifier of the sample.
         """
-        return self.data[idx], self.genes[idx]
+        return self.data[idx], self.samples[idx]
 
     def download(self):
         """No-op (not applicable)."""
