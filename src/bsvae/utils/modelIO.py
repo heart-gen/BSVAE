@@ -132,6 +132,8 @@ def _get_model(metadata, device, path_to_model):
     """Instantiate a StructuredFactorVAE from metadata + load weights."""
     model_type = _resolve_model_name(metadata)
 
+    state_dict = torch.load(path_to_model, map_location=device)
+
     model = StructuredFactorVAE(
         n_genes=metadata["n_genes"],
         n_latent=metadata["latent_dim"],
@@ -144,7 +146,13 @@ def _get_model(metadata, device, path_to_model):
     model.l1_strength = metadata.get("l1_strength", 1e-3)
     model.lap_strength = metadata.get("lap_strength", 1e-4)
 
-    model.load_state_dict(torch.load(path_to_model, map_location=device))
+    # Backwards compatibility: older checkpoints may contain a Laplacian
+    # buffer that is not registered in newly instantiated models unless a
+    # Laplacian matrix is provided at construction time.
+    if "laplacian_matrix" in state_dict:
+        model.register_buffer("laplacian_matrix", state_dict["laplacian_matrix"])
+
+    model.load_state_dict(state_dict)
     model.eval()
     return model
 
