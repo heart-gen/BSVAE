@@ -39,3 +39,16 @@ Each array task produces a separate directory such as `results/sweep_beta_genene
 Checkpoints are automatically emitted every `--checkpoint-every` epochs. To resume after a preemption, rerun the same command; the trainer detects existing weights in the experiment directory and continues training.
 
 💡 **Tip:** Combine `--is-eval-only` with array jobs to post-process multiple experiments without reserving GPUs.
+
+## Troubleshooting PPI downloads on clusters
+Some clusters intercept HTTPS traffic and break certificate validation. If `bsvae-download-ppi` fails from a compute node, manually cache the STRING file in your scratch directory with `--no-check-certificate`:
+
+```bash
+OUTDIR="$SCRATCH/.bsvae/ppi"
+mkdir -p "${OUTDIR}"
+wget --no-check-certificate \
+  "https://stringdb-static.org/download/protein.links.detailed.v12.0/9606.protein.links.detailed.v12.0.txt.gz" \
+  -O "${OUTDIR}/9606_string.txt.gz"
+```
+
+Pass `--ppi-cache ${OUTDIR}` to `bsvae-train` so the CLI reuses the downloaded archive. If `wget` is unavailable, use an equivalent `curl -k -L <url> -o "${OUTDIR}/9606_string.txt.gz"` invocation.
