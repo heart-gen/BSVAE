@@ -8,6 +8,42 @@ Biologically Structured Variational Autoencoder (**BSVAE**) learns interpretable
 - **Reproducible experiments** via `.ini` configuration sections and deterministic seeds.
 - **PPI-aware priors** that encourage biologically coherent factors.
 
+## What’s New in This Release
+
+This release introduces major improvements across configuration handling, dataset flexibility, metadata stability, PPI integration, and training/evaluation robustness. Users should experience smoother training runs, more reproducible evaluation results, and expanded compatibility with common transcriptomics formats.
+
+### Improved Model Metadata & Checkpointing
+
+* Unified and normalized model metadata for StructuredFactorVAE, including latent dimensionality, input gene count, and regularization settings.
+* Checkpoints now reliably store and reload Laplacian buffers and maintain device consistency.
+* Evaluation now validates gene dimensionality against the training dataset to prevent silent mismatches.
+
+### Enhanced Input & Dataset Support
+
+* Gene expression files can now be supplied as CSV, TSV, or their compressed `.gz` variants.
+* Automatic correction of dataset orientation (genes × samples).
+* More robust parsing of dataset paths and safe handling of missing files.
+
+### Better PPI / STRING Integration
+
+* New CLI tool for downloading STRING protein–protein interaction networks.
+* Laplacian matrices now use safer Tensor conversions and track device placement correctly.
+
+### Logging & Configuration Improvements
+
+* Added a user-configurable `--log-level` flag to control verbosity.
+* All loss logging respects the selected logging level.
+* Standardization of training loss logs into `.csv` format for easier downstream analysis.
+* Safer creation of logging directories, even for runtimes with bare filenames.
+
+### Reliability Improvements for Training & Evaluation
+
+* Default batch size behavior fixed for evaluation dataloaders.
+* Prevented evaluation failures due to empty batches by enforcing `drop_last=False`.
+* More stable model initialization and metadata resolution.
+
+These changes collectively enhance reproducibility, dataset compatibility, and robustness across the entire BSVAE training and evaluation workflow.
+
 ## Quick Install & Run
 ```bash
 pip install bsvae
