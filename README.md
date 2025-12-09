@@ -31,24 +31,24 @@ It is designed for **gene expression modeling with biological priors**, integrat
 
 ## Installation
 
-Clone the repo and install with [Poetry](https://python-poetry.org/) (recommended):
+Install from PyPI:
+
+```bash
+pip install bsvae
+```
+
+Or install from source with [Poetry](https://python-poetry.org/):
 
 ```bash
 git clone https://github.com/YOUR-LAB/BSVAE.git
 cd BSVAE
 poetry install
-````
-
-Or using pip:
-
-```bash
-pip install -e .
 ```
 
 Dependencies:
 
-* Python 3.9+
-* PyTorch ≥ 2.0
+* Python 3.11+
+* PyTorch ≥ 2.8
 * pandas, numpy, scikit-learn
 * networkx, scipy
 * mygene (for gene annotation)
@@ -69,7 +69,7 @@ BSVAE expects **genes × samples** CSVs.
 ### 2. Train a model
 
 ```bash
-poetry run python -m bsvae.main exp1 \
+bsvae-train exp1 \
     --gene-expression-filename data/expr.csv \
     --epochs 50 \
     --latent-dim 10 \
@@ -81,7 +81,7 @@ poetry run python -m bsvae.main exp1 \
 ### 3. Evaluate a trained model
 
 ```bash
-poetry run python -m bsvae.main exp1 \
+bsvae-train exp1 \
     --gene-expression-filename data/expr.csv \
     --is-eval-only
 ```
@@ -108,7 +108,7 @@ lap_strength = 1e-4
 Override from CLI if needed:
 
 ```bash
---epochs 50 --latent-dim 20
+bsvae-train my_experiment --epochs 50 --latent-dim 20
 ```
 
 ---
@@ -130,8 +130,23 @@ BSVAE supports automatic download & caching of **STRING v12.0 PPI networks**.
 Use the lightweight downloader to cache a STRING network ahead of training:
 
 ```bash
-poetry run bsvae-download-ppi --taxid 9606 --cache-dir ~/.bsvae/ppi
+bsvae-download-ppi --taxid 9606 --cache-dir ~/.bsvae/ppi
 ```
+
+### Troubleshooting PPI downloads on HPC systems
+
+Some clusters block HTTPS certificate resolution for outbound downloads. If `bsvae-download-ppi` cannot reach STRING, manually
+cache the file with `wget` (or `curl`) using `--no-check-certificate` and point `--ppi-cache` to the same directory:
+
+```bash
+OUTDIR="$HOME/.bsvae/ppi"
+mkdir -p "${OUTDIR}"
+wget --no-check-certificate \
+  "https://stringdb-static.org/download/protein.links.detailed.v12.0/9606.protein.links.detailed.v12.0.txt.gz" \
+  -O "${OUTDIR}/9606_string.txt.gz"
+```
+
+Use `curl -k -L "<url>" -o "${OUTDIR}/9606_string.txt.gz"` if `wget` is unavailable.
 
 ---
 
