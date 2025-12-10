@@ -1,7 +1,7 @@
 # BSVAE: Biologically Structured Variational Autoencoder
 
 [![PyTorch](https://img.shields.io/badge/PyTorch-%3E%3D2.0-orange)](https://pytorch.org/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 [![DOI](https://zenodo.org/badge/1059699525.svg)](https://doi.org/10.5281/zenodo.17871790)
 
 **BSVAE** is a PyTorch package for **Structured Factor Variational Autoencoders** (StructuredFactorVAE).  
@@ -203,5 +203,5 @@ If you use **BSVAE** in your research, please cite:
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
 
