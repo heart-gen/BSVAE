@@ -1,5 +1,12 @@
 """BSVAE package entrypoint."""
 
-from bsvae import latent, networks
+from importlib.metadata import PackageNotFoundError, version
 
-__all__ = ["networks", "latent"]
+from . import latent, networks
+
+try:
+    __version__ = version(__name__)
+except PackageNotFoundError:
+    __version__ = "0.0.0"
+
+__all__ = ["networks", "latent", "__version__"]
