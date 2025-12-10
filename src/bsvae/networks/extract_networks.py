@@ -33,7 +33,7 @@ from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from bsvae.utils.modelIO import load_metadata
 from bsvae.utils import modelIO as model_io
-from bsvae.networks.latent_export import extract_latents
+from bsvae.latent.latent_export import extract_latents
 
 logger = logging.getLogger(__name__)
 

@@ -1,5 +1,5 @@
 """BSVAE package entrypoint."""
 
-from bsvae import networks
+from bsvae import latent, networks
 
-__all__ = ["networks"]
+__all__ = ["networks", "latent"]
