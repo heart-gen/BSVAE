@@ -26,6 +26,9 @@ It is designed for **gene expression modeling with biological priors**, integrat
 - **Reproducibility**
   - Save/load models + metadata (`modelIO`)
   - Configurable hyperparameters via `hyperparam.ini`
+- **Post-training analysis**
+  - Gene–gene network extraction via decoder similarity, propagated covariance, Graphical Lasso, and Laplacian refinement
+  - Latent export (`mu`, `logvar`) to CSV or AnnData for downstream workflows
 
 ---
 
@@ -85,6 +88,26 @@ bsvae-train exp1 \
     --gene-expression-filename data/expr.csv \
     --is-eval-only
 ```
+
+### 4. Extract networks and export latents
+
+```bash
+bsvae-networks extract-networks \
+    --model-path results/exp1 \
+    --dataset data/expr.csv \
+    --output-dir results/exp1/networks
+# optional: --methods latent_cov graphical_lasso laplacian
+
+bsvae-networks export-latents \
+    --model-path results/exp1 \
+    --dataset data/expr.csv \
+    --output results/exp1/latents.h5ad
+```
+
+The extractor writes adjacency matrices, edge lists, and optional heatmaps for
+each requested method. By default the decoder-loading cosine similarity
+(``w_similarity``) is computed; add other methods with ``--methods``. Latent exports include per-sample ``mu`` and
+``logvar`` as tidy CSV or AnnData files.
 
 ---
 
@@ -147,6 +170,19 @@ wget --no-check-certificate \
 ```
 
 Use `curl -k -L "<url>" -o "${OUTDIR}/9606_string.txt.gz"` if `wget` is unavailable.
+
+---
+
+## Integration notes
+
+- The `bsvae-networks` workflows reuse the same gene ordering as training. When
+  loading a standalone expression file, ensure columns correspond to the genes
+  seen by the checkpoint.
+- The CLI automatically handles CPU/GPU placement based on availability; models
+  are loaded in evaluation mode without modifying training metadata.
+- Network extraction functions are written to be test-friendly: they accept
+  PyTorch `DataLoader` instances, operate without global state, and persist
+  outputs as CSV/TSV/NPY for interoperability with graph toolchains.
 
 ---
 

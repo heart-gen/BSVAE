@@ -85,3 +85,27 @@ bsvae-train beta_genenet_run \
 ```
 
 💡 **Tip:** If both input flags are provided, the parser raises `Specify exactly one of --gene-expression-filename or --gene-expression-dir.` Fix the invocation by choosing a single data source.
+
+## Network extraction and latent export
+
+Use the dedicated `bsvae-networks` entry point for post-training analysis:
+
+```bash
+bsvae-networks extract-networks \
+  --model-path results/my_experiment \
+  --dataset data/expression.csv \
+  --output-dir results/networks
+# optional: --methods latent_cov graphical_lasso laplacian
+```
+
+The extractor defaults to decoder-loading cosine similarity (``w_similarity``);
+append ``--methods`` to enable additional estimators.
+
+To export latent means and log-variances for every sample, run:
+
+```bash
+bsvae-networks export-latents \
+  --model-path results/my_experiment \
+  --dataset data/expression.csv \
+  --output latents.h5ad
+```
