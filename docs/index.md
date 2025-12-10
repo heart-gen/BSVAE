@@ -55,6 +55,7 @@ Explore the rest of the documentation to learn how to configure experiments and 
 - [Installation](installation.md)
 - [Quick Start](quickstart.md)
 - [CLI Reference](cli.md)
+- [Network extraction](networks.md)
 - [API Docs](api/models.md)
 
 ```{toctree}
@@ -63,6 +64,7 @@ Explore the rest of the documentation to learn how to configure experiments and 
 installation
 quickstart
 cli
+networks
 usage
 hyperparameters
 hpc
