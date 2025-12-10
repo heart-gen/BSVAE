@@ -1,10 +1,29 @@
 [tool.poetry]
 name = "bsvae"
-version = "0.0.0"
-description = ""
+version = "0.0.0"  # dynamically resolved by poetry-dynamic-versioning
+description = "Biologically structured variational autoencoder for gene expression data with PPI priors."
 readme = "README.md"
 authors = ["Kynon J Benjamin <kj.benjamin90@gmail.com>"]
+license = "GPL-3.0-only"
 packages = [{ include = "bsvae", from = "src" }]
+keywords = [
+    "variational-autoencoder",
+    "structured-vae",
+    "pytorch",
+    "bioinformatics",
+    "gene-expression",
+    "protein-protein-interaction",
+]
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.14"
