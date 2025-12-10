@@ -1,11 +1,11 @@
-"""Network extraction and latent export utilities."""
-from bsvae.networks import extract_networks, latent_export
+"""Network extraction utilities."""
+from bsvae.networks import extract_networks, module_extraction
 from bsvae.networks.extract_networks import *
-from bsvae.networks.latent_export import *
+from bsvae.networks.module_extraction import *
 from bsvae.networks.cli import cli
 
 __all__ = [  # type: ignore[var-annotated]
     *extract_networks.__all__,
-    *latent_export.__all__,
+    *module_extraction.__all__,
     "cli",
 ]
