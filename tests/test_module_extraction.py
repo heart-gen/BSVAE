@@ -1,8 +1,9 @@
 import pytest
 
+np = pytest.importorskip("numpy")
 pd = pytest.importorskip("pandas")
 
-from bsvae.networks.module_extraction import format_module_feedback
+from bsvae.networks.module_extraction import format_module_feedback, load_adjacency
 
 
 def test_format_module_feedback_includes_resolution():
@@ -21,3 +22,15 @@ def test_format_module_feedback_includes_n_clusters():
     assert message.startswith("Spectral n_clusters=3")
     assert "produced 3 modules" in message
     assert "median size=1 genes" in message
+
+
+def test_load_adjacency_handles_unnamed_index(tmp_path):
+    genes = ["g1", "g2"]
+    adjacency = pd.DataFrame([[0.0, 0.3], [0.3, 0.0]], index=genes, columns=genes)
+    path = tmp_path / "adjacency.csv"
+    adjacency.to_csv(path)
+
+    loaded_adj, loaded_genes = load_adjacency(path.as_posix())
+
+    assert loaded_genes == genes
+    assert np.allclose(loaded_adj, adjacency.values)
