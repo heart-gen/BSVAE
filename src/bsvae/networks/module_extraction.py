@@ -22,6 +22,8 @@ from typing import List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+
+from bsvae.networks.utils import transform_adjacency_for_clustering
 from sklearn.cluster import SpectralClustering
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -150,7 +152,12 @@ def build_graph_from_adjacency(A: np.ndarray | pd.DataFrame, genes: Optional[Seq
     return graph
 
 
-def leiden_modules(A: np.ndarray | pd.DataFrame, resolution: float = 1.0) -> pd.Series:
+def leiden_modules(
+    A: np.ndarray | pd.DataFrame,
+    resolution: float = 1.0,
+    *,
+    adjacency_mode: str = "wgcna-signed",
+) -> pd.Series:
     """Cluster genes into modules using Leiden community detection.
 
     Parameters
@@ -160,6 +167,12 @@ def leiden_modules(A: np.ndarray | pd.DataFrame, resolution: float = 1.0) -> pd.
         index is used as gene names.
     resolution:
         Resolution parameter for Leiden (higher values produce more clusters).
+
+    Notes
+    -----
+    Leiden does not support negative edge weights. By default, BSVAE uses a
+    WGCNA-style signed network where negative edges are clipped to zero before
+    clustering.
 
     Returns
     -------
@@ -173,8 +186,31 @@ def leiden_modules(A: np.ndarray | pd.DataFrame, resolution: float = 1.0) -> pd.
         raise ImportError("leidenalg is required for Leiden clustering") from exc
 
     arr, genes = _ensure_array_and_genes(A)
-    logger.info("Running Leiden clustering on %d genes (resolution=%.3f)", len(genes), resolution)
-    graph = build_graph_from_adjacency(arr, genes)
+    logger.info(
+        "Running Leiden clustering on %d genes (resolution=%.3f, adjacency_mode=%s)",
+        len(genes),
+        resolution,
+        adjacency_mode,
+    )
+    adj = transform_adjacency_for_clustering(arr, mode=adjacency_mode)
+
+    # TODO: support signed community detection without violating Leiden's
+    # non-negative edge weight requirement. Do NOT attempt signed Leiden
+    # clustering or silently rescale/abs/drop edges.
+    if adjacency_mode == "signed":
+        raise NotImplementedError(
+            "Signed community detection is not yet supported. "
+            "Leiden requires non-negative edge weights. "
+            "Use adjacency_mode='wgcna-signed'."
+        )
+
+    if np.any(adj < 0):
+        raise ValueError(
+            "Negative weights detected after adjacency transform. "
+            "This should not occur for wgcna-signed mode."
+        )
+
+    graph = build_graph_from_adjacency(adj, genes)
     partition = leidenalg.find_partition(
         graph,
         leidenalg.RBConfigurationVertexPartition,

@@ -73,6 +73,16 @@ def build_parser() -> argparse.ArgumentParser:
     module_parser.add_argument("--n-components", type=int, help="Number of eigenvectors for spectral clustering")
     module_parser.add_argument("--batch-size", type=int, default=128)
     module_parser.add_argument(
+        "--adjacency-mode",
+        choices=["wgcna-signed", "signed"],
+        default="wgcna-signed",
+        help=(
+            "How to handle negative edge weights before clustering. "
+            "'wgcna-signed' (default) clips negatives to zero, matching WGCNA signed networks. "
+            "'signed' preserves negative edges but is not yet supported for Leiden clustering."
+        ),
+    )
+    module_parser.add_argument(
         "--network-method",
         default="w_similarity",
         help="Network extraction method to run when computing adjacency (default: w_similarity)",
@@ -173,7 +183,16 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
         logger.info("Saved computed adjacency to %s", adjacency_path)
 
     if args.cluster_method == "leiden":
-        modules = leiden_modules(adjacency)
+        logger.info(
+            "Running Leiden clustering (resolution=%.2f, adjacency_mode=%s)",
+            args.resolution,
+            args.adjacency_mode,
+        )
+        modules = leiden_modules(
+            adjacency,
+            resolution=args.resolution,
+            adjacency_mode=args.adjacency_mode,
+        )
     else:
         modules = spectral_modules(adjacency, n_clusters=args.n_clusters, n_components=args.n_components)
 

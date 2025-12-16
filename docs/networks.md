@@ -63,3 +63,18 @@ in ``obsm``.
 
 All functions are available from Python via ``bsvae.networks`` for programmatic
 workflows and unit testing.
+
+### Signed vs unsigned networks
+
+BSVAE network extraction methods may produce negative edge weights (e.g., cosine
+similarity of decoder loadings).
+
+Community detection algorithms such as Leiden require non-negative edge weights.
+
+By default, BSVAE uses a **WGCNA-style signed network** (``adjacency_mode="wgcna-signed"``),
+where negative edges are clipped to zero prior to clustering.
+
+This preserves co-activation structure while avoiding artificial antagonistic
+modules.
+
+A fully signed community detection mode is planned for a future release.
