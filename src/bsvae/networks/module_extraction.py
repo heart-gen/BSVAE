@@ -68,11 +68,25 @@ def load_adjacency(path: str) -> Tuple[np.ndarray, List[str]]:
     """
 
     sep = _infer_separator(path)
-    df = pd.read_csv(path, index_col=0, sep=sep)
+    df = pd.read_csv(path, sep=sep)
+
+    gene_col = df.columns[0]
+    if gene_col == "" or gene_col.startswith("Unnamed"):
+        df = df.rename(columns={gene_col: "gene"}).set_index("gene")
+    else:
+        df = df.set_index(gene_col)
+
     if df.shape[0] != df.shape[1]:
         raise ValueError("Adjacency file must be square with genes as both index and columns")
+    if not df.columns.equals(df.index):
+        raise ValueError("Adjacency file must have matching gene labels for rows and columns")
+
+    arr = df.values.astype(float, copy=False)
+    if not np.allclose(arr, arr.T):
+        raise ValueError("Adjacency matrix must be symmetric")
+
     logger.info("Loaded adjacency from %s with %d genes", path, df.shape[0])
-    return df.values, list(df.index)
+    return arr, list(df.index)
 
 
 def _module_size_summary(modules: Mapping[str, int] | pd.Series) -> Tuple[int, int]:
@@ -287,8 +301,20 @@ def compute_module_eigengenes(datExpr: pd.DataFrame, modules: Mapping[str, int])
 
     module_series = pd.Series(modules, name="module")
     shared_genes = module_series.index.intersection(datExpr.index)
+    logger.debug(
+        "Expression genes: %d | Module genes: %d | Overlap: %d",
+        datExpr.shape[0],
+        len(module_series),
+        len(shared_genes),
+    )
     if shared_genes.empty:
         raise ValueError("No overlapping genes between expression matrix and modules")
+
+    overlap_fraction = len(shared_genes) / len(module_series) if len(module_series) else 0
+    if overlap_fraction < 0.9:
+        logger.warning(
+            "Only %.1f%% of module genes overlap with expression matrix", overlap_fraction * 100
+        )
 
     logger.info("Computing eigengenes for %d modules", module_series.nunique())
     eigengenes = {}

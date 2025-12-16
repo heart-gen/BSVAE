@@ -244,6 +244,7 @@ def save_adjacency_matrix(adjacency: np.ndarray, output_path: str, genes: Option
     if path.suffix.lower() in {".csv", ".tsv"}:
         sep = "," if path.suffix.lower() == ".csv" else "\t"
         df = pd.DataFrame(adjacency, index=genes, columns=genes)
+        df.index.name = "gene"
         df.to_csv(path, sep=sep)
     else:
         np.save(path, adjacency)
