@@ -73,6 +73,54 @@ def load_adjacency(path: str) -> Tuple[np.ndarray, List[str]]:
     return df.values, list(df.index)
 
 
+def _module_size_summary(modules: Mapping[str, int] | pd.Series) -> Tuple[int, int]:
+    """Return the number of modules and median module size.
+
+    Parameters
+    ----------
+    modules:
+        Mapping from gene to module label or a pandas Series indexed by gene.
+
+    Returns
+    -------
+    tuple
+        ``(n_modules, median_size)`` where ``median_size`` is 0 when no modules
+        are present.
+    """
+
+    module_series = pd.Series(modules, name="module")
+    counts = module_series.value_counts()
+    if counts.empty:
+        return 0, 0
+    return module_series.nunique(), int(np.median(counts.values))
+
+
+def format_module_feedback(
+    method: str,
+    modules: Mapping[str, int] | pd.Series,
+    *,
+    resolution: Optional[float] = None,
+    n_clusters: Optional[int] = None,
+) -> str:
+    """Human-friendly summary of module extraction results.
+
+    Examples
+    --------
+    >>> modules = pd.Series([0, 0, 1, 1, 1], index=["g1", "g2", "g3", "g4", "g5"])
+    >>> format_module_feedback("Leiden", modules, resolution=1.0)
+    'Leiden resolution=1.0 produced 2 modules (median size=2 genes)'
+    """
+
+    n_modules, median_size = _module_size_summary(modules)
+    details = []
+    if resolution is not None:
+        details.append(f"resolution={resolution}")
+    if n_clusters is not None:
+        details.append(f"n_clusters={n_clusters}")
+    detail_str = f" {'; '.join(details)}" if details else ""
+    return f"{method}{detail_str} produced {n_modules} modules (median size={median_size} genes)"
+
+
 def build_graph_from_adjacency(A: np.ndarray | pd.DataFrame, genes: Optional[Sequence[str]] = None):
     """Construct an igraph Graph from an adjacency matrix.
 
@@ -134,7 +182,7 @@ def leiden_modules(A: np.ndarray | pd.DataFrame, resolution: float = 1.0) -> pd.
         weights=graph.es["weight"],
     )
     modules = pd.Series(partition.membership, index=genes, name="module")
-    logger.info("Identified %d modules via Leiden", modules.nunique())
+    logger.info(format_module_feedback("Leiden", modules, resolution=resolution))
     return modules
 
 
@@ -181,7 +229,7 @@ def spectral_modules(
     )
     labels = clustering.fit_predict(arr)
     modules = pd.Series(labels, index=genes, name="module")
-    logger.info("Identified %d modules via spectral clustering", modules.nunique())
+    logger.info(format_module_feedback("Spectral", modules, n_clusters=n_clusters))
     return modules
 
 
@@ -270,6 +318,7 @@ def save_eigengenes(eigengenes: pd.DataFrame, output_path: str) -> None:
 __all__ = [
     "load_adjacency",
     "build_graph_from_adjacency",
+    "format_module_feedback",
     "leiden_modules",
     "spectral_modules",
     "compute_module_eigengenes",
