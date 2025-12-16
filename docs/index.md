@@ -56,6 +56,7 @@ Explore the rest of the documentation to learn how to configure experiments and 
 - [Quick Start](quickstart.md)
 - [CLI Reference](cli.md)
 - [Network extraction](networks.md)
+- [BSVAE network utilities](bsvae_networks.md)
 - [API Docs](api/models.md)
 
 ```{toctree}
@@ -65,6 +66,7 @@ installation
 quickstart
 cli
 networks
+bsvae_networks
 usage
 hyperparameters
 hpc
