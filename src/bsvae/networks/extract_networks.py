@@ -234,7 +234,8 @@ def compute_laplacian_refined(W: torch.Tensor, laplacian: torch.Tensor) -> np.nd
         weights = torch.mul(W[rows], W[cols]).sum(dim=1)
         refined = torch.zeros((W.shape[0], W.shape[0]), device=W.device, dtype=W.dtype)
         refined[rows, cols] = weights
-        refined = refined + refined.T - torch.diag(torch.diag(refined))
+        if not torch.equal(laplacian, laplacian.transpose(0, 1)):
+            refined = refined + refined.T - torch.diag(torch.diag(refined))
     else:
         similarity = torch.matmul(W, W.T)
         mask = laplacian != 0
@@ -297,6 +298,8 @@ def save_edge_list(adjacency: np.ndarray, output_path: str, genes: Optional[Sequ
         np.fill_diagonal(abs_weights, 0.0)
 
     mask = abs_weights >= threshold
+    if not include_self:
+        np.fill_diagonal(mask, False)
     sources, targets = np.nonzero(mask)
     if not len(sources):
         rows_to_write: List[Sequence[object]] = []
