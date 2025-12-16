@@ -18,6 +18,7 @@ workflows and unit tests.
 """
 from __future__ import annotations
 
+import csv
 import logging
 import os
 from dataclasses import dataclass
@@ -107,7 +108,7 @@ def load_weights(model: torch.nn.Module, masked: bool = True) -> torch.Tensor:
     return W.detach()
 
 
-def compute_W_similarity(W: torch.Tensor, eps: float = 1e-8) -> np.ndarray:
+def compute_W_similarity(W: torch.Tensor, eps: float = 1e-8, chunk_size: Optional[int] = None) -> np.ndarray:
     """Compute cosine similarity between gene loading vectors (Method A).
 
     Parameters
@@ -125,8 +126,17 @@ def compute_W_similarity(W: torch.Tensor, eps: float = 1e-8) -> np.ndarray:
 
     W = W.float()
     W_norm = F.normalize(W, dim=1, eps=eps)
-    adjacency = torch.matmul(W_norm, W_norm.T)
-    return adjacency.cpu().numpy()
+
+    if not chunk_size or chunk_size >= W_norm.shape[0]:
+        adjacency = torch.matmul(W_norm, W_norm.T)
+        return adjacency.cpu().numpy()
+
+    adjacency = torch.empty((W_norm.shape[0], W_norm.shape[0]), device="cpu", dtype=W_norm.dtype)
+    for start in range(0, W_norm.shape[0], chunk_size):
+        end = min(start + chunk_size, W_norm.shape[0])
+        block = torch.matmul(W_norm[start:end], W_norm.T)
+        adjacency[start:end] = block.cpu()
+    return adjacency.numpy()
 
 
 def compute_latent_covariance(W: torch.Tensor, logvar_mean: torch.Tensor, eps: float = 1e-8) -> Tuple[np.ndarray, np.ndarray]:
@@ -190,7 +200,9 @@ def compute_graphical_lasso(latent_samples: np.ndarray, W: torch.Tensor, alpha: 
         Binary adjacency where non-zero precision entries indicate edges.
     """
 
-    Xhat = np.matmul(latent_samples, W.detach().cpu().numpy().T)
+    latent_samples = latent_samples.astype(np.float32, copy=False)
+    W_np = W.detach().float().cpu().numpy()
+    Xhat = np.matmul(latent_samples, W_np.T)
     gl = GraphicalLasso(alpha=alpha, max_iter=max_iter)
     gl.fit(Xhat)
     precision = gl.precision_
@@ -216,12 +228,17 @@ def compute_laplacian_refined(W: torch.Tensor, laplacian: torch.Tensor) -> np.nd
         Adjacency matrix refined by the Laplacian structure.
     """
 
-    similarity = torch.matmul(W, W.T)
     if laplacian.is_sparse:
-        mask = laplacian.coalesce().to_dense() != 0
+        laplacian = laplacian.coalesce()
+        rows, cols = laplacian.indices()
+        weights = torch.mul(W[rows], W[cols]).sum(dim=1)
+        refined = torch.zeros((W.shape[0], W.shape[0]), device=W.device, dtype=W.dtype)
+        refined[rows, cols] = weights
+        refined = refined + refined.T - torch.diag(torch.diag(refined))
     else:
+        similarity = torch.matmul(W, W.T)
         mask = laplacian != 0
-    refined = similarity * mask
+        refined = similarity * mask
     return refined.cpu().numpy()
 
 
@@ -273,17 +290,25 @@ def save_edge_list(adjacency: np.ndarray, output_path: str, genes: Optional[Sequ
         genes = list(range(adjacency.shape[0]))
     genes = list(genes)
 
-    edges = []
-    for i in range(adjacency.shape[0]):
-        for j in range(adjacency.shape[1]):
-            if not include_self and i == j:
-                continue
-            weight = adjacency[i, j]
-            if abs(weight) >= threshold:
-                edges.append((genes[i], genes[j], weight))
-    edge_df = pd.DataFrame(edges, columns=["source", "target", "weight"])
     sep = "," if path.suffix.lower() == ".csv" else "\t"
-    edge_df.to_csv(path, index=False, sep=sep)
+    dialect = "excel" if sep == "," else "excel-tab"
+    abs_weights = np.abs(adjacency)
+    if not include_self:
+        np.fill_diagonal(abs_weights, 0.0)
+
+    mask = abs_weights >= threshold
+    sources, targets = np.nonzero(mask)
+    if not len(sources):
+        rows_to_write: List[Sequence[object]] = []
+    else:
+        genes_arr = np.asarray(genes)
+        rows_to_write = np.column_stack((genes_arr[sources], genes_arr[targets], adjacency[sources, targets]))
+
+    with path.open("w", newline="") as handle:
+        writer = csv.writer(handle, dialect=dialect)
+        writer.writerow(["source", "target", "weight"])
+        if len(rows_to_write):
+            writer.writerows(rows_to_write.tolist())
 
 
 def _infer_separator(path: str) -> str:
@@ -295,7 +320,7 @@ def load_expression(path: str) -> pd.DataFrame:
     """Load a gene expression matrix (genes × samples)."""
 
     sep = _infer_separator(path)
-    return pd.read_csv(path, index_col=0, sep=sep)
+    return pd.read_csv(path, index_col=0, sep=sep, dtype=np.float32)
 
 
 def create_dataloader_from_expression(path: str, batch_size: int = 128) -> Tuple[DataLoader, List[str], List[str]]:
@@ -319,7 +344,8 @@ def create_dataloader_from_expression(path: str, batch_size: int = 128) -> Tuple
     """
 
     df = load_expression(path)
-    tensor = torch.from_numpy(df.T.values.astype(np.float32))
+    values = df.to_numpy(dtype=np.float32, copy=False).T
+    tensor = torch.as_tensor(values, dtype=torch.float32)
     dataset = TensorDataset(tensor, torch.arange(tensor.shape[0]))
 
     class SampleIdWrapper(Dataset):
@@ -344,6 +370,7 @@ def run_extraction(
     dataloader: DataLoader,
     genes: Sequence[str],
     methods: Iterable[str],
+    similarity_chunk_size: Optional[int] = None,
     threshold: float = 0.0,
     alpha: float = 0.01,
     output_dir: Optional[str] = None,
@@ -361,6 +388,9 @@ def run_extraction(
         Gene identifiers corresponding to decoder rows.
     methods
         Iterable of methods to compute (case-insensitive).
+    similarity_chunk_size
+        Optional block size to compute decoder similarities without materializing
+        the full G × G multiplication in memory.
     threshold
         Threshold applied when writing edge lists.
     alpha
@@ -386,10 +416,12 @@ def run_extraction(
         )
 
     mu, logvar, sample_ids = extract_latents(model, dataloader, device=device)
+    mu = mu.astype(np.float32, copy=False)
+    logvar = logvar.astype(np.float32, copy=False)
     results: List[NetworkResults] = []
 
     if "w_similarity" in methods:
-        adjacency = compute_W_similarity(W)
+        adjacency = compute_W_similarity(W, chunk_size=similarity_chunk_size)
         results.append(NetworkResults("w_similarity", adjacency))
         _persist(adjacency, genes, output_dir, "w_similarity", threshold, create_heatmaps)
 
