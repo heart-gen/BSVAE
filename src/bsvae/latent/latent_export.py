@@ -60,16 +60,16 @@ def extract_latents(
         for batch, ids in dataloader:
             batch = batch.to(device)
             mu, logvar = model.encoder(batch)
-            mu_list.append(mu.cpu().numpy())
-            logvar_list.append(logvar.cpu().numpy())
+            mu_list.append(mu.float().cpu().numpy())
+            logvar_list.append(logvar.float().cpu().numpy())
             # DataLoader with strings returns a tuple; ensure list of str
             if isinstance(ids, (list, tuple)):
                 sample_ids.extend([str(i) for i in ids])
             else:
                 sample_ids.extend([str(ids)])
 
-    mu_arr = np.concatenate(mu_list, axis=0)
-    logvar_arr = np.concatenate(logvar_list, axis=0)
+    mu_arr = np.concatenate(mu_list, axis=0).astype(np.float32, copy=False)
+    logvar_arr = np.concatenate(logvar_list, axis=0).astype(np.float32, copy=False)
     return mu_arr, logvar_arr, sample_ids
 
 
