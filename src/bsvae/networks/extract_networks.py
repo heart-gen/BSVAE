@@ -243,9 +243,16 @@ def save_adjacency_matrix(adjacency: np.ndarray, output_path: str, genes: Option
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.suffix.lower() in {".csv", ".tsv"}:
         sep = "," if path.suffix.lower() == ".csv" else "\t"
-        df = pd.DataFrame(adjacency, index=genes, columns=genes)
-        df.index.name = "gene"
-        df.to_csv(path, sep=sep)
+        n_genes = adjacency.shape[0]
+        if genes is None:
+            genes = [str(i) for i in range(n_genes)]
+        with open(path, "w") as f:
+            # Write header: gene column + all gene names
+            f.write(f"gene{sep}{sep.join(str(g) for g in genes)}\n")
+            # Write each row: row gene name + values
+            for i in range(n_genes):
+                row_values = sep.join(str(v) for v in adjacency[i])
+                f.write(f"{genes[i]}{sep}{row_values}\n")
     else:
         np.save(path, adjacency)
 
@@ -274,17 +281,16 @@ def save_edge_list(adjacency: np.ndarray, output_path: str, genes: Optional[Sequ
         genes = list(range(adjacency.shape[0]))
     genes = list(genes)
 
-    edges = []
-    for i in range(adjacency.shape[0]):
-        for j in range(adjacency.shape[1]):
-            if not include_self and i == j:
-                continue
-            weight = adjacency[i, j]
-            if abs(weight) >= threshold:
-                edges.append((genes[i], genes[j], weight))
-    edge_df = pd.DataFrame(edges, columns=["source", "target", "weight"])
     sep = "," if path.suffix.lower() == ".csv" else "\t"
-    edge_df.to_csv(path, index=False, sep=sep)
+    with open(path, "w") as f:
+        f.write(f"source{sep}target{sep}weight\n")
+        for i in range(adjacency.shape[0]):
+            for j in range(adjacency.shape[1]):
+                if not include_self and i == j:
+                    continue
+                weight = adjacency[i, j]
+                if abs(weight) >= threshold:
+                    f.write(f"{genes[i]}{sep}{genes[j]}{sep}{weight}\n")
 
 
 def _infer_separator(path: str) -> str:
