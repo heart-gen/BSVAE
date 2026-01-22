@@ -9,7 +9,7 @@ complimentary strategies:
 2. **Latent-space covariance propagation (Method B)** — propagate posterior
    uncertainty ``diag(exp(logvar_mean))`` through the decoder.
 3. **Conditional independence graph (Method C)** — fit a Graphical Lasso on
-   reconstructed expression ``\hat{X} = Z W^T``.
+   reconstructed expression ``\\hat{X} = Z W^T``.
 4. **Laplacian-refined network (Method D)** — constrain decoder similarity to a
    supplied Laplacian prior.
 
