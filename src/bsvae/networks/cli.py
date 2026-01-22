@@ -182,6 +182,10 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
         save_adjacency_matrix(adjacency, adjacency_path.as_posix(), genes)
         logger.info("Saved computed adjacency to %s", adjacency_path)
 
+    # Convert adjacency to DataFrame with gene labels so clustering functions
+    # return modules indexed by gene name instead of numeric indices
+    adjacency_df = pd.DataFrame(adjacency, index=genes, columns=genes)
+
     if args.cluster_method == "leiden":
         logger.info(
             "Running Leiden clustering (resolution=%.2f, adjacency_mode=%s)",
@@ -189,12 +193,12 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
             args.adjacency_mode,
         )
         modules = leiden_modules(
-            adjacency,
+            adjacency_df,
             resolution=args.resolution,
             adjacency_mode=args.adjacency_mode,
         )
     else:
-        modules = spectral_modules(adjacency, n_clusters=args.n_clusters, n_components=args.n_components)
+        modules = spectral_modules(adjacency_df, n_clusters=args.n_clusters, n_components=args.n_components)
 
     expr_df = load_expression(args.expr)
     eigengenes = compute_module_eigengenes(expr_df, modules)
