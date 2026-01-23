@@ -61,14 +61,15 @@ def load_adjacency(path: str, genes_path: Optional[str] = None) -> Tuple[np.ndar
     Supports multiple formats:
     - CSV/TSV files with genes as index and columns (legacy dense format)
     - NPZ files with sparse matrix storage (compressed sparse format)
-    - Gzipped edge lists (.csv.gz/.tsv.gz) with optional gene lookup
+    - Parquet edge lists (.parquet) - recommended format
+    - Gzipped edge lists (.csv.gz/.tsv.gz) with optional gene lookup (deprecated)
 
     Parameters
     ----------
     path:
         Path to adjacency file. Format is auto-detected from extension.
     genes_path:
-        Optional path to gene lookup file for edge list format.
+        Optional path to gene lookup file for legacy gzipped edge list format.
 
     Returns
     -------
@@ -85,8 +86,20 @@ def load_adjacency(path: str, genes_path: Optional[str] = None) -> Tuple[np.ndar
         from bsvae.networks.extract_networks import load_adjacency_sparse
         return load_adjacency_sparse(path)
 
-    # Handle compressed edge list format
+    # Handle Parquet edge list format (recommended)
+    if ".parquet" in suffixes:
+        from bsvae.networks.extract_networks import load_edge_list_parquet
+        return load_edge_list_parquet(path)
+
+    # Handle compressed edge list format (deprecated)
     if ".gz" in suffixes:
+        import warnings
+        warnings.warn(
+            "Loading from gzipped edge list is deprecated. "
+            "Use Parquet format (.parquet) for better performance.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         from bsvae.networks.extract_networks import load_edge_list_compressed
         return load_edge_list_compressed(path, genes_path)
 

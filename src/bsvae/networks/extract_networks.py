@@ -21,12 +21,15 @@ from __future__ import annotations
 import gzip
 import logging
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import scipy.sparse as sp
 import torch
 import torch.nn.functional as F
@@ -573,6 +576,10 @@ def save_edge_list_compressed(
 ) -> None:
     """Save an adjacency matrix as a compressed edge list.
 
+    .. deprecated::
+        Use :func:`save_edge_list_parquet` instead for better compression
+        and performance.
+
     For large networks, this stores edges using integer indices with a
     separate gene lookup, reducing file size significantly.
 
@@ -593,6 +600,11 @@ def save_edge_list_compressed(
     use_indices
         If True, store integer indices and save genes separately.
     """
+    warnings.warn(
+        "save_edge_list_compressed is deprecated. Use save_edge_list_parquet instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -656,6 +668,9 @@ def load_edge_list_compressed(
 ) -> Tuple[np.ndarray, List[str]]:
     """Load an adjacency matrix from a compressed edge list.
 
+    .. deprecated::
+        Use :func:`load_edge_list_parquet` instead for better performance.
+
     Parameters
     ----------
     path
@@ -671,6 +686,11 @@ def load_edge_list_compressed(
     genes : list[str]
         Gene identifiers.
     """
+    warnings.warn(
+        "load_edge_list_compressed is deprecated. Use load_edge_list_parquet instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     path = Path(path)
 
     # Determine if file is compressed
@@ -736,6 +756,144 @@ def load_edge_list_compressed(
             adjacency[j, i] = weight
 
     logger.info("Loaded edge list from %s: %d genes, %d edges", path, n, len(edges))
+    return adjacency, genes
+
+
+def save_edge_list_parquet(
+    adjacency: np.ndarray,
+    output_path: str,
+    genes: Optional[Sequence[str]] = None,
+    threshold: float = 0.0,
+    include_self: bool = False,
+    compression: str = "zstd",
+) -> None:
+    """Save an adjacency matrix as a Parquet edge list.
+
+    Parquet format provides better compression and faster read/write performance
+    compared to gzipped CSV. Gene names are stored as metadata within the file,
+    eliminating the need for a separate lookup file.
+
+    Parameters
+    ----------
+    adjacency
+        Square matrix encoding weights.
+    output_path
+        Output path. Should end with ``.parquet``. If not, ``.parquet`` is appended.
+    genes
+        Optional list of gene names.
+    threshold
+        Minimum absolute weight to keep an edge.
+    include_self
+        Whether to keep self-loops.
+    compression
+        Parquet compression codec: "zstd" (default, best balance),
+        "snappy" (fastest), "gzip", or None for no compression.
+    """
+    path = Path(output_path)
+    if not str(path).endswith(".parquet"):
+        path = Path(str(path).replace(".csv", "").replace(".tsv", "") + ".parquet")
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if genes is None:
+        genes = [str(i) for i in range(adjacency.shape[0])]
+    genes = list(genes)
+
+    # Collect edges (upper triangle only for symmetric matrix)
+    # Use vectorized operations for better performance
+    n = adjacency.shape[0]
+    triu_idx = np.triu_indices(n, k=1)  # k=1 excludes diagonal
+    weights = adjacency[triu_idx]
+
+    # Apply threshold
+    mask = np.abs(weights) >= threshold
+    if include_self:
+        # Add diagonal entries
+        diag_idx = np.arange(n)
+        diag_weights = adjacency[diag_idx, diag_idx]
+        diag_mask = np.abs(diag_weights) >= threshold
+
+        src_idx = np.concatenate([triu_idx[0][mask], diag_idx[diag_mask]])
+        tgt_idx = np.concatenate([triu_idx[1][mask], diag_idx[diag_mask]])
+        weights = np.concatenate([weights[mask], diag_weights[diag_mask]])
+    else:
+        src_idx = triu_idx[0][mask]
+        tgt_idx = triu_idx[1][mask]
+        weights = weights[mask]
+
+    # Create DataFrame with integer indices for compact storage
+    df = pd.DataFrame({
+        "source_idx": src_idx.astype(np.int32),
+        "target_idx": tgt_idx.astype(np.int32),
+        "weight": weights.astype(np.float32),
+    })
+
+    # Store genes as Parquet metadata
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    genes_json = "\n".join(genes)  # Newline-separated for compatibility
+    metadata = {
+        b"genes": genes_json.encode("utf-8"),
+        b"n_genes": str(len(genes)).encode("utf-8"),
+    }
+    # Merge with existing schema metadata
+    existing_metadata = table.schema.metadata or {}
+    merged_metadata = {**existing_metadata, **metadata}
+    table = table.replace_schema_metadata(merged_metadata)
+
+    pq.write_table(table, path, compression=compression)
+
+    logger.info(
+        "Saved edge list to %s: %d edges (threshold=%.4f, compression=%s)",
+        path,
+        len(df),
+        threshold,
+        compression,
+    )
+
+
+def load_edge_list_parquet(path: str) -> Tuple[np.ndarray, List[str]]:
+    """Load an adjacency matrix from a Parquet edge list.
+
+    Parameters
+    ----------
+    path
+        Path to the Parquet edge list file.
+
+    Returns
+    -------
+    adjacency : np.ndarray
+        Dense adjacency matrix reconstructed from edge list.
+    genes : list[str]
+        Gene identifiers extracted from file metadata.
+    """
+    path = Path(path)
+
+    # Read Parquet file
+    table = pq.read_table(path)
+    df = table.to_pandas()
+
+    # Extract genes from metadata
+    metadata = table.schema.metadata or {}
+    if b"genes" in metadata:
+        genes_str = metadata[b"genes"].decode("utf-8")
+        genes = genes_str.split("\n")
+    else:
+        # Fallback: infer from max index
+        max_idx = max(df["source_idx"].max(), df["target_idx"].max())
+        genes = [str(i) for i in range(max_idx + 1)]
+        logger.warning("No genes metadata found in %s, using numeric indices", path)
+
+    # Build adjacency matrix
+    n = len(genes)
+    adjacency = np.zeros((n, n), dtype=np.float32)
+
+    src_idx = df["source_idx"].values
+    tgt_idx = df["target_idx"].values
+    weights = df["weight"].values
+
+    adjacency[src_idx, tgt_idx] = weights
+    adjacency[tgt_idx, src_idx] = weights  # Symmetric
+
+    logger.info("Loaded edge list from %s: %d genes, %d edges", path, n, len(df))
     return adjacency, genes
 
 
@@ -919,12 +1077,14 @@ def _persist(
             quantize=quantize,
         )
         # Save THRESHOLDED edge list for downstream analysis/visualization
-        save_edge_list_compressed(
+        # Use Parquet format for better compression and performance
+        compression = "zstd" if compress else None
+        save_edge_list_parquet(
             adjacency,
-            os.path.join(output_dir, f"{prefix}_edges.csv"),
+            os.path.join(output_dir, f"{prefix}_edges.parquet"),
             genes,
             threshold=edge_threshold,
-            compress=compress,
+            compression=compression,
         )
     else:
         # Legacy dense format
@@ -959,8 +1119,10 @@ __all__ = [
     "compute_adaptive_threshold",
     "save_adjacency_sparse",
     "load_adjacency_sparse",
-    "save_edge_list_compressed",
-    "load_edge_list_compressed",
+    "save_edge_list_compressed",  # Deprecated
+    "load_edge_list_compressed",  # Deprecated
+    "save_edge_list_parquet",
+    "load_edge_list_parquet",
     "load_expression",
     "create_dataloader_from_expression",
     "run_extraction",

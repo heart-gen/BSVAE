@@ -70,12 +70,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--compress",
         action="store_true",
         default=True,
-        help="Use gzip compression for output files (default: True)",
+        help="Use compression for output files (zstd for Parquet, default: True)",
     )
     extract_parser.add_argument(
         "--no-compress",
         action="store_true",
-        help="Disable compression",
+        help="Disable compression for edge list output",
     )
     extract_parser.add_argument(
         "--target-sparsity",
