@@ -18,14 +18,16 @@ workflows and unit tests.
 """
 from __future__ import annotations
 
+import gzip
 import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 import torch
 import torch.nn.functional as F
 from sklearn.covariance import GraphicalLasso
@@ -298,6 +300,445 @@ def _infer_separator(path: str) -> str:
     return "\t" if ".tsv" in suffixes else ","
 
 
+def compute_adaptive_threshold(adjacency: np.ndarray, target_sparsity: float = 0.01) -> float:
+    """Compute threshold to achieve target sparsity in the adjacency matrix.
+
+    Parameters
+    ----------
+    adjacency
+        Square adjacency matrix.
+    target_sparsity
+        Target fraction of edges to keep (e.g., 0.01 = top 1%).
+
+    Returns
+    -------
+    float
+        Threshold value such that keeping edges >= threshold yields target sparsity.
+    """
+    # Use upper triangle only (symmetric matrix)
+    triu_idx = np.triu_indices(adjacency.shape[0], k=1)
+    weights = np.abs(adjacency[triu_idx])
+    n_edges_target = max(1, int(len(weights) * target_sparsity))
+    # Find threshold that keeps top n_edges_target
+    if n_edges_target >= len(weights):
+        return 0.0
+    threshold = np.partition(weights, -n_edges_target)[-n_edges_target]
+    return float(threshold)
+
+
+def save_adjacency_sparse(
+    adjacency: np.ndarray,
+    output_path: str,
+    genes: Optional[Sequence[str]] = None,
+    threshold: float = 0.0,
+    compress: bool = True,
+    quantize: Union[bool, str] = True,
+) -> None:
+    """Save an adjacency matrix in compressed format.
+
+    For symmetric matrices, only the upper triangle values are stored (no indices
+    needed for dense matrices), reducing size by ~50%. Combined with quantization
+    and gzip compression, a 20k gene network can be stored in ~50-80 MB.
+
+    Storage format:
+    - Dense networks (>50% non-zero): Store upper triangle values as flat array
+    - Sparse networks: Store COO format (row, col, data)
+
+    Parameters
+    ----------
+    adjacency
+        Square matrix to save.
+    output_path
+        Destination path. Should end with ``.npz``.
+    genes
+        Optional gene identifiers to save alongside the matrix.
+    threshold
+        Minimum absolute weight to keep an edge. Edges below threshold are zeroed.
+        Use threshold=0 to keep all edges (recommended for clustering).
+    compress
+        Whether to use compression (default True).
+    quantize
+        Quantization level for values:
+        - True or "float16": Use float16 (default, good balance)
+        - "int8": Use int8 for values in [-1, 1] range (smallest, ~50 MB for 20k genes)
+        - False or "float32": No quantization (largest, most precise)
+    """
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    n = adjacency.shape[0]
+
+    # Apply threshold
+    if threshold > 0:
+        mask = np.abs(adjacency) >= threshold
+        adjacency = adjacency * mask
+
+    # Extract upper triangle values (including diagonal)
+    triu_idx = np.triu_indices(n)
+    triu_data = adjacency[triu_idx]
+
+    # Check sparsity to decide storage format
+    n_nonzero = np.sum(triu_data != 0)
+    n_total = len(triu_data)
+    density = n_nonzero / n_total
+
+    # Prepare gene list
+    if genes is None:
+        genes = [str(i) for i in range(n)]
+    genes_arr = np.array(genes, dtype=object)
+
+    # Determine quantization
+    scale_factor = None
+    if quantize == "int8":
+        # Quantize to int8 - good for similarity values in [-1, 1]
+        # Scale to use full int8 range
+        vmin, vmax = triu_data.min(), triu_data.max()
+        scale_factor = max(abs(vmin), abs(vmax))
+        if scale_factor > 0:
+            triu_data_q = (triu_data / scale_factor * 127).astype(np.int8)
+        else:
+            triu_data_q = np.zeros_like(triu_data, dtype=np.int8)
+        dtype = np.int8
+        dtype_name = "int8"
+    elif quantize is False or quantize == "float32":
+        triu_data_q = triu_data.astype(np.float32)
+        dtype = np.float32
+        dtype_name = "float32"
+    else:  # True or "float16"
+        triu_data_q = triu_data.astype(np.float16)
+        dtype = np.float16
+        dtype_name = "float16"
+
+    save_func = np.savez_compressed if compress else np.savez
+
+    if density > 0.5:
+        # Dense storage: just store upper triangle values as flat array
+        save_dict = {
+            "triu_values": triu_data_q,
+            "n": np.array([n], dtype=np.int32),
+            "genes": genes_arr,
+            "storage_format": np.array(["dense_triu"], dtype=object),
+            "dtype": np.array([dtype_name], dtype=object),
+        }
+        if scale_factor is not None:
+            save_dict["scale_factor"] = np.array([scale_factor], dtype=np.float32)
+
+        save_func(path, **save_dict)
+        logger.info(
+            "Saved dense adjacency to %s: %d genes, %.1f%% density, dtype=%s",
+            path,
+            n,
+            density * 100,
+            dtype_name,
+        )
+    else:
+        # Sparse storage: store only non-zero entries with indices
+        nonzero_mask = triu_data != 0
+        row = triu_idx[0][nonzero_mask]
+        col = triu_idx[1][nonzero_mask]
+
+        if quantize == "int8" and scale_factor is not None and scale_factor > 0:
+            data_q = (triu_data[nonzero_mask] / scale_factor * 127).astype(np.int8)
+        elif quantize is False or quantize == "float32":
+            data_q = triu_data[nonzero_mask].astype(np.float32)
+        else:
+            data_q = triu_data[nonzero_mask].astype(np.float16)
+
+        # Use int16 for indices if n < 32768, otherwise int32
+        idx_dtype = np.int16 if n < 32768 else np.int32
+
+        save_dict = {
+            "data": data_q,
+            "row": row.astype(idx_dtype),
+            "col": col.astype(idx_dtype),
+            "n": np.array([n], dtype=np.int32),
+            "genes": genes_arr,
+            "storage_format": np.array(["sparse_triu"], dtype=object),
+            "dtype": np.array([dtype_name], dtype=object),
+        }
+        if scale_factor is not None:
+            save_dict["scale_factor"] = np.array([scale_factor], dtype=np.float32)
+
+        save_func(path, **save_dict)
+        logger.info(
+            "Saved sparse adjacency to %s: %d genes, %d edges (%.1f%% density), dtype=%s",
+            path,
+            n,
+            n_nonzero,
+            density * 100,
+            dtype_name,
+        )
+
+
+def load_adjacency_sparse(path: str) -> Tuple[np.ndarray, List[str]]:
+    """Load an adjacency matrix from NPZ format.
+
+    Handles multiple storage formats:
+    - dense_triu: Upper triangle values stored as flat array (for dense matrices)
+    - sparse_triu: Upper triangle with indices (for sparse matrices)
+    - Legacy formats with 'shape' key
+
+    Automatically handles int8/float16/float32 quantization and rescaling.
+
+    Parameters
+    ----------
+    path
+        Path to the ``.npz`` file.
+
+    Returns
+    -------
+    adjacency : np.ndarray
+        Dense adjacency matrix reconstructed from storage.
+    genes : list[str]
+        Gene identifiers.
+    """
+    data = np.load(path, allow_pickle=True)
+    genes = list(data["genes"])
+
+    # Detect storage format and dtype
+    storage_format = None
+    if "storage_format" in data:
+        storage_format = str(data["storage_format"][0])
+
+    # Get scale factor for int8 quantization
+    scale_factor = None
+    if "scale_factor" in data:
+        scale_factor = float(data["scale_factor"][0])
+
+    def dequantize(values):
+        """Convert quantized values back to float32."""
+        if scale_factor is not None and values.dtype == np.int8:
+            return (values.astype(np.float32) / 127.0) * scale_factor
+        return values.astype(np.float32)
+
+    if storage_format == "dense_triu":
+        # Dense upper triangle storage
+        n = int(data["n"][0])
+        triu_values = dequantize(data["triu_values"])
+
+        # Reconstruct full symmetric matrix
+        adjacency = np.zeros((n, n), dtype=np.float32)
+        triu_idx = np.triu_indices(n)
+        adjacency[triu_idx] = triu_values
+        # Mirror to lower triangle
+        adjacency = adjacency + adjacency.T - np.diag(np.diag(adjacency))
+
+    elif storage_format == "sparse_triu":
+        # Sparse upper triangle storage
+        n = int(data["n"][0])
+        row = data["row"]
+        col = data["col"]
+        values = dequantize(data["data"])
+
+        # Reconstruct full symmetric matrix
+        adjacency = np.zeros((n, n), dtype=np.float32)
+        adjacency[row, col] = values
+        # Mirror to lower triangle (excluding diagonal)
+        off_diag_mask = row != col
+        adjacency[col[off_diag_mask], row[off_diag_mask]] = values[off_diag_mask]
+
+    elif "shape" in data:
+        # Legacy full sparse format
+        shape = tuple(data["shape"])
+        row = data["row"]
+        col = data["col"]
+        values = dequantize(data["data"])
+
+        if "upper_triangle" in data and data["upper_triangle"][0]:
+            # Legacy upper triangle format
+            n = shape[0]
+            adjacency = np.zeros(shape, dtype=np.float32)
+            adjacency[row, col] = values
+            off_diag_mask = row != col
+            adjacency[col[off_diag_mask], row[off_diag_mask]] = values[off_diag_mask]
+        else:
+            # Full COO sparse format
+            sparse_adj = sp.coo_matrix((values, (row, col)), shape=shape)
+            adjacency = sparse_adj.toarray().astype(np.float32)
+    else:
+        raise ValueError(f"Unknown adjacency storage format in {path}")
+
+    logger.info("Loaded adjacency from %s: %d genes", path, len(genes))
+    return adjacency, genes
+
+
+def save_edge_list_compressed(
+    adjacency: np.ndarray,
+    output_path: str,
+    genes: Optional[Sequence[str]] = None,
+    threshold: float = 0.0,
+    include_self: bool = False,
+    compress: bool = True,
+    use_indices: bool = True,
+) -> None:
+    """Save an adjacency matrix as a compressed edge list.
+
+    For large networks, this stores edges using integer indices with a
+    separate gene lookup, reducing file size significantly.
+
+    Parameters
+    ----------
+    adjacency
+        Square matrix encoding weights.
+    output_path
+        Output path. If compress=True and path doesn't end with .gz, .gz is appended.
+    genes
+        Optional list of gene names.
+    threshold
+        Minimum absolute weight to keep an edge.
+    include_self
+        Whether to keep self-loops.
+    compress
+        Whether to gzip the output (default True).
+    use_indices
+        If True, store integer indices and save genes separately.
+    """
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if genes is None:
+        genes = list(range(adjacency.shape[0]))
+    genes = list(genes)
+
+    # Determine separator from original path (before adding .gz)
+    base_path = str(path).rstrip(".gz")
+    sep = "," if Path(base_path).suffix.lower() == ".csv" else "\t"
+
+    # Collect edges (upper triangle only for symmetric matrix)
+    edges = []
+    for i in range(adjacency.shape[0]):
+        for j in range(i + 1, adjacency.shape[1]):  # Upper triangle only
+            if not include_self and i == j:
+                continue
+            weight = adjacency[i, j]
+            if abs(weight) >= threshold:
+                edges.append((i, j, weight))
+
+    # Prepare output path
+    if compress and not str(path).endswith(".gz"):
+        path = Path(str(path) + ".gz")
+
+    # Write edges
+    open_func = gzip.open if compress else open
+    mode = "wt" if compress else "w"
+
+    with open_func(path, mode) as f:
+        if use_indices:
+            f.write(f"source_idx{sep}target_idx{sep}weight\n")
+            for src, tgt, weight in edges:
+                f.write(f"{src}{sep}{tgt}{sep}{weight:.6g}\n")
+        else:
+            f.write(f"source{sep}target{sep}weight\n")
+            for src, tgt, weight in edges:
+                f.write(f"{genes[src]}{sep}{genes[tgt]}{sep}{weight:.6g}\n")
+
+    # Save gene lookup if using indices
+    if use_indices:
+        gene_path = path.parent / (path.stem.replace(".csv", "").replace(".tsv", "") + "_genes.txt")
+        if compress:
+            gene_path = Path(str(gene_path).rstrip(".gz"))
+        with open(gene_path, "w") as f:
+            for gene in genes:
+                f.write(f"{gene}\n")
+        logger.info("Saved gene lookup to %s", gene_path)
+
+    logger.info(
+        "Saved compressed edge list to %s: %d edges (threshold=%.4f)",
+        path,
+        len(edges),
+        threshold,
+    )
+
+
+def load_edge_list_compressed(
+    path: str,
+    genes_path: Optional[str] = None,
+) -> Tuple[np.ndarray, List[str]]:
+    """Load an adjacency matrix from a compressed edge list.
+
+    Parameters
+    ----------
+    path
+        Path to the edge list file (can be gzipped).
+    genes_path
+        Optional path to gene lookup file. If not provided, attempts to
+        find it automatically.
+
+    Returns
+    -------
+    adjacency : np.ndarray
+        Dense adjacency matrix reconstructed from edge list.
+    genes : list[str]
+        Gene identifiers.
+    """
+    path = Path(path)
+
+    # Determine if file is compressed
+    is_compressed = str(path).endswith(".gz")
+    open_func = gzip.open if is_compressed else open
+    mode = "rt" if is_compressed else "r"
+
+    # Read edges
+    edges = []
+    with open_func(path, mode) as f:
+        header = f.readline().strip()
+        sep = "\t" if "\t" in header else ","
+        cols = header.split(sep)
+        use_indices = "source_idx" in cols
+
+        for line in f:
+            parts = line.strip().split(sep)
+            src, tgt, weight = parts[0], parts[1], float(parts[2])
+            if use_indices:
+                edges.append((int(src), int(tgt), weight))
+            else:
+                edges.append((src, tgt, weight))
+
+    # Load or infer genes
+    if use_indices:
+        if genes_path is None:
+            # Try to find gene file automatically
+            stem = path.stem.replace(".csv", "").replace(".tsv", "").replace(".gz", "")
+            genes_path = path.parent / f"{stem}_genes.txt"
+            if not genes_path.exists():
+                # Try without .gz suffix removal
+                stem = path.name.replace(".csv.gz", "").replace(".tsv.gz", "")
+                genes_path = path.parent / f"{stem}_genes.txt"
+
+        if genes_path and Path(genes_path).exists():
+            with open(genes_path) as f:
+                genes = [line.strip() for line in f]
+        else:
+            # Infer size from max index
+            max_idx = max(max(e[0], e[1]) for e in edges)
+            genes = [str(i) for i in range(max_idx + 1)]
+    else:
+        # Extract unique genes from edges
+        all_genes = set()
+        for src, tgt, _ in edges:
+            all_genes.add(src)
+            all_genes.add(tgt)
+        genes = sorted(all_genes)
+
+    # Build adjacency matrix
+    n = len(genes)
+    adjacency = np.zeros((n, n), dtype=np.float32)
+
+    if use_indices:
+        for src, tgt, weight in edges:
+            adjacency[src, tgt] = weight
+            adjacency[tgt, src] = weight  # Symmetric
+    else:
+        gene_to_idx = {g: i for i, g in enumerate(genes)}
+        for src, tgt, weight in edges:
+            i, j = gene_to_idx[src], gene_to_idx[tgt]
+            adjacency[i, j] = weight
+            adjacency[j, i] = weight
+
+    logger.info("Loaded edge list from %s: %d genes, %d edges", path, n, len(edges))
+    return adjacency, genes
+
+
 def load_expression(path: str) -> pd.DataFrame:
     """Load a gene expression matrix (genes × samples)."""
 
@@ -355,6 +796,10 @@ def run_extraction(
     alpha: float = 0.01,
     output_dir: Optional[str] = None,
     create_heatmaps: bool = False,
+    sparse: bool = True,
+    compress: bool = True,
+    target_sparsity: float = 0.01,
+    quantize: Union[bool, str] = "int8",
 ) -> List[NetworkResults]:
     """Run requested network extraction methods.
 
@@ -369,13 +814,24 @@ def run_extraction(
     methods
         Iterable of methods to compute (case-insensitive).
     threshold
-        Threshold applied when writing edge lists.
+        Threshold applied when writing edge lists. If 0 and sparse=True,
+        an adaptive threshold is computed based on target_sparsity.
     alpha
         Graphical Lasso regularization strength.
     output_dir
         Optional directory to persist results.
     create_heatmaps
         When ``True`` generate matplotlib heatmaps for adjacencies.
+    sparse
+        When ``True`` (default), save adjacency in sparse NPZ format and
+        apply thresholding to reduce file size.
+    compress
+        When ``True`` (default), use gzip compression for edge lists.
+    target_sparsity
+        Target fraction of edges to keep when using adaptive thresholding
+        (default 0.01 = top 1% of edges).
+    quantize
+        Quantization level: "int8" (smallest), "float16", or "float32".
 
     Returns
     -------
@@ -398,37 +854,83 @@ def run_extraction(
     if "w_similarity" in methods:
         adjacency = compute_W_similarity(W)
         results.append(NetworkResults("w_similarity", adjacency))
-        _persist(adjacency, genes, output_dir, "w_similarity", threshold, create_heatmaps)
+        _persist(adjacency, genes, output_dir, "w_similarity", threshold, create_heatmaps, sparse, compress, target_sparsity, quantize)
 
     if "latent_cov" in methods:
         logvar_mean = torch.from_numpy(logvar).to(device).mean(dim=0)
         cov, corr = compute_latent_covariance(W, logvar_mean)
         results.append(NetworkResults("latent_cov", cov, {"correlation": corr}))
-        _persist(cov, genes, output_dir, "latent_cov", threshold, create_heatmaps)
+        _persist(cov, genes, output_dir, "latent_cov", threshold, create_heatmaps, sparse, compress, target_sparsity, quantize)
         if output_dir:
-            save_adjacency_matrix(corr, os.path.join(output_dir, "latent_cov_correlation.csv"), genes)
+            # Also save correlation in sparse format
+            _persist(corr, genes, output_dir, "latent_cov_correlation", threshold, False, sparse, compress, target_sparsity, quantize)
 
     if "graphical_lasso" in methods:
         precision, covariance, adjacency = compute_graphical_lasso(mu, W, alpha=alpha)
         results.append(NetworkResults("graphical_lasso", adjacency, {"precision": precision, "covariance": covariance}))
-        _persist(adjacency, genes, output_dir, "graphical_lasso", threshold, create_heatmaps)
+        _persist(adjacency, genes, output_dir, "graphical_lasso", threshold, create_heatmaps, sparse, compress, target_sparsity, quantize)
         if output_dir:
-            save_adjacency_matrix(precision, os.path.join(output_dir, "graphical_lasso_precision.csv"), genes)
+            _persist(precision, genes, output_dir, "graphical_lasso_precision", threshold, False, sparse, compress, target_sparsity, quantize)
 
     if "laplacian" in methods and getattr(model, "laplacian_matrix", None) is not None:
         adjacency = compute_laplacian_refined(W, model.laplacian_matrix.to(device))
         results.append(NetworkResults("laplacian", adjacency))
-        _persist(adjacency, genes, output_dir, "laplacian", threshold, create_heatmaps)
+        _persist(adjacency, genes, output_dir, "laplacian", threshold, create_heatmaps, sparse, compress, target_sparsity, quantize)
 
     return results
 
 
-def _persist(adjacency: np.ndarray, genes: Sequence[str], output_dir: Optional[str], prefix: str, threshold: float, create_heatmaps: bool) -> None:
+def _persist(
+    adjacency: np.ndarray,
+    genes: Sequence[str],
+    output_dir: Optional[str],
+    prefix: str,
+    threshold: float,
+    create_heatmaps: bool,
+    sparse: bool = True,
+    compress: bool = True,
+    target_sparsity: float = 0.01,
+    quantize: Union[bool, str] = "int8",
+) -> None:
     if not output_dir:
         return
     os.makedirs(output_dir, exist_ok=True)
-    save_adjacency_matrix(adjacency, os.path.join(output_dir, f"{prefix}_adjacency.csv"), genes)
-    save_edge_list(adjacency, os.path.join(output_dir, f"{prefix}_edges.csv"), genes, threshold=threshold)
+
+    # Compute adaptive threshold for edge list (thresholded for downstream use)
+    edge_threshold = threshold
+    if sparse and threshold == 0.0:
+        edge_threshold = compute_adaptive_threshold(adjacency, target_sparsity)
+        logger.info(
+            "Using adaptive threshold %.4f for %s edge list (target sparsity=%.1f%%)",
+            edge_threshold,
+            prefix,
+            target_sparsity * 100,
+        )
+
+    if sparse:
+        # Save FULL adjacency matrix (threshold=0) for clustering accuracy
+        # Compression + quantization provides significant size reduction
+        save_adjacency_sparse(
+            adjacency,
+            os.path.join(output_dir, f"{prefix}_adjacency.npz"),
+            genes,
+            threshold=0.0,  # Keep all edges for clustering
+            compress=compress,
+            quantize=quantize,
+        )
+        # Save THRESHOLDED edge list for downstream analysis/visualization
+        save_edge_list_compressed(
+            adjacency,
+            os.path.join(output_dir, f"{prefix}_edges.csv"),
+            genes,
+            threshold=edge_threshold,
+            compress=compress,
+        )
+    else:
+        # Legacy dense format
+        save_adjacency_matrix(adjacency, os.path.join(output_dir, f"{prefix}_adjacency.csv"), genes)
+        save_edge_list(adjacency, os.path.join(output_dir, f"{prefix}_edges.csv"), genes, threshold=threshold)
+
     if create_heatmaps:
         try:
             import matplotlib.pyplot as plt
@@ -454,6 +956,11 @@ __all__ = [
     "compute_laplacian_refined",
     "save_adjacency_matrix",
     "save_edge_list",
+    "compute_adaptive_threshold",
+    "save_adjacency_sparse",
+    "load_adjacency_sparse",
+    "save_edge_list_compressed",
+    "load_edge_list_compressed",
     "load_expression",
     "create_dataloader_from_expression",
     "run_extraction",

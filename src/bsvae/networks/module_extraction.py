@@ -32,8 +32,12 @@ logger = logging.getLogger(__name__)
 
 
 def _infer_separator(path: str) -> str:
-    suffix = Path(path).suffix.lower()
-    return "\t" if suffix == ".tsv" else ","
+    # Handle compressed files
+    suffixes = Path(path).suffixes
+    for suffix in suffixes:
+        if suffix.lower() == ".tsv":
+            return "\t"
+    return ","
 
 
 def _ensure_array_and_genes(A: np.ndarray | pd.DataFrame, genes: Optional[Sequence[str]] = None) -> Tuple[np.ndarray, List[str]]:
@@ -51,22 +55,42 @@ def _ensure_array_and_genes(A: np.ndarray | pd.DataFrame, genes: Optional[Sequen
     return arr, genes
 
 
-def load_adjacency(path: str) -> Tuple[np.ndarray, List[str]]:
+def load_adjacency(path: str, genes_path: Optional[str] = None) -> Tuple[np.ndarray, List[str]]:
     """Load an adjacency matrix with gene labels.
+
+    Supports multiple formats:
+    - CSV/TSV files with genes as index and columns (legacy dense format)
+    - NPZ files with sparse matrix storage (compressed sparse format)
+    - Gzipped edge lists (.csv.gz/.tsv.gz) with optional gene lookup
 
     Parameters
     ----------
     path:
-        CSV/TSV file with genes as the index and columns.
+        Path to adjacency file. Format is auto-detected from extension.
+    genes_path:
+        Optional path to gene lookup file for edge list format.
 
     Returns
     -------
     adjacency : np.ndarray
         Square matrix of edge weights.
     genes : list[str]
-        Gene identifiers derived from the file index.
+        Gene identifiers derived from the file.
     """
+    path_obj = Path(path)
+    suffixes = [s.lower() for s in path_obj.suffixes]
 
+    # Handle sparse NPZ format
+    if ".npz" in suffixes:
+        from bsvae.networks.extract_networks import load_adjacency_sparse
+        return load_adjacency_sparse(path)
+
+    # Handle compressed edge list format
+    if ".gz" in suffixes:
+        from bsvae.networks.extract_networks import load_edge_list_compressed
+        return load_edge_list_compressed(path, genes_path)
+
+    # Legacy dense CSV/TSV format
     sep = _infer_separator(path)
     df = pd.read_csv(path, sep=sep)
 

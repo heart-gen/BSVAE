@@ -15,6 +15,7 @@ from bsvae.networks.extract_networks import (
     load_model,
     run_extraction,
     save_adjacency_matrix,
+    save_adjacency_sparse,
 )
 from bsvae.latent.latent_export import extract_latents, save_latents
 from bsvae.networks.module_extraction import (
@@ -51,9 +52,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="Methods to run: w_similarity (default), latent_cov, graphical_lasso, laplacian",
     )
     extract_parser.add_argument("--batch-size", type=int, default=128)
-    extract_parser.add_argument("--threshold", type=float, default=0.0, help="Edge weight threshold when saving edge lists")
+    extract_parser.add_argument("--threshold", type=float, default=0.0, help="Edge weight threshold when saving edge lists (0=auto)")
     extract_parser.add_argument("--alpha", type=float, default=0.01, help="Graphical Lasso regularization strength")
     extract_parser.add_argument("--heatmaps", action="store_true", help="Save heatmap visualizations of adjacencies")
+    extract_parser.add_argument(
+        "--sparse",
+        action="store_true",
+        default=True,
+        help="Save adjacency in sparse NPZ format (default: True)",
+    )
+    extract_parser.add_argument(
+        "--no-sparse",
+        action="store_true",
+        help="Disable sparse storage, use dense CSV format",
+    )
+    extract_parser.add_argument(
+        "--compress",
+        action="store_true",
+        default=True,
+        help="Use gzip compression for output files (default: True)",
+    )
+    extract_parser.add_argument(
+        "--no-compress",
+        action="store_true",
+        help="Disable compression",
+    )
+    extract_parser.add_argument(
+        "--target-sparsity",
+        type=float,
+        default=0.01,
+        help="Target fraction of edges to keep when using adaptive threshold (default: 0.01 = 1%%)",
+    )
+    extract_parser.add_argument(
+        "--quantize",
+        choices=["int8", "float16", "float32"],
+        default="int8",
+        help="Quantization level for adjacency values: int8 (smallest, ~50MB for 20k genes), "
+        "float16 (balanced), float32 (no quantization). Default: int8",
+    )
 
     latent_parser = subparsers.add_parser("export-latents", help="Export encoder mu/logvar for a dataset.")
     latent_parser.add_argument("--model-path", required=True, help="Directory with specs.json/model.pt or checkpoint path")
@@ -113,7 +149,16 @@ def handle_extract_networks(args, logger: logging.Logger) -> None:
     model = load_model(args.model_path)
     dataloader, genes, _ = create_dataloader_from_expression(args.dataset, batch_size=args.batch_size)
 
+    # Handle --no-sparse and --no-compress flags
+    sparse = args.sparse and not getattr(args, "no_sparse", False)
+    compress = args.compress and not getattr(args, "no_compress", False)
+
     logger.info("Running methods: %s", ", ".join(args.methods))
+    logger.info(
+        "Storage options: sparse=%s, compress=%s, quantize=%s, target_sparsity=%.2f%%",
+        sparse, compress, args.quantize, args.target_sparsity * 100,
+    )
+
     results = run_extraction(
         model=model,
         dataloader=dataloader,
@@ -123,6 +168,10 @@ def handle_extract_networks(args, logger: logging.Logger) -> None:
         alpha=args.alpha,
         output_dir=args.output_dir,
         create_heatmaps=args.heatmaps,
+        sparse=sparse,
+        compress=compress,
+        target_sparsity=args.target_sparsity,
+        quantize=args.quantize,
     )
     logger.info("Completed extraction; saved results to %s", args.output_dir)
 
@@ -178,8 +227,9 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
         if not results:
             raise RuntimeError("No adjacency matrices were produced")
         adjacency = results[0].adjacency
-        adjacency_path = Path(args.output_dir) / f"{args.network_method}_adjacency.csv"
-        save_adjacency_matrix(adjacency, adjacency_path.as_posix(), genes)
+        # Save in sparse compressed format by default
+        adjacency_path = Path(args.output_dir) / f"{args.network_method}_adjacency.npz"
+        save_adjacency_sparse(adjacency, adjacency_path.as_posix(), genes, threshold=0.0, compress=True)
         logger.info("Saved computed adjacency to %s", adjacency_path)
 
     # Convert adjacency to DataFrame with gene labels so clustering functions
