@@ -19,12 +19,13 @@ workflows and unit tests.
 from __future__ import annotations
 
 import gzip
+import heapq
 import logging
 import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -303,8 +304,49 @@ def _infer_separator(path: str) -> str:
     return "\t" if ".tsv" in suffixes else ","
 
 
+def _iter_upper_triangle(
+    adjacency: np.ndarray,
+    threshold: float = 0.0,
+    include_diagonal: bool = False,
+) -> Iterator[Tuple[int, int, float]]:
+    """Stream upper-triangle edges without materializing the full triangle.
+
+    Yields (i, j, weight) tuples for edges with |weight| >= threshold.
+    Iterates row-by-row to avoid O(n^2) memory allocation.
+
+    Parameters
+    ----------
+    adjacency
+        Square adjacency matrix.
+    threshold
+        Minimum absolute weight to yield an edge (default 0 yields all).
+    include_diagonal
+        Whether to include diagonal entries (i == j).
+
+    Yields
+    ------
+    Tuple[int, int, float]
+        (row_index, col_index, weight) for each edge above threshold.
+    """
+    n = adjacency.shape[0]
+    for i in range(n):
+        start_j = i if include_diagonal else i + 1
+        row = adjacency[i, start_j:]
+        if threshold > 0:
+            mask = np.abs(row) >= threshold
+            cols = np.where(mask)[0] + start_j
+            for j in cols:
+                yield i, j, float(adjacency[i, j])
+        else:
+            for offset, w in enumerate(row):
+                yield i, start_j + offset, float(w)
+
+
 def compute_adaptive_threshold(adjacency: np.ndarray, target_sparsity: float = 0.01) -> float:
     """Compute threshold to achieve target sparsity in the adjacency matrix.
+
+    Uses a streaming heap-based algorithm to avoid materializing the full
+    upper triangle, which is critical for large networks.
 
     Parameters
     ----------
@@ -318,15 +360,26 @@ def compute_adaptive_threshold(adjacency: np.ndarray, target_sparsity: float = 0
     float
         Threshold value such that keeping edges >= threshold yields target sparsity.
     """
-    # Use upper triangle only (symmetric matrix)
-    triu_idx = np.triu_indices(adjacency.shape[0], k=1)
-    weights = np.abs(adjacency[triu_idx])
-    n_edges_target = max(1, int(len(weights) * target_sparsity))
-    # Find threshold that keeps top n_edges_target
-    if n_edges_target >= len(weights):
+    n = adjacency.shape[0]
+    n_total_edges = n * (n - 1) // 2  # Upper triangle without diagonal
+    n_edges_target = max(1, int(n_total_edges * target_sparsity))
+
+    if n_edges_target >= n_total_edges:
         return 0.0
-    threshold = np.partition(weights, -n_edges_target)[-n_edges_target]
-    return float(threshold)
+
+    # Use a min-heap to track top k largest absolute weights.
+    # The heap stores absolute values; at the end the minimum is our threshold.
+    top_k: List[float] = []
+
+    for i in range(n):
+        row = np.abs(adjacency[i, i + 1:])
+        for w in row:
+            if len(top_k) < n_edges_target:
+                heapq.heappush(top_k, w)
+            elif w > top_k[0]:
+                heapq.heapreplace(top_k, w)
+
+    return float(top_k[0]) if top_k else 0.0
 
 
 def save_adjacency_sparse(
@@ -346,6 +399,9 @@ def save_adjacency_sparse(
     Storage format:
     - Dense networks (>50% non-zero): Store upper triangle values as flat array
     - Sparse networks: Store COO format (row, col, data)
+
+    When threshold > 0, streaming is used to avoid materializing the full upper
+    triangle, which is critical for large networks.
 
     Parameters
     ----------
@@ -371,11 +427,78 @@ def save_adjacency_sparse(
 
     n = adjacency.shape[0]
 
-    # Apply threshold
-    if threshold > 0:
-        mask = np.abs(adjacency) >= threshold
-        adjacency = adjacency * mask
+    # Prepare gene list
+    if genes is None:
+        genes = [str(i) for i in range(n)]
+    genes_arr = np.array(genes, dtype=object)
 
+    save_func = np.savez_compressed if compress else np.savez
+
+    # Determine dtype name for metadata
+    if quantize == "int8":
+        dtype_name = "int8"
+    elif quantize is False or quantize == "float32":
+        dtype_name = "float32"
+    else:
+        dtype_name = "float16"
+
+    # When threshold > 0, use streaming to avoid materializing full upper triangle.
+    # This is critical for large networks where upper triangle has ~n^2/2 entries.
+    if threshold > 0:
+        # Stream edges row-by-row, collecting only those above threshold
+        rows: List[int] = []
+        cols: List[int] = []
+        data: List[float] = []
+        for i, j, w in _iter_upper_triangle(adjacency, threshold=threshold, include_diagonal=True):
+            rows.append(i)
+            cols.append(j)
+            data.append(w)
+
+        n_nonzero = len(data)
+        n_total = n * (n + 1) // 2  # Upper triangle including diagonal
+        density = n_nonzero / n_total
+
+        # Quantize sparse data
+        data_arr = np.array(data, dtype=np.float32)
+        scale_factor = None
+        if quantize == "int8":
+            scale_factor = np.abs(data_arr).max() if len(data_arr) > 0 else 0.0
+            if scale_factor > 0:
+                data_q = (data_arr / scale_factor * 127).astype(np.int8)
+            else:
+                data_q = np.zeros(len(data_arr), dtype=np.int8)
+        elif quantize is False or quantize == "float32":
+            data_q = data_arr
+        else:
+            data_q = data_arr.astype(np.float16)
+
+        # Use int16 for indices if n < 32768, otherwise int32
+        idx_dtype = np.int16 if n < 32768 else np.int32
+
+        save_dict = {
+            "data": data_q,
+            "row": np.array(rows, dtype=idx_dtype),
+            "col": np.array(cols, dtype=idx_dtype),
+            "n": np.array([n], dtype=np.int32),
+            "genes": genes_arr,
+            "storage_format": np.array(["sparse_triu"], dtype=object),
+            "dtype": np.array([dtype_name], dtype=object),
+        }
+        if scale_factor is not None:
+            save_dict["scale_factor"] = np.array([scale_factor], dtype=np.float32)
+
+        save_func(path, **save_dict)
+        logger.info(
+            "Saved sparse adjacency to %s: %d genes, %d edges (%.1f%% density), dtype=%s",
+            path,
+            n,
+            n_nonzero,
+            density * 100,
+            dtype_name,
+        )
+        return
+
+    # threshold = 0: need full upper triangle for dense storage or density check.
     # Extract upper triangle values (including diagonal)
     triu_idx = np.triu_indices(n)
     triu_data = adjacency[triu_idx]
@@ -384,11 +507,6 @@ def save_adjacency_sparse(
     n_nonzero = np.sum(triu_data != 0)
     n_total = len(triu_data)
     density = n_nonzero / n_total
-
-    # Prepare gene list
-    if genes is None:
-        genes = [str(i) for i in range(n)]
-    genes_arr = np.array(genes, dtype=object)
 
     # Determine quantization
     scale_factor = None
@@ -401,18 +519,10 @@ def save_adjacency_sparse(
             triu_data_q = (triu_data / scale_factor * 127).astype(np.int8)
         else:
             triu_data_q = np.zeros_like(triu_data, dtype=np.int8)
-        dtype = np.int8
-        dtype_name = "int8"
     elif quantize is False or quantize == "float32":
         triu_data_q = triu_data.astype(np.float32)
-        dtype = np.float32
-        dtype_name = "float32"
     else:  # True or "float16"
         triu_data_q = triu_data.astype(np.float16)
-        dtype = np.float16
-        dtype_name = "float16"
-
-    save_func = np.savez_compressed if compress else np.savez
 
     if density > 0.5:
         # Dense storage: just store upper triangle values as flat array
@@ -798,33 +908,23 @@ def save_edge_list_parquet(
         genes = [str(i) for i in range(adjacency.shape[0])]
     genes = list(genes)
 
-    # Collect edges (upper triangle only for symmetric matrix)
-    # Use vectorized operations for better performance
-    n = adjacency.shape[0]
-    triu_idx = np.triu_indices(n, k=1)  # k=1 excludes diagonal
-    weights = adjacency[triu_idx]
+    # Stream edges row-by-row to avoid materializing full upper triangle.
+    # For large networks (e.g., 20k genes), the upper triangle has ~200M entries;
+    # streaming keeps memory proportional to the number of edges above threshold.
+    src_list: List[int] = []
+    tgt_list: List[int] = []
+    weight_list: List[float] = []
 
-    # Apply threshold
-    mask = np.abs(weights) >= threshold
-    if include_self:
-        # Add diagonal entries
-        diag_idx = np.arange(n)
-        diag_weights = adjacency[diag_idx, diag_idx]
-        diag_mask = np.abs(diag_weights) >= threshold
-
-        src_idx = np.concatenate([triu_idx[0][mask], diag_idx[diag_mask]])
-        tgt_idx = np.concatenate([triu_idx[1][mask], diag_idx[diag_mask]])
-        weights = np.concatenate([weights[mask], diag_weights[diag_mask]])
-    else:
-        src_idx = triu_idx[0][mask]
-        tgt_idx = triu_idx[1][mask]
-        weights = weights[mask]
+    for i, j, w in _iter_upper_triangle(adjacency, threshold=threshold, include_diagonal=include_self):
+        src_list.append(i)
+        tgt_list.append(j)
+        weight_list.append(w)
 
     # Create DataFrame with integer indices for compact storage
     df = pd.DataFrame({
-        "source_idx": src_idx.astype(np.int32),
-        "target_idx": tgt_idx.astype(np.int32),
-        "weight": weights.astype(np.float32),
+        "source_idx": np.array(src_list, dtype=np.int32),
+        "target_idx": np.array(tgt_list, dtype=np.int32),
+        "weight": np.array(weight_list, dtype=np.float32),
     })
 
     # Store genes as Parquet metadata
