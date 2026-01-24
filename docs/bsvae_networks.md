@@ -133,6 +133,9 @@ Adjacency matrices are **continuous** and must be clustered to obtain discrete m
 
 ### Option A: Use a precomputed adjacency
 
+`--adjacency` accepts adjacency matrices saved as `.npz`, `.parquet`, `.csv/.tsv`, and (deprecated) `.gz` edge lists.
+You can also point at an adjacency produced by `extract-networks` (e.g., a `.npz` file).
+
 ```bash
 bsvae-networks extract-modules \
   --adjacency networks/w_similarity_adjacency.csv \
@@ -142,7 +145,18 @@ bsvae-networks extract-modules \
   --resolution 1.0
 ```
 
+Minimal `.npz` example:
+
+```bash
+bsvae-networks extract-modules \
+  --adjacency networks/adjacency.npz \
+  --expr data/log2rpkm.tsv.gz \
+  --output-dir modules/
+```
+
 ### Option B: Compute adjacency on the fly
+
+On-the-fly computation will write the adjacency into the output directory for reuse.
 
 ```bash
 bsvae-networks extract-modules \
@@ -153,6 +167,11 @@ bsvae-networks extract-modules \
   --cluster-method spectral \
   --n-clusters 20
 ```
+
+### Adjacency mode note
+
+`--adjacency-mode signed` is not supported for Leiden and will raise an error.
+`--adjacency-mode wgcna-signed` clips negative values to zero.
 
 ### Outputs
 
