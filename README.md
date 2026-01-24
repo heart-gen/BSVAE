@@ -104,10 +104,15 @@ bsvae-networks export-latents \
     --output results/exp1/latents.h5ad
 ```
 
-The extractor writes adjacency matrices, edge lists, and optional heatmaps for
-each requested method. By default the decoder-loading cosine similarity
-(``w_similarity``) is computed; add other methods with ``--methods``. Latent exports include per-sample ``mu`` and
-``logvar`` as tidy CSV or AnnData files.
+The extractor writes **sparse NPZ** adjacency matrices and **Parquet** edge
+lists by default (``--sparse`` and ``--compress`` are on unless disabled with
+``--no-sparse``/``--no-compress``). When ``--threshold 0`` with sparse output,
+an adaptive threshold is computed from ``--target-sparsity`` (default 0.01 =
+top 1% of edges). Use ``--quantize`` (default ``int8``) to reduce adjacency
+size. Legacy dense CSV/TSV/NPY outputs are available only with ``--no-sparse``
+or explicit legacy formats. By default the decoder-loading cosine similarity
+(``w_similarity``) is computed; add other methods with ``--methods``. Latent
+exports include per-sample ``mu`` and ``logvar`` as tidy CSV or AnnData files.
 
 ---
 
