@@ -675,6 +675,68 @@ def load_adjacency_sparse(path: str) -> Tuple[np.ndarray, List[str]]:
     return adjacency, genes
 
 
+def load_adjacency_sparse_edges(path: str) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    """Load sparse upper-triangle adjacency data as an edge list.
+
+    Parameters
+    ----------
+    path
+        Path to the ``.npz`` file.
+
+    Returns
+    -------
+    edges : np.ndarray
+        Array of shape ``(n_edges, 2)`` with integer indices.
+    weights : np.ndarray
+        Edge weights aligned to ``edges``.
+    genes : list[str]
+        Gene identifiers.
+    """
+    data = np.load(path, allow_pickle=True)
+    genes = list(data["genes"])
+
+    storage_format = None
+    if "storage_format" in data:
+        storage_format = str(data["storage_format"][0])
+
+    scale_factor = None
+    if "scale_factor" in data:
+        scale_factor = float(data["scale_factor"][0])
+
+    def dequantize(values: np.ndarray) -> np.ndarray:
+        if scale_factor is not None and values.dtype == np.int8:
+            return (values.astype(np.float32) / 127.0) * scale_factor
+        return values.astype(np.float32)
+
+    if storage_format == "dense_triu":
+        n = int(data["n"][0])
+        triu_values = dequantize(data["triu_values"])
+        triu_idx = np.triu_indices(n)
+        nonzero_mask = triu_values != 0
+        row = triu_idx[0][nonzero_mask]
+        col = triu_idx[1][nonzero_mask]
+        values = triu_values[nonzero_mask]
+    elif storage_format == "sparse_triu":
+        row = data["row"].astype(np.int64)
+        col = data["col"].astype(np.int64)
+        values = dequantize(data["data"])
+    elif "shape" in data:
+        row = data["row"].astype(np.int64)
+        col = data["col"].astype(np.int64)
+        values = dequantize(data["data"])
+        if not ("upper_triangle" in data and data["upper_triangle"][0]):
+            upper_mask = row <= col
+            row = row[upper_mask]
+            col = col[upper_mask]
+            values = values[upper_mask]
+    else:
+        raise ValueError(f"Unknown adjacency storage format in {path}")
+
+    edges = np.column_stack((row, col)).astype(np.int64)
+    logger.info("Loaded sparse edges from %s: %d genes, %d edges", path, len(genes), len(edges))
+    return edges, values, genes
+
+
 def save_edge_list_compressed(
     adjacency: np.ndarray,
     output_path: str,
@@ -869,6 +931,92 @@ def load_edge_list_compressed(
     return adjacency, genes
 
 
+def load_edge_list_compressed_edges(
+    path: str,
+    genes_path: Optional[str] = None,
+) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    """Load a compressed edge list as indexed edges and weights.
+
+    Parameters
+    ----------
+    path
+        Path to the edge list file (can be gzipped).
+    genes_path
+        Optional path to gene lookup file.
+
+    Returns
+    -------
+    edges : np.ndarray
+        Array of shape ``(n_edges, 2)`` with integer indices.
+    weights : np.ndarray
+        Edge weights aligned to ``edges``.
+    genes : list[str]
+        Gene identifiers.
+    """
+    warnings.warn(
+        "load_edge_list_compressed_edges is deprecated. Use load_edge_list_parquet_edges instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    path = Path(path)
+    is_compressed = str(path).endswith(".gz")
+    open_func = gzip.open if is_compressed else open
+    mode = "rt" if is_compressed else "r"
+
+    sources: List[int] = []
+    targets: List[int] = []
+    weights: List[float] = []
+    use_indices = False
+    raw_edges: List[Tuple[str, str, float]] = []
+
+    with open_func(path, mode) as f:
+        header = f.readline().strip()
+        sep = "\t" if "\t" in header else ","
+        cols = header.split(sep)
+        use_indices = "source_idx" in cols
+
+        for line in f:
+            parts = line.strip().split(sep)
+            src, tgt, weight = parts[0], parts[1], float(parts[2])
+            if use_indices:
+                sources.append(int(src))
+                targets.append(int(tgt))
+                weights.append(weight)
+            else:
+                raw_edges.append((src, tgt, weight))
+
+    if not use_indices:
+        if genes_path is None:
+            all_genes = {g for edge in raw_edges for g in edge[:2]}
+            genes = sorted(all_genes)
+        else:
+            with open(genes_path) as f:
+                genes = [line.strip() for line in f]
+        gene_to_idx = {g: i for i, g in enumerate(genes)}
+        for src, tgt, weight in raw_edges:
+            sources.append(gene_to_idx[src])
+            targets.append(gene_to_idx[tgt])
+            weights.append(weight)
+    else:
+        if genes_path is None:
+            stem = path.stem.replace(".csv", "").replace(".tsv", "").replace(".gz", "")
+            genes_path = path.parent / f"{stem}_genes.txt"
+            if not genes_path.exists():
+                stem = path.name.replace(".csv.gz", "").replace(".tsv.gz", "")
+                genes_path = path.parent / f"{stem}_genes.txt"
+        if genes_path and Path(genes_path).exists():
+            with open(genes_path) as f:
+                genes = [line.strip() for line in f]
+        else:
+            max_idx = max(max(sources, default=0), max(targets, default=0))
+            genes = [str(i) for i in range(max_idx + 1)]
+
+    edges = np.column_stack((np.array(sources, dtype=np.int64), np.array(targets, dtype=np.int64)))
+    weight_arr = np.array(weights, dtype=np.float32)
+    logger.info("Loaded edge list from %s: %d genes, %d edges", path, len(genes), len(edges))
+    return edges, weight_arr, genes
+
+
 def save_edge_list_parquet(
     adjacency: np.ndarray,
     output_path: str,
@@ -995,6 +1143,27 @@ def load_edge_list_parquet(path: str) -> Tuple[np.ndarray, List[str]]:
 
     logger.info("Loaded edge list from %s: %d genes, %d edges", path, n, len(df))
     return adjacency, genes
+
+
+def load_edge_list_parquet_edges(path: str) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    """Load a Parquet edge list as indexed edges and weights."""
+    path = Path(path)
+    table = pq.read_table(path)
+    df = table.to_pandas()
+
+    metadata = table.schema.metadata or {}
+    if b"genes" in metadata:
+        genes_str = metadata[b"genes"].decode("utf-8")
+        genes = genes_str.split("\n")
+    else:
+        max_idx = max(df["source_idx"].max(), df["target_idx"].max())
+        genes = [str(i) for i in range(max_idx + 1)]
+        logger.warning("No genes metadata found in %s, using numeric indices", path)
+
+    edges = np.column_stack((df["source_idx"].values, df["target_idx"].values)).astype(np.int64)
+    weights = df["weight"].values.astype(np.float32)
+    logger.info("Loaded edge list from %s: %d genes, %d edges", path, len(genes), len(edges))
+    return edges, weights, genes
 
 
 def load_expression(path: str) -> pd.DataFrame:
@@ -1219,10 +1388,13 @@ __all__ = [
     "compute_adaptive_threshold",
     "save_adjacency_sparse",
     "load_adjacency_sparse",
+    "load_adjacency_sparse_edges",
     "save_edge_list_compressed",  # Deprecated
     "load_edge_list_compressed",  # Deprecated
+    "load_edge_list_compressed_edges",  # Deprecated
     "save_edge_list_parquet",
     "load_edge_list_parquet",
+    "load_edge_list_parquet_edges",
     "load_expression",
     "create_dataloader_from_expression",
     "run_extraction",
