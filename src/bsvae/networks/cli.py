@@ -248,6 +248,7 @@ def _run_single_clustering(
     resolution_label: Optional[str] = None,
     graph=None,
     genes: Optional[Sequence[str]] = None,
+    compute_eigengenes: bool = True,
 ) -> int:
     """Run clustering at a single resolution and save results.
 
@@ -272,11 +273,14 @@ def _run_single_clustering(
     else:
         modules = spectral_modules(adjacency_df, n_clusters=n_clusters, n_components=n_components)
 
-    eigengenes = compute_module_eigengenes(expr_df, modules)
     n_modules = modules.nunique()
 
     save_modules(modules, output_dir / "modules.csv")
-    save_eigengenes(eigengenes, output_dir / "eigengenes.csv")
+    if compute_eigengenes:
+        eigengenes = compute_module_eigengenes(expr_df, modules)
+        save_eigengenes(eigengenes, output_dir / "eigengenes.csv")
+    else:
+        logger.info("Skipping eigengene computation for resolution %.3f", resolution)
 
     # Save resolution metadata for reproducibility
     if cluster_method == "leiden":
@@ -376,6 +380,7 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
     # Run clustering for each resolution
     results_summary = []
     for resolution, label, output_dir in resolutions_to_run:
+        compute_eigengenes = not (args.resolution_auto and label == "auto")
         n_modules = _run_single_clustering(
             adjacency_df=adjacency_df,
             expr_df=expr_df,
@@ -389,6 +394,7 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
             resolution_label=label,
             graph=leiden_graph,
             genes=leiden_genes,
+            compute_eigengenes=compute_eigengenes,
         )
         results_summary.append({
             "resolution": resolution,
