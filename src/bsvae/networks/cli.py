@@ -22,6 +22,7 @@ from bsvae.networks.module_extraction import (
     compute_module_eigengenes,
     leiden_modules,
     load_adjacency,
+    optimize_resolution_modularity,
     save_eigengenes,
     save_modules,
     spectral_modules,
@@ -104,7 +105,38 @@ def build_parser() -> argparse.ArgumentParser:
     module_parser.add_argument("--expr", required=True, help="Expression matrix (genes × samples) for eigengenes")
     module_parser.add_argument("--output-dir", required=True, help="Directory to write module outputs")
     module_parser.add_argument("--cluster-method", choices=["leiden", "spectral"], default="leiden")
-    module_parser.add_argument("--resolution", type=float, default=1.0, help="Leiden resolution parameter")
+    module_parser.add_argument("--resolution", type=float, default=1.0, help="Leiden resolution parameter (ignored if --resolutions or --resolution-auto is used)")
+    module_parser.add_argument(
+        "--resolutions",
+        type=float,
+        nargs="+",
+        help="Multiple resolution values for sweep (e.g., --resolutions 1.0 2.0 5.0 10.0). "
+        "Creates separate output subdirectories for each resolution.",
+    )
+    module_parser.add_argument(
+        "--resolution-auto",
+        action="store_true",
+        help="Automatically select resolution by maximizing modularity (no ground truth needed). "
+        "Can be combined with --resolutions to also run fixed resolutions.",
+    )
+    module_parser.add_argument(
+        "--resolution-min",
+        type=float,
+        default=0.5,
+        help="Minimum resolution for auto-optimization search (default: 0.5)",
+    )
+    module_parser.add_argument(
+        "--resolution-max",
+        type=float,
+        default=15.0,
+        help="Maximum resolution for auto-optimization search (default: 15.0)",
+    )
+    module_parser.add_argument(
+        "--resolution-steps",
+        type=int,
+        default=30,
+        help="Number of resolution values to test during auto-optimization (default: 30)",
+    )
     module_parser.add_argument("--n-clusters", type=int, help="Number of clusters for spectral clustering")
     module_parser.add_argument("--n-components", type=int, help="Number of eigenvectors for spectral clustering")
     module_parser.add_argument("--batch-size", type=int, default=128)
@@ -201,6 +233,66 @@ def _load_covariates(path: str, sample_ids: Sequence[str]) -> pd.DataFrame:
     return df
 
 
+def _run_single_clustering(
+    adjacency_df: pd.DataFrame,
+    expr_df: pd.DataFrame,
+    output_dir: Path,
+    resolution: float,
+    adjacency_mode: str,
+    cluster_method: str,
+    n_clusters: Optional[int],
+    n_components: Optional[int],
+    logger: logging.Logger,
+    resolution_label: Optional[str] = None,
+) -> int:
+    """Run clustering at a single resolution and save results.
+
+    Returns the number of modules detected.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if cluster_method == "leiden":
+        logger.info(
+            "Running Leiden clustering (resolution=%.3f, adjacency_mode=%s)",
+            resolution,
+            adjacency_mode,
+        )
+        modules = leiden_modules(
+            adjacency_df,
+            resolution=resolution,
+            adjacency_mode=adjacency_mode,
+        )
+    else:
+        modules = spectral_modules(adjacency_df, n_clusters=n_clusters, n_components=n_components)
+
+    eigengenes = compute_module_eigengenes(expr_df, modules)
+    n_modules = modules.nunique()
+
+    save_modules(modules, output_dir / "modules.csv")
+    save_eigengenes(eigengenes, output_dir / "eigengenes.csv")
+
+    # Save resolution metadata for reproducibility
+    if cluster_method == "leiden":
+        metadata = {
+            "resolution": resolution,
+            "resolution_label": resolution_label or str(resolution),
+            "n_modules": n_modules,
+            "adjacency_mode": adjacency_mode,
+        }
+        metadata_path = output_dir / "clustering_metadata.json"
+        import json
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+
+    logger.info(
+        "Resolution %.3f: %d modules detected, saved to %s",
+        resolution,
+        n_modules,
+        output_dir,
+    )
+    return n_modules
+
+
 def handle_extract_modules(args, logger: logging.Logger) -> None:
     if not args.adjacency and (not args.model_path or not args.dataset):
         raise ValueError("Either --adjacency or both --model-path and --dataset must be provided")
@@ -235,26 +327,75 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
     # Convert adjacency to DataFrame with gene labels so clustering functions
     # return modules indexed by gene name instead of numeric indices
     adjacency_df = pd.DataFrame(adjacency, index=genes, columns=genes)
-
-    if args.cluster_method == "leiden":
-        logger.info(
-            "Running Leiden clustering (resolution=%.2f, adjacency_mode=%s)",
-            args.resolution,
-            args.adjacency_mode,
-        )
-        modules = leiden_modules(
-            adjacency_df,
-            resolution=args.resolution,
-            adjacency_mode=args.adjacency_mode,
-        )
-    else:
-        modules = spectral_modules(adjacency_df, n_clusters=args.n_clusters, n_components=args.n_components)
-
     expr_df = load_expression(args.expr)
-    eigengenes = compute_module_eigengenes(expr_df, modules)
 
-    save_modules(modules, Path(args.output_dir) / "modules.csv")
-    save_eigengenes(eigengenes, Path(args.output_dir) / "eigengenes.csv")
+    # Determine which resolutions to run
+    resolutions_to_run: List[tuple[float, str, Path]] = []  # (resolution, label, output_dir)
+
+    # Handle resolution auto-optimization
+    if args.resolution_auto and args.cluster_method == "leiden":
+        logger.info("Running resolution auto-optimization (modularity-based)")
+        best_res, best_qual = optimize_resolution_modularity(
+            adjacency_df,
+            adjacency_mode=args.adjacency_mode,
+            resolution_min=args.resolution_min,
+            resolution_max=args.resolution_max,
+            n_steps=args.resolution_steps,
+        )
+        auto_output = Path(args.output_dir) / "res_auto"
+        resolutions_to_run.append((best_res, "auto", auto_output))
+        logger.info("Auto-selected resolution: %.3f (modularity=%.4f)", best_res, best_qual)
+
+    # Handle resolution sweep
+    if args.resolutions and args.cluster_method == "leiden":
+        for res in args.resolutions:
+            # Format resolution for directory name (e.g., 1.0 -> "1.0", 10.0 -> "10.0")
+            res_label = f"{res:.1f}".replace(".", "_")
+            res_output = Path(args.output_dir) / f"res_{res_label}"
+            resolutions_to_run.append((res, f"fixed_{res}", res_output))
+
+    # If no sweep or auto, use single resolution (original behavior)
+    if not resolutions_to_run:
+        resolutions_to_run.append((args.resolution, "single", Path(args.output_dir)))
+
+    # Run clustering for each resolution
+    results_summary = []
+    for resolution, label, output_dir in resolutions_to_run:
+        n_modules = _run_single_clustering(
+            adjacency_df=adjacency_df,
+            expr_df=expr_df,
+            output_dir=output_dir,
+            resolution=resolution,
+            adjacency_mode=args.adjacency_mode,
+            cluster_method=args.cluster_method,
+            n_clusters=args.n_clusters,
+            n_components=args.n_components,
+            logger=logger,
+            resolution_label=label,
+        )
+        results_summary.append({
+            "resolution": resolution,
+            "label": label,
+            "n_modules": n_modules,
+            "output_dir": str(output_dir),
+        })
+
+    # Save summary if multiple resolutions were run
+    if len(resolutions_to_run) > 1:
+        import json
+        summary_path = Path(args.output_dir) / "resolution_sweep_summary.json"
+        with open(summary_path, "w") as f:
+            json.dump(results_summary, f, indent=2)
+        logger.info("Resolution sweep summary saved to %s", summary_path)
+
+        # Also save as TSV for easy viewing
+        summary_df = pd.DataFrame(results_summary)
+        summary_df.to_csv(
+            Path(args.output_dir) / "resolution_sweep_summary.tsv",
+            sep="\t",
+            index=False,
+        )
+
     logger.info("Module extraction complete; outputs saved to %s", args.output_dir)
 
 

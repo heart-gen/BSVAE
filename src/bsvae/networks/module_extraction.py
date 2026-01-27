@@ -203,6 +203,74 @@ def build_graph_from_adjacency(A: np.ndarray | pd.DataFrame, genes: Optional[Seq
     return graph
 
 
+def optimize_resolution_modularity(
+    A: np.ndarray | pd.DataFrame,
+    *,
+    adjacency_mode: str = "wgcna-signed",
+    resolution_min: float = 0.5,
+    resolution_max: float = 15.0,
+    n_steps: int = 30,
+) -> tuple[float, float]:
+    """Find optimal Leiden resolution by maximizing modularity.
+
+    This method selects resolution without using ground truth labels,
+    making it suitable for unbiased benchmarking.
+
+    Parameters
+    ----------
+    A:
+        Adjacency matrix (numpy array or pandas DataFrame).
+    adjacency_mode:
+        How to handle negative edges ('wgcna-signed' clips to zero).
+    resolution_min:
+        Minimum resolution to search.
+    resolution_max:
+        Maximum resolution to search.
+    n_steps:
+        Number of resolution values to test.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(best_resolution, best_modularity)``
+    """
+    try:
+        import leidenalg
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("leidenalg is required for resolution optimization") from exc
+
+    arr, genes = _ensure_array_and_genes(A)
+    adj = transform_adjacency_for_clustering(arr, mode=adjacency_mode)
+
+    if np.any(adj < 0):
+        raise ValueError("Negative weights detected after adjacency transform.")
+
+    graph = build_graph_from_adjacency(adj, genes)
+    resolutions = np.linspace(resolution_min, resolution_max, n_steps)
+
+    best_res, best_qual = 1.0, -np.inf
+    logger.info(
+        "Searching for optimal resolution in [%.2f, %.2f] with %d steps",
+        resolution_min,
+        resolution_max,
+        n_steps,
+    )
+
+    for res in resolutions:
+        partition = leidenalg.find_partition(
+            graph,
+            leidenalg.RBConfigurationVertexPartition,
+            resolution_parameter=res,
+            weights=graph.es["weight"],
+        )
+        qual = partition.quality()
+        if qual > best_qual:
+            best_qual, best_res = qual, res
+
+    logger.info("Optimal resolution: %.3f (modularity=%.4f)", best_res, best_qual)
+    return best_res, best_qual
+
+
 def leiden_modules(
     A: np.ndarray | pd.DataFrame,
     resolution: float = 1.0,
@@ -418,6 +486,7 @@ __all__ = [
     "load_adjacency",
     "build_graph_from_adjacency",
     "format_module_feedback",
+    "optimize_resolution_modularity",
     "leiden_modules",
     "spectral_modules",
     "compute_module_eigengenes",
