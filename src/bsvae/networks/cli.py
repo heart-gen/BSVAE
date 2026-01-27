@@ -20,9 +20,11 @@ from bsvae.networks.extract_networks import (
 from bsvae.latent.latent_export import extract_latents, save_latents
 from bsvae.networks.module_extraction import (
     compute_module_eigengenes,
+    leiden_modules_from_graph,
     leiden_modules,
     load_adjacency,
     optimize_resolution_modularity,
+    prepare_leiden_graph,
     save_eigengenes,
     save_modules,
     spectral_modules,
@@ -244,6 +246,8 @@ def _run_single_clustering(
     n_components: Optional[int],
     logger: logging.Logger,
     resolution_label: Optional[str] = None,
+    graph=None,
+    genes: Optional[Sequence[str]] = None,
     compute_eigengenes: bool = True,
 ) -> int:
     """Run clustering at a single resolution and save results.
@@ -258,11 +262,14 @@ def _run_single_clustering(
             resolution,
             adjacency_mode,
         )
-        modules = leiden_modules(
-            adjacency_df,
-            resolution=resolution,
-            adjacency_mode=adjacency_mode,
-        )
+        if graph is not None and genes is not None:
+            modules = leiden_modules_from_graph(graph, genes, resolution)
+        else:
+            modules = leiden_modules(
+                adjacency_df,
+                resolution=resolution,
+                adjacency_mode=adjacency_mode,
+            )
     else:
         modules = spectral_modules(adjacency_df, n_clusters=n_clusters, n_components=n_components)
 
@@ -332,6 +339,13 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
     # return modules indexed by gene name instead of numeric indices
     adjacency_df = pd.DataFrame(adjacency, index=genes, columns=genes)
     expr_df = load_expression(args.expr)
+    leiden_graph = None
+    leiden_genes = None
+    if args.cluster_method == "leiden":
+        leiden_graph, leiden_genes = prepare_leiden_graph(
+            adjacency_df,
+            adjacency_mode=args.adjacency_mode,
+        )
 
     # Determine which resolutions to run
     resolutions_to_run: List[tuple[float, str, Path]] = []  # (resolution, label, output_dir)
@@ -345,6 +359,7 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
             resolution_min=args.resolution_min,
             resolution_max=args.resolution_max,
             n_steps=args.resolution_steps,
+            graph=leiden_graph,
         )
         auto_output = Path(args.output_dir) / "res_auto"
         resolutions_to_run.append((best_res, "auto", auto_output))
@@ -377,6 +392,8 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
             n_components=args.n_components,
             logger=logger,
             resolution_label=label,
+            graph=leiden_graph,
+            genes=leiden_genes,
             compute_eigengenes=compute_eigengenes,
         )
         results_summary.append({
