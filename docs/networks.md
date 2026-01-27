@@ -35,10 +35,18 @@ bsvae-networks extract-networks \
   --threshold 0.2
 ```
 
-Outputs include adjacency matrices (CSV/TSV or NPY), edge lists filtered by the
-chosen threshold, and optional heatmaps when ``--heatmaps`` is supplied. By
-default, the extractor runs the decoder-loading cosine similarity
-(``w_similarity``); add additional methods as needed via ``--methods``.
+Outputs include adjacency matrices saved as **sparse NPZ** files and edge lists
+saved as **Parquet** by default. Sparse outputs are enabled with
+``--sparse`` (default) and can be disabled with ``--no-sparse`` to fall back to
+legacy dense CSV/TSV/NPY outputs. Edge lists are compressed by default via
+``--compress`` (disable with ``--no-compress``), with sparsity controlled by
+``--threshold``. When ``--threshold 0`` and sparse output is enabled, the
+extractor computes an adaptive threshold based on ``--target-sparsity``
+(default ``0.01`` = top 1% of edges). Sparse adjacencies can also be quantized
+with ``--quantize`` (default ``int8``). Optional heatmaps are generated when
+``--heatmaps`` is supplied. By default, the extractor runs the decoder-loading
+cosine similarity (``w_similarity``); add additional methods as needed via
+``--methods``.
 
 ### Export latents
 ```bash
