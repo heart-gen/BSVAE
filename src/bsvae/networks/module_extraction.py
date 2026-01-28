@@ -317,6 +317,85 @@ def prepare_leiden_graph(
 
 
 def _leiden_partitions_for_resolutions(graph, resolutions: Iterable[float]):
+    try:
+        import leidenalg
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise ImportError("leidenalg is required for Leiden clustering") from exc
+
+    partitions = {}
+    for res in resolutions:
+        partitions[res] = leidenalg.find_partition(
+            graph,
+            leidenalg.RBConfigurationVertexPartition,
+            resolution_parameter=res,
+            weights=graph.es["weight"],
+        )
+    return partitions
+
+
+def leiden_modules_from_graph(graph, genes: Sequence[str], resolution: float) -> pd.Series:
+    """Run Leiden clustering using a pre-built igraph Graph."""
+
+    partition = _leiden_partitions_for_resolutions(graph, [resolution])[resolution]
+    modules = pd.Series(partition.membership, index=list(genes), name="module")
+    logger.info(format_module_feedback("Leiden", modules, resolution=resolution))
+    return modules
+
+
+def leiden_modules_for_resolutions(
+    graph,
+    genes: Sequence[str],
+    resolutions: Iterable[float],
+) -> Dict[float, pd.Series]:
+    """Run Leiden clustering for multiple resolutions using a pre-built graph."""
+
+    partitions = _leiden_partitions_for_resolutions(graph, resolutions)
+    modules_by_resolution = {}
+    for res, partition in partitions.items():
+        modules_by_resolution[res] = pd.Series(partition.membership, index=list(genes), name="module")
+    return modules_by_resolution
+
+
+def optimize_resolution_modularity(
+    A: np.ndarray | pd.DataFrame,
+    genes: Optional[Sequence[str]] = None,
+    *,
+    adjacency_mode: str = "wgcna-signed",
+):
+    """Transform adjacency and build the Leiden graph once.
+
+    Returns the igraph Graph and ordered gene list.
+    """
+
+    arr, genes = _ensure_array_and_genes(A, genes)
+    logger.info(
+        "Preparing Leiden graph for %d genes (adjacency_mode=%s)",
+        len(genes),
+        adjacency_mode,
+    )
+    adj = transform_adjacency_for_clustering(arr, mode=adjacency_mode)
+
+    # TODO: support signed community detection without violating Leiden's
+    # non-negative edge weight requirement. Do NOT attempt signed Leiden
+    # clustering or silently rescale/abs/drop edges.
+    if adjacency_mode == "signed":
+        raise NotImplementedError(
+            "Signed community detection is not yet supported. "
+            "Leiden requires non-negative edge weights. "
+            "Use adjacency_mode='wgcna-signed'."
+        )
+
+    if np.any(adj < 0):
+        raise ValueError(
+            "Negative weights detected after adjacency transform. "
+            "This should not occur for wgcna-signed mode."
+        )
+
+    graph = build_graph_from_adjacency(adj, genes)
+    return graph, genes
+
+
+def _leiden_partitions_for_resolutions(graph, resolutions: Iterable[float]):
     import leidenalg
 
     edge_weights = graph.es["weight"] if "weight" in graph.es.attributes() else None
@@ -395,6 +474,12 @@ def optimize_resolution_modularity(
         Maximum resolution to search.
     n_steps:
         Number of resolution values to test.
+    graph:
+        Optional pre-built igraph Graph to reuse.
+    genes:
+        Gene identifiers aligned with ``transformed_adjacency`` when provided.
+    transformed_adjacency:
+        Optional adjacency matrix already transformed for Leiden clustering.
 
     Returns
     -------
