@@ -379,8 +379,9 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
 
     # Run clustering for each resolution
     results_summary = []
+    multiple_resolutions = len(resolutions_to_run) > 1
     for resolution, label, output_dir in resolutions_to_run:
-        compute_eigengenes = not (args.resolution_auto and label == "auto")
+        compute_eigengenes = not (label == "auto" and multiple_resolutions)
         n_modules = _run_single_clustering(
             adjacency_df=adjacency_df,
             expr_df=expr_df,
