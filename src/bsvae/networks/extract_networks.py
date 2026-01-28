@@ -632,7 +632,8 @@ def load_adjacency_sparse(path: str) -> Tuple[np.ndarray, List[str]]:
         # Reconstruct full symmetric matrix
         adjacency = np.zeros((n, n), dtype=np.float32)
         triu_idx = np.triu_indices(n)
-        adjacency[triu_idx] = triu_values
+        off_diag_mask = triu_idx[0] != triu_idx[1]
+        adjacency[triu_idx[0][off_diag_mask], triu_idx[1][off_diag_mask]] = triu_values[off_diag_mask]
         # Mirror to lower triangle
         adjacency = adjacency + adjacency.T - np.diag(np.diag(adjacency))
 
@@ -645,9 +646,9 @@ def load_adjacency_sparse(path: str) -> Tuple[np.ndarray, List[str]]:
 
         # Reconstruct full symmetric matrix
         adjacency = np.zeros((n, n), dtype=np.float32)
-        adjacency[row, col] = values
-        # Mirror to lower triangle (excluding diagonal)
         off_diag_mask = row != col
+        adjacency[row[off_diag_mask], col[off_diag_mask]] = values[off_diag_mask]
+        # Mirror to lower triangle (excluding diagonal)
         adjacency[col[off_diag_mask], row[off_diag_mask]] = values[off_diag_mask]
 
     elif "shape" in data:
@@ -661,8 +662,8 @@ def load_adjacency_sparse(path: str) -> Tuple[np.ndarray, List[str]]:
             # Legacy upper triangle format
             n = shape[0]
             adjacency = np.zeros(shape, dtype=np.float32)
-            adjacency[row, col] = values
             off_diag_mask = row != col
+            adjacency[row[off_diag_mask], col[off_diag_mask]] = values[off_diag_mask]
             adjacency[col[off_diag_mask], row[off_diag_mask]] = values[off_diag_mask]
         else:
             # Full COO sparse format
