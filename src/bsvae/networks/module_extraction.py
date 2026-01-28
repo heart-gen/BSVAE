@@ -210,7 +210,8 @@ def optimize_resolution_modularity(
     resolution_min: float = 0.5,
     resolution_max: float = 15.0,
     n_steps: int = 30,
-) -> tuple[float, float]:
+    return_modules: bool = False,
+) -> tuple[float, float] | tuple[float, float, pd.Series]:
     """Find optimal Leiden resolution by maximizing modularity.
 
     This method selects resolution without using ground truth labels,
@@ -228,11 +229,15 @@ def optimize_resolution_modularity(
         Maximum resolution to search.
     n_steps:
         Number of resolution values to test.
+    return_modules:
+        If True, also return the module assignments for the best resolution,
+        avoiding redundant re-computation of Leiden clustering.
 
     Returns
     -------
-    tuple[float, float]
-        ``(best_resolution, best_modularity)``
+    tuple[float, float] or tuple[float, float, pd.Series]
+        ``(best_resolution, best_modularity)`` if return_modules is False,
+        otherwise ``(best_resolution, best_modularity, modules)``.
     """
     try:
         import leidenalg
@@ -249,6 +254,7 @@ def optimize_resolution_modularity(
     resolutions = np.linspace(resolution_min, resolution_max, n_steps)
 
     best_res, best_qual = 1.0, -np.inf
+    best_partition = None
     logger.info(
         "Searching for optimal resolution in [%.2f, %.2f] with %d steps",
         resolution_min,
@@ -266,8 +272,16 @@ def optimize_resolution_modularity(
         qual = partition.quality()
         if qual > best_qual:
             best_qual, best_res = qual, res
+            if return_modules:
+                best_partition = partition
 
     logger.info("Optimal resolution: %.3f (modularity=%.4f)", best_res, best_qual)
+
+    if return_modules:
+        modules = pd.Series(best_partition.membership, index=genes, name="module")
+        logger.info(format_module_feedback("Leiden", modules, resolution=best_res))
+        return best_res, best_qual, modules
+
     return best_res, best_qual
 
 
@@ -345,6 +359,8 @@ def spectral_modules(
     A: np.ndarray | pd.DataFrame,
     n_clusters: Optional[int] = None,
     n_components: Optional[int] = None,
+    *,
+    adjacency_mode: str = "wgcna-signed",
 ) -> pd.Series:
     """Cluster genes using spectral clustering on the adjacency Laplacian.
 
@@ -356,6 +372,11 @@ def spectral_modules(
         Number of clusters. Defaults to ``max(2, sqrt(n_genes))`` when ``None``.
     n_components:
         Number of eigenvectors to use. Defaults to ``n_clusters``.
+    adjacency_mode:
+        How to handle negative edge weights before clustering.
+        - "wgcna-signed" (default): clip negative values to zero.
+        - "signed": preserve negative edges (may cause numerical issues with
+          spectral clustering since it expects a similarity matrix).
 
     Returns
     -------
@@ -369,7 +390,20 @@ def spectral_modules(
         n_clusters = max(2, int(np.sqrt(n_genes)))
     if n_components is None:
         n_components = n_clusters
-    logger.info("Running spectral clustering with %d clusters", n_clusters)
+    logger.info(
+        "Running spectral clustering with %d clusters (adjacency_mode=%s)",
+        n_clusters,
+        adjacency_mode,
+    )
+
+    # Transform adjacency to handle negative weights
+    arr = transform_adjacency_for_clustering(arr, mode=adjacency_mode)
+
+    if adjacency_mode == "signed" and np.any(arr < 0):
+        logger.warning(
+            "Spectral clustering with negative edge weights may produce "
+            "unreliable results. Consider using adjacency_mode='wgcna-signed'."
+        )
 
     arr = np.array(arr, dtype=float)
     arr = (arr + arr.T) / 2.0

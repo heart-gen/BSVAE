@@ -154,12 +154,101 @@ bsvae-networks extract-modules \
   --n-clusters 20
 ```
 
+### Option C: Automatic resolution selection
+
+Let BSVAE find the optimal Leiden resolution by maximizing modularity:
+
+```bash
+bsvae-networks extract-modules \
+  --adjacency networks/w_similarity_adjacency.csv \
+  --expr data/log2rpkm.tsv.gz \
+  --output-dir modules/ \
+  --cluster-method leiden \
+  --resolution-auto
+```
+
+This searches resolutions in [0.5, 15.0] (configurable) and selects the one
+with highest modularity score. No ground truth labels are required.
+
+**Tuning the search:**
+
+```bash
+bsvae-networks extract-modules \
+  --adjacency networks/w_similarity_adjacency.csv \
+  --expr data/log2rpkm.tsv.gz \
+  --output-dir modules/ \
+  --resolution-auto \
+  --resolution-min 0.1 \
+  --resolution-max 20.0 \
+  --resolution-steps 50
+```
+
+### Option D: Resolution sweep
+
+Run clustering at multiple resolutions to compare results:
+
+```bash
+bsvae-networks extract-modules \
+  --adjacency networks/w_similarity_adjacency.csv \
+  --expr data/log2rpkm.tsv.gz \
+  --output-dir modules/ \
+  --resolutions 1.0 2.0 5.0 10.0
+```
+
+This creates separate subdirectories for each resolution. You can combine
+`--resolution-auto` with `--resolutions` to include both auto-selected and
+fixed resolutions in one run.
+
+### Clustering Options
+
+| Option | Description |
+| ------ | ----------- |
+| `--cluster-method` | `leiden` (default) or `spectral` |
+| `--resolution` | Leiden resolution parameter (default: 1.0) |
+| `--resolution-auto` | Auto-select resolution by maximizing modularity |
+| `--resolutions` | Run multiple resolutions (e.g., `1.0 2.0 5.0`) |
+| `--resolution-min` | Min resolution for auto search (default: 0.5) |
+| `--resolution-max` | Max resolution for auto search (default: 15.0) |
+| `--resolution-steps` | Number of steps in auto search (default: 30) |
+| `--n-clusters` | Number of clusters for spectral method |
+| `--n-components` | Number of eigenvectors for spectral method |
+| `--adjacency-mode` | `wgcna-signed` (default) or `signed` |
+
+### Handling Negative Edge Weights
+
+BSVAE networks may contain negative edge weights (anti-correlated genes).
+Leiden clustering requires non-negative weights.
+
+* **`wgcna-signed`** (default): Clips negative weights to zero before clustering.
+  This matches WGCNA's signed network behavior.
+* **`signed`**: Preserves negative weights. Not supported for Leiden; use with
+  spectral clustering (may cause numerical issues).
+
 ### Outputs
+
+**Single resolution:**
 
 ```text
 modules/
-├── modules.csv      # gene → module
-├── eigengenes.csv   # samples × modules
+├── modules.csv              # gene → module
+├── eigengenes.csv           # samples × modules
+└── clustering_metadata.json # resolution, n_modules, etc.
+```
+
+**Resolution sweep or auto:**
+
+```text
+modules/
+├── res_auto/                # auto-selected resolution
+│   ├── modules.csv
+│   ├── eigengenes.csv
+│   └── clustering_metadata.json
+├── res_1_0/                 # resolution 1.0
+│   └── ...
+├── res_5_0/                 # resolution 5.0
+│   └── ...
+├── resolution_sweep_summary.json
+└── resolution_sweep_summary.tsv
 ```
 
 ---
@@ -276,6 +365,25 @@ export-latents
    ↓
 latent-analysis (UMAP / clustering)
 ```
+
+---
+
+## GPU Acceleration
+
+BSVAE network utilities use GPU acceleration where possible via PyTorch.
+
+| Operation | GPU | Notes |
+| --------- | --- | ----- |
+| Model inference (encoder) | ✅ | Automatic if CUDA available |
+| W similarity (`w_similarity`) | ✅ | PyTorch matrix operations |
+| Latent covariance (`latent_cov`) | ✅ | PyTorch matrix operations |
+| Laplacian refinement (`laplacian`) | ✅ | PyTorch matrix operations |
+| Graphical Lasso (`graphical_lasso`) | ⚠️ Partial | Reconstruction on GPU, fitting on CPU (sklearn) |
+| Leiden clustering | ❌ | CPU only (leidenalg library) |
+| Spectral clustering | ❌ | CPU only (sklearn library) |
+| Eigengene computation (PCA) | ❌ | CPU only (sklearn library) |
+
+GPU is used automatically when available. No configuration is required.
 
 ---
 
