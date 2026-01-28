@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -29,6 +29,9 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:  # pragma: no cover
+    import igraph as ig
 
 
 def _infer_separator(path: str) -> str:
@@ -55,7 +58,12 @@ def _ensure_array_and_genes(A: np.ndarray | pd.DataFrame, genes: Optional[Sequen
     return arr, genes
 
 
-def load_adjacency(path: str, genes_path: Optional[str] = None) -> Tuple[np.ndarray, List[str]]:
+def load_adjacency(
+    path: str,
+    genes_path: Optional[str] = None,
+    *,
+    return_type: str = "dense",
+) -> Tuple[np.ndarray, List[str]] | Tuple[np.ndarray, np.ndarray, List[str]] | Tuple["ig.Graph", List[str]]:
     """Load an adjacency matrix with gene labels.
 
     Supports multiple formats:
@@ -71,23 +79,40 @@ def load_adjacency(path: str, genes_path: Optional[str] = None) -> Tuple[np.ndar
     genes_path:
         Optional path to gene lookup file for legacy gzipped edge list format.
 
+    return_type:
+        ``"dense"`` (default) returns a dense adjacency array. ``"edges"``
+        returns ``(edges, weights, genes)`` without densifying, and ``"graph"``
+        returns an ``igraph.Graph`` built from the edge list when possible.
+
     Returns
     -------
-    adjacency : np.ndarray
-        Square matrix of edge weights.
+    adjacency : np.ndarray | (edges, weights, genes) | igraph.Graph
+        Loaded adjacency representation.
     genes : list[str]
-        Gene identifiers derived from the file.
+        Gene identifiers derived from the file (returned separately for ``graph``).
     """
     path_obj = Path(path)
     suffixes = [s.lower() for s in path_obj.suffixes]
 
     # Handle sparse NPZ format
     if ".npz" in suffixes:
+        if return_type in {"edges", "graph"}:
+            from bsvae.networks.extract_networks import load_adjacency_sparse_edges
+            edges, weights, genes = load_adjacency_sparse_edges(path)
+            if return_type == "graph":
+                return build_graph_from_edge_list(edges, weights, genes), genes
+            return edges, weights, genes
         from bsvae.networks.extract_networks import load_adjacency_sparse
         return load_adjacency_sparse(path)
 
     # Handle Parquet edge list format (recommended)
     if ".parquet" in suffixes:
+        if return_type in {"edges", "graph"}:
+            from bsvae.networks.extract_networks import load_edge_list_parquet_edges
+            edges, weights, genes = load_edge_list_parquet_edges(path)
+            if return_type == "graph":
+                return build_graph_from_edge_list(edges, weights, genes), genes
+            return edges, weights, genes
         from bsvae.networks.extract_networks import load_edge_list_parquet
         return load_edge_list_parquet(path)
 
@@ -100,6 +125,12 @@ def load_adjacency(path: str, genes_path: Optional[str] = None) -> Tuple[np.ndar
             DeprecationWarning,
             stacklevel=2,
         )
+        if return_type in {"edges", "graph"}:
+            from bsvae.networks.extract_networks import load_edge_list_compressed_edges
+            edges, weights, genes = load_edge_list_compressed_edges(path, genes_path)
+            if return_type == "graph":
+                return build_graph_from_edge_list(edges, weights, genes), genes
+            return edges, weights, genes
         from bsvae.networks.extract_networks import load_edge_list_compressed
         return load_edge_list_compressed(path, genes_path)
 
@@ -123,7 +154,53 @@ def load_adjacency(path: str, genes_path: Optional[str] = None) -> Tuple[np.ndar
         raise ValueError("Adjacency matrix must be symmetric")
 
     logger.info("Loaded adjacency from %s with %d genes", path, df.shape[0])
+    if return_type == "graph":
+        graph = build_graph_from_adjacency(arr, list(df.index))
+        return graph, list(df.index)
+    if return_type == "edges":
+        n = arr.shape[0]
+        triu_idx = np.triu_indices(n, k=1)
+        values = arr[triu_idx]
+        nonzero_mask = values != 0
+        edges = np.column_stack((triu_idx[0][nonzero_mask], triu_idx[1][nonzero_mask]))
+        weights = values[nonzero_mask].astype(float)
+        return edges, weights, list(df.index)
     return arr, list(df.index)
+
+
+def _normalize_edge_list(
+    edges: np.ndarray | Sequence[Sequence[float]],
+    weights: Optional[Sequence[float]] = None,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    arr = np.asarray(edges)
+    if arr.ndim != 2 or arr.shape[1] not in {2, 3}:
+        raise ValueError("Edges must be a 2D array with 2 or 3 columns")
+    if arr.shape[1] == 3 and weights is None:
+        weights_arr = arr[:, 2].astype(float)
+        arr = arr[:, :2]
+    else:
+        weights_arr = None if weights is None else np.asarray(weights, dtype=float)
+    return arr.astype(np.int64), weights_arr
+
+
+def build_graph_from_edge_list(
+    edges: np.ndarray | Sequence[Sequence[float]],
+    weights: Optional[Sequence[float]] = None,
+    genes: Optional[Sequence[str]] = None,
+):
+    """Construct an igraph Graph from an edge list."""
+    import igraph as ig
+
+    edges_arr, weight_arr = _normalize_edge_list(edges, weights)
+    if genes is None:
+        n_vertices = int(edges_arr.max() + 1) if edges_arr.size else 0
+        genes = [str(i) for i in range(n_vertices)]
+    genes = list(genes)
+    graph = ig.Graph(n=len(genes), edges=edges_arr.tolist(), directed=False)
+    if weight_arr is not None:
+        graph.es["weight"] = weight_arr.tolist()
+    graph.vs["name"] = genes
+    return graph
 
 
 def _module_size_summary(modules: Mapping[str, int] | pd.Series) -> Tuple[int, int]:
@@ -190,10 +267,7 @@ def build_graph_from_adjacency(A: np.ndarray | pd.DataFrame, genes: Optional[Seq
         Undirected weighted graph with gene names as vertex attributes.
     """
 
-    try:
-        import igraph as ig
-    except ImportError as exc:  # pragma: no cover - optional dependency
-        raise ImportError("igraph is required for graph construction") from exc
+    import igraph as ig
 
     arr, genes = _ensure_array_and_genes(A, genes)
     arr = np.array(arr, dtype=float)
@@ -284,12 +358,91 @@ def leiden_modules_for_resolutions(
 
 def optimize_resolution_modularity(
     A: np.ndarray | pd.DataFrame,
+    genes: Optional[Sequence[str]] = None,
+    *,
+    adjacency_mode: str = "wgcna-signed",
+):
+    """Transform adjacency and build the Leiden graph once.
+
+    Returns the igraph Graph and ordered gene list.
+    """
+
+    arr, genes = _ensure_array_and_genes(A, genes)
+    logger.info(
+        "Preparing Leiden graph for %d genes (adjacency_mode=%s)",
+        len(genes),
+        adjacency_mode,
+    )
+    adj = transform_adjacency_for_clustering(arr, mode=adjacency_mode)
+
+    # TODO: support signed community detection without violating Leiden's
+    # non-negative edge weight requirement. Do NOT attempt signed Leiden
+    # clustering or silently rescale/abs/drop edges.
+    if adjacency_mode == "signed":
+        raise NotImplementedError(
+            "Signed community detection is not yet supported. "
+            "Leiden requires non-negative edge weights. "
+            "Use adjacency_mode='wgcna-signed'."
+        )
+
+    if np.any(adj < 0):
+        raise ValueError(
+            "Negative weights detected after adjacency transform. "
+            "This should not occur for wgcna-signed mode."
+        )
+
+    graph = build_graph_from_adjacency(adj, genes)
+    return graph, genes
+
+
+def _leiden_partitions_for_resolutions(graph, resolutions: Iterable[float]):
+    import leidenalg
+
+    edge_weights = graph.es["weight"] if "weight" in graph.es.attributes() else None
+    partitions = {}
+    for res in resolutions:
+        partitions[res] = leidenalg.find_partition(
+            graph,
+            leidenalg.RBConfigurationVertexPartition,
+            resolution_parameter=res,
+            weights=edge_weights,
+        )
+    return partitions
+
+
+def leiden_modules_from_graph(graph, genes: Sequence[str], resolution: float) -> pd.Series:
+    """Run Leiden clustering using a pre-built igraph Graph."""
+
+    partition = _leiden_partitions_for_resolutions(graph, [resolution])[resolution]
+    modules = pd.Series(partition.membership, index=list(genes), name="module")
+    logger.info(format_module_feedback("Leiden", modules, resolution=resolution))
+    return modules
+
+
+def leiden_modules_for_resolutions(
+    graph,
+    genes: Sequence[str],
+    resolutions: Iterable[float],
+) -> Dict[float, pd.Series]:
+    """Run Leiden clustering for multiple resolutions using a pre-built graph."""
+
+    partitions = _leiden_partitions_for_resolutions(graph, resolutions)
+    modules_by_resolution = {}
+    for res, partition in partitions.items():
+        modules_by_resolution[res] = pd.Series(partition.membership, index=list(genes), name="module")
+    return modules_by_resolution
+
+
+def optimize_resolution_modularity(
+    A: np.ndarray | pd.DataFrame | None = None,
     *,
     adjacency_mode: str = "wgcna-signed",
     resolution_min: float = 0.5,
     resolution_max: float = 15.0,
     n_steps: int = 30,
-    graph=None,
+    graph: Optional["ig.Graph"] = None,
+    edges: Optional[np.ndarray] = None,
+    weights: Optional[Sequence[float]] = None,
     genes: Optional[Sequence[str]] = None,
     transformed_adjacency: Optional[np.ndarray] = None,
 ) -> tuple[float, float]:
@@ -301,7 +454,18 @@ def optimize_resolution_modularity(
     Parameters
     ----------
     A:
-        Adjacency matrix (numpy array or pandas DataFrame).
+        Adjacency matrix (numpy array or pandas DataFrame). Optional when
+        providing ``graph`` or ``edges``.
+    graph:
+        Pre-built igraph Graph (optional).
+    edges:
+        Edge list of shape ``(n_edges, 2)`` or ``(n_edges, 3)`` (optional).
+    weights:
+        Edge weights aligned to ``edges`` (optional).
+    genes:
+        Gene names aligned to vertex indices (optional for ``edges``).
+    transformed_adjacency:
+        Optional adjacency matrix already transformed for Leiden clustering.
     adjacency_mode:
         How to handle negative edges ('wgcna-signed' clips to zero).
     resolution_min:
@@ -322,16 +486,42 @@ def optimize_resolution_modularity(
     tuple[float, float]
         ``(best_resolution, best_modularity)``
     """
+    if adjacency_mode == "signed":
+        raise NotImplementedError(
+            "Signed community detection is not yet supported. "
+            "Leiden requires non-negative edge weights. "
+            "Use adjacency_mode='wgcna-signed'."
+        )
+
     if graph is None:
-        if transformed_adjacency is not None:
+        if edges is not None:
+            edges_arr, weight_arr = _normalize_edge_list(edges, weights)
+            if weight_arr is not None:
+                weight_arr = np.maximum(weight_arr, 0.0)
+                if np.any(weight_arr < 0):
+                    raise ValueError("Negative weights detected after adjacency transform.")
+            graph = build_graph_from_edge_list(edges_arr, weight_arr, genes)
+            genes = list(graph.vs["name"])
+        elif transformed_adjacency is not None:
             if genes is None:
+                if A is None:
+                    raise ValueError("Provide genes when supplying transformed_adjacency.")
                 _, genes = _ensure_array_and_genes(A, genes)
             adj = np.asarray(transformed_adjacency)
             if np.any(adj < 0):
                 raise ValueError("Negative weights detected after adjacency transform.")
             graph = build_graph_from_adjacency(adj, genes)
         else:
-            graph, _ = prepare_leiden_graph(A, genes, adjacency_mode=adjacency_mode)
+            if A is None:
+                raise ValueError("Provide adjacency data, edges, or a graph.")
+            graph, genes = prepare_leiden_graph(A, genes, adjacency_mode=adjacency_mode)
+    else:
+        if genes is None:
+            genes = list(graph.vs["name"]) if "name" in graph.vs.attributes() else [str(i) for i in range(graph.vcount())]
+        if "weight" in graph.es.attributes():
+            weights_arr = np.array(graph.es["weight"], dtype=float)
+            if np.any(weights_arr < 0):
+                raise ValueError("Negative weights detected in provided graph.")
     resolutions = np.linspace(resolution_min, resolution_max, n_steps)
 
     best_res, best_qual = 1.0, -np.inf
@@ -353,10 +543,14 @@ def optimize_resolution_modularity(
 
 
 def leiden_modules(
-    A: np.ndarray | pd.DataFrame,
+    A: np.ndarray | pd.DataFrame | None = None,
     resolution: float = 1.0,
     *,
     adjacency_mode: str = "wgcna-signed",
+    graph: Optional["ig.Graph"] = None,
+    edges: Optional[np.ndarray] = None,
+    weights: Optional[Sequence[float]] = None,
+    genes: Optional[Sequence[str]] = None,
 ) -> pd.Series:
     """Cluster genes into modules using Leiden community detection.
 
@@ -364,7 +558,16 @@ def leiden_modules(
     ----------
     A:
         Adjacency matrix (numpy array or pandas DataFrame). If a DataFrame, the
-        index is used as gene names.
+        index is used as gene names. Optional when providing ``graph`` or
+        ``edges``.
+    graph:
+        Pre-built igraph Graph (optional).
+    edges:
+        Edge list of shape ``(n_edges, 2)`` or ``(n_edges, 3)`` (optional).
+    weights:
+        Edge weights aligned to ``edges`` (optional).
+    genes:
+        Gene names aligned to vertex indices (optional for ``edges``).
     resolution:
         Resolution parameter for Leiden (higher values produce more clusters).
 
@@ -380,7 +583,46 @@ def leiden_modules(
         Module assignments indexed by gene identifiers.
     """
 
-    graph, genes = prepare_leiden_graph(A, adjacency_mode=adjacency_mode)
+    if adjacency_mode == "signed":
+        raise NotImplementedError(
+            "Signed community detection is not yet supported. "
+            "Leiden requires non-negative edge weights. "
+            "Use adjacency_mode='wgcna-signed'."
+        )
+
+    if graph is None:
+        if edges is not None:
+            edges_arr, weight_arr = _normalize_edge_list(edges, weights)
+            if weight_arr is not None:
+                weight_arr = np.maximum(weight_arr, 0.0)
+                if np.any(weight_arr < 0):
+                    raise ValueError(
+                        "Negative weights detected after adjacency transform. "
+                        "This should not occur for wgcna-signed mode."
+                    )
+            graph = build_graph_from_edge_list(edges_arr, weight_arr, genes)
+            genes = list(graph.vs["name"])
+        else:
+            if A is None:
+                raise ValueError("Provide adjacency data, edges, or a graph.")
+            graph, genes = prepare_leiden_graph(A, genes, adjacency_mode=adjacency_mode)
+    else:
+        if genes is None:
+            genes = list(graph.vs["name"]) if "name" in graph.vs.attributes() else [str(i) for i in range(graph.vcount())]
+        if "weight" in graph.es.attributes():
+            weights_arr = np.array(graph.es["weight"], dtype=float)
+            if np.any(weights_arr < 0):
+                raise ValueError(
+                    "Negative weights detected after adjacency transform. "
+                    "This should not occur for wgcna-signed mode."
+                )
+
+    logger.info(
+        "Running Leiden clustering on %d genes (resolution=%.3f, adjacency_mode=%s)",
+        len(genes),
+        resolution,
+        adjacency_mode,
+    )
     return leiden_modules_from_graph(graph, genes, resolution)
 
 
@@ -528,9 +770,13 @@ def save_eigengenes(eigengenes: pd.DataFrame, output_path: str) -> None:
 __all__ = [
     "load_adjacency",
     "build_graph_from_adjacency",
+    "build_graph_from_edge_list",
+    "prepare_leiden_graph",
     "format_module_feedback",
     "optimize_resolution_modularity",
     "leiden_modules",
+    "leiden_modules_from_graph",
+    "leiden_modules_for_resolutions",
     "spectral_modules",
     "compute_module_eigengenes",
     "save_modules",
