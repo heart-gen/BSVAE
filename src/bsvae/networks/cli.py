@@ -249,14 +249,28 @@ def _run_single_clustering(
     graph=None,
     genes: Optional[Sequence[str]] = None,
     compute_eigengenes: bool = True,
+    precomputed_modules: Optional[pd.Series] = None,
 ) -> int:
     """Run clustering at a single resolution and save results.
+
+    Parameters
+    ----------
+    precomputed_modules:
+        Optional pre-computed module assignments (e.g., from resolution
+        optimization) to avoid redundant Leiden computation.
 
     Returns the number of modules detected.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if cluster_method == "leiden":
+    if precomputed_modules is not None:
+        modules = precomputed_modules
+        logger.info(
+            "Using precomputed modules (resolution=%.3f, %d modules)",
+            resolution,
+            modules.nunique(),
+        )
+    elif cluster_method == "leiden":
         logger.info(
             "Running Leiden clustering (resolution=%.3f, adjacency_mode=%s)",
             resolution,
@@ -271,7 +285,12 @@ def _run_single_clustering(
                 adjacency_mode=adjacency_mode,
             )
     else:
-        modules = spectral_modules(adjacency_df, n_clusters=n_clusters, n_components=n_components)
+        modules = spectral_modules(
+            adjacency_df,
+            n_clusters=n_clusters,
+            n_components=n_components,
+            adjacency_mode=adjacency_mode,
+        )
 
     n_modules = modules.nunique()
 
@@ -348,21 +367,23 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
         )
 
     # Determine which resolutions to run
-    resolutions_to_run: List[tuple[float, str, Path]] = []  # (resolution, label, output_dir)
+    # (resolution, label, output_dir, precomputed_modules)
+    resolutions_to_run: List[tuple[float, str, Path, Optional[pd.Series]]] = []
 
     # Handle resolution auto-optimization
     if args.resolution_auto and args.cluster_method == "leiden":
         logger.info("Running resolution auto-optimization (modularity-based)")
-        best_res, best_qual = optimize_resolution_modularity(
+        best_res, best_qual, auto_modules = optimize_resolution_modularity(
             adjacency_df,
             adjacency_mode=args.adjacency_mode,
             resolution_min=args.resolution_min,
             resolution_max=args.resolution_max,
             n_steps=args.resolution_steps,
             graph=leiden_graph,
+            return_modules=True,
         )
         auto_output = Path(args.output_dir) / "res_auto"
-        resolutions_to_run.append((best_res, "auto", auto_output))
+        resolutions_to_run.append((best_res, "auto", auto_output, auto_modules))
         logger.info("Auto-selected resolution: %.3f (modularity=%.4f)", best_res, best_qual)
 
     # Handle resolution sweep
@@ -371,16 +392,16 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
             # Format resolution for directory name (e.g., 1.0 -> "1.0", 10.0 -> "10.0")
             res_label = f"{res:.1f}".replace(".", "_")
             res_output = Path(args.output_dir) / f"res_{res_label}"
-            resolutions_to_run.append((res, f"fixed_{res}", res_output))
+            resolutions_to_run.append((res, f"fixed_{res}", res_output, None))
 
     # If no sweep or auto, use single resolution (original behavior)
     if not resolutions_to_run:
-        resolutions_to_run.append((args.resolution, "single", Path(args.output_dir)))
+        resolutions_to_run.append((args.resolution, "single", Path(args.output_dir), None))
 
     # Run clustering for each resolution
     results_summary = []
     multiple_resolutions = len(resolutions_to_run) > 1
-    for resolution, label, output_dir in resolutions_to_run:
+    for resolution, label, output_dir, precomputed_modules in resolutions_to_run:
         compute_eigengenes = not (label == "auto" and multiple_resolutions)
         n_modules = _run_single_clustering(
             adjacency_df=adjacency_df,
@@ -396,6 +417,7 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
             graph=leiden_graph,
             genes=leiden_genes,
             compute_eigengenes=compute_eigengenes,
+            precomputed_modules=precomputed_modules,
         )
         results_summary.append({
             "resolution": resolution,

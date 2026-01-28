@@ -15,6 +15,19 @@ complimentary strategies:
 
 The functions here are device-agnostic and written for integration in both CLI
 workflows and unit tests.
+
+GPU Acceleration
+----------------
+The following operations use GPU when available:
+
+- **Model inference** (encoder forward pass): GPU
+- **W similarity** (``compute_W_similarity``): GPU (PyTorch matmul)
+- **Latent covariance** (``compute_latent_covariance``): GPU (PyTorch matmul)
+- **Laplacian refinement** (``compute_laplacian_refined``): GPU (PyTorch matmul)
+- **Graphical Lasso** (``compute_graphical_lasso``): GPU for reconstruction
+  (Z @ W^T), CPU for sklearn GraphicalLasso fitting
+
+See :mod:`bsvae.networks.module_extraction` for module extraction GPU notes.
 """
 from __future__ import annotations
 
@@ -116,6 +129,8 @@ def load_weights(model: torch.nn.Module, masked: bool = True) -> torch.Tensor:
 def compute_W_similarity(W: torch.Tensor, eps: float = 1e-8) -> np.ndarray:
     """Compute cosine similarity between gene loading vectors (Method A).
 
+    **GPU**: Uses GPU if input tensor ``W`` is on a CUDA device.
+
     Parameters
     ----------
     W
@@ -171,7 +186,13 @@ def compute_latent_covariance(W: torch.Tensor, logvar_mean: torch.Tensor, eps: f
     return cov.cpu().numpy(), corr.cpu().numpy()
 
 
-def compute_graphical_lasso(latent_samples: np.ndarray, W: torch.Tensor, alpha: float = 0.01, max_iter: int = 100) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def compute_graphical_lasso(
+    latent_samples: np.ndarray,
+    W: torch.Tensor,
+    alpha: float = 0.01,
+    max_iter: int = 100,
+    precision_tol: float = 1e-10,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Fit Graphical Lasso on reconstructed expression (Method C).
 
     Parameters
@@ -185,6 +206,10 @@ def compute_graphical_lasso(latent_samples: np.ndarray, W: torch.Tensor, alpha: 
         Regularization strength for :class:`sklearn.covariance.GraphicalLasso`.
     max_iter
         Maximum number of iterations for the solver.
+    precision_tol
+        Tolerance for considering precision entries as non-zero. Values with
+        absolute magnitude below this threshold are treated as zero to avoid
+        spurious edges from floating-point artifacts. Default is 1e-10.
 
     Returns
     -------
@@ -196,12 +221,16 @@ def compute_graphical_lasso(latent_samples: np.ndarray, W: torch.Tensor, alpha: 
         Binary adjacency where non-zero precision entries indicate edges.
     """
 
-    Xhat = np.matmul(latent_samples, W.detach().cpu().numpy().T)
+    # Compute Xhat = Z @ W^T on GPU if W is on GPU, then transfer to CPU for sklearn
+    latent_tensor = torch.from_numpy(latent_samples).to(W.device)
+    Xhat = torch.matmul(latent_tensor, W.detach().T).cpu().numpy()
+    del latent_tensor  # Free GPU memory before sklearn fitting
+
     gl = GraphicalLasso(alpha=alpha, max_iter=max_iter)
     gl.fit(Xhat)
     precision = gl.precision_
     covariance = gl.covariance_
-    adjacency = (np.abs(precision) > 0).astype(float)
+    adjacency = (np.abs(precision) > precision_tol).astype(float)
     np.fill_diagonal(adjacency, 0.0)
     return precision, covariance, adjacency
 
@@ -792,9 +821,9 @@ def save_edge_list_compressed(
     # Collect edges (upper triangle only for symmetric matrix)
     edges = []
     for i in range(adjacency.shape[0]):
-        for j in range(i + 1, adjacency.shape[1]):  # Upper triangle only
-            if not include_self and i == j:
-                continue
+        # Include diagonal (self-loops) when include_self=True
+        start_j = i if include_self else i + 1
+        for j in range(start_j, adjacency.shape[1]):
             weight = adjacency[i, j]
             if abs(weight) >= threshold:
                 edges.append((i, j, weight))
@@ -1300,10 +1329,15 @@ def run_extraction(
         if output_dir:
             _persist(precision, genes, output_dir, "graphical_lasso_precision", threshold, False, sparse, compress, target_sparsity, quantize)
 
-    if "laplacian" in methods and getattr(model, "laplacian_matrix", None) is not None:
-        adjacency = compute_laplacian_refined(W, model.laplacian_matrix.to(device))
-        results.append(NetworkResults("laplacian", adjacency))
-        _persist(adjacency, genes, output_dir, "laplacian", threshold, create_heatmaps, sparse, compress, target_sparsity, quantize)
+    if "laplacian" in methods:
+        if getattr(model, "laplacian_matrix", None) is not None:
+            adjacency = compute_laplacian_refined(W, model.laplacian_matrix.to(device))
+            results.append(NetworkResults("laplacian", adjacency))
+            _persist(adjacency, genes, output_dir, "laplacian", threshold, create_heatmaps, sparse, compress, target_sparsity, quantize)
+        else:
+            logger.warning(
+                "Laplacian method requested but model has no laplacian_matrix attribute; skipping."
+            )
 
     return results
 

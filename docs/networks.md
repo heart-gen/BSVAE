@@ -60,6 +60,44 @@ Exports per-sample ``mu`` and ``logvar`` either as a tidy CSV (multi-column
 with separate ``mu``/``logvar`` blocks) or an ``.h5ad`` with embeddings stored
 in ``obsm``.
 
+### Extract modules
+
+Cluster adjacency matrices into discrete gene modules using Leiden or spectral
+clustering:
+
+```bash
+bsvae-networks extract-modules \
+  --adjacency results/networks/w_similarity_adjacency.npz \
+  --expr data/expression.csv \
+  --output-dir results/modules \
+  --cluster-method leiden \
+  --resolution 1.0
+```
+
+**Automatic resolution selection** finds the optimal Leiden resolution by
+maximizing modularity (no ground truth required):
+
+```bash
+bsvae-networks extract-modules \
+  --adjacency results/networks/w_similarity_adjacency.npz \
+  --expr data/expression.csv \
+  --output-dir results/modules \
+  --resolution-auto
+```
+
+**Resolution sweep** runs clustering at multiple resolutions for comparison:
+
+```bash
+bsvae-networks extract-modules \
+  --adjacency results/networks/w_similarity_adjacency.npz \
+  --expr data/expression.csv \
+  --output-dir results/modules \
+  --resolutions 1.0 2.0 5.0 10.0
+```
+
+See the [BSVAE Networks documentation](bsvae_networks.md#2-extract-gene-modules-wgcna-like)
+for full options and output format details.
+
 ## Interpreting results
 
 - **High cosine similarity** indicates genes sharing latent modules.
@@ -71,6 +109,13 @@ in ``obsm``.
 
 All functions are available from Python via ``bsvae.networks`` for programmatic
 workflows and unit testing.
+
+### GPU acceleration
+
+Network extraction methods (`w_similarity`, `latent_cov`, `laplacian`) use GPU
+automatically when available. Module extraction (Leiden, spectral clustering)
+runs on CPU. See the [BSVAE Networks documentation](bsvae_networks.md#gpu-acceleration)
+for details.
 
 ### Signed vs unsigned networks
 
