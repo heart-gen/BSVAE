@@ -431,6 +431,10 @@ def optimize_resolution_modularity(
     transformed_adjacency: Optional[np.ndarray] = None,
     return_modules: bool = False,
     progress: bool = False,
+    two_phase: bool = False,
+    coarse_steps: int = 10,
+    fine_steps: int = 10,
+    fine_range_fraction: float = 0.3,
 ) -> tuple[float, float] | tuple[float, float, pd.Series]:
     """Find optimal Leiden resolution by maximizing modularity.
 
@@ -459,12 +463,26 @@ def optimize_resolution_modularity(
     resolution_max:
         Maximum resolution to search.
     n_steps:
-        Number of resolution values to test.
+        Number of resolution values to test. Ignored when ``two_phase=True``.
     return_modules:
         If True, also return the module assignments for the best resolution,
         avoiding redundant re-computation of Leiden clustering.
     progress:
         If True, display a progress bar during resolution search.
+    two_phase:
+        If True, use a memory-efficient two-phase search: a coarse sweep to
+        find a ballpark resolution, then a fine sweep in a narrower range.
+        This reduces peak memory by avoiding storing all partitions at once.
+    coarse_steps:
+        Number of resolution values in the coarse phase (default: 10).
+        Only used when ``two_phase=True``.
+    fine_steps:
+        Number of resolution values in the fine phase (default: 10).
+        Only used when ``two_phase=True``.
+    fine_range_fraction:
+        Fraction of the original range to use for fine search, centered on
+        the best coarse resolution (default: 0.3 = 30% of original range).
+        Only used when ``two_phase=True``.
 
     Returns
     -------
@@ -508,33 +526,106 @@ def optimize_resolution_modularity(
             weights_arr = np.array(graph.es["weight"], dtype=float)
             if np.any(weights_arr < 0):
                 raise ValueError("Negative weights detected in provided graph.")
-    resolutions = np.linspace(resolution_min, resolution_max, n_steps)
+    if two_phase:
+        # Two-phase search: coarse sweep then fine sweep around best
+        # This reduces peak memory by not storing all partitions at once
+        total_range = resolution_max - resolution_min
 
-    best_res, best_qual = 1.0, -np.inf
-    best_partition = None
-    logger.info(
-        "Searching for optimal resolution in [%.2f, %.2f] with %d steps",
-        resolution_min,
-        resolution_max,
-        n_steps,
-    )
+        # Phase 1: Coarse search
+        coarse_resolutions = np.linspace(resolution_min, resolution_max, coarse_steps)
+        logger.info(
+            "Two-phase search: coarse phase in [%.2f, %.2f] with %d steps",
+            resolution_min,
+            resolution_max,
+            coarse_steps,
+        )
 
-    partitions = _leiden_partitions_for_resolutions(
-        graph,
-        resolutions,
-        progress=progress,
-        progress_desc="Optimizing Leiden resolution",
-    )
-    for res, partition in partitions.items():
-        qual = partition.quality()
-        if qual > best_qual:
-            best_qual, best_res = qual, res
-            if return_modules:
-                best_partition = partition
+        coarse_best_res, coarse_best_qual = 1.0, -np.inf
+        coarse_partitions = _leiden_partitions_for_resolutions(
+            graph,
+            coarse_resolutions,
+            progress=progress,
+            progress_desc="Coarse resolution search",
+        )
+        for res, partition in coarse_partitions.items():
+            qual = partition.quality()
+            if qual > coarse_best_qual:
+                coarse_best_qual, coarse_best_res = qual, res
 
-    logger.info("Optimal resolution: %.3f (modularity=%.4f)", best_res, best_qual)
+        # Free coarse partitions before fine search
+        del coarse_partitions
+
+        logger.info(
+            "Coarse phase complete: best resolution=%.3f (modularity=%.4f)",
+            coarse_best_res,
+            coarse_best_qual,
+        )
+
+        # Phase 2: Fine search around coarse best
+        fine_half_range = (total_range * fine_range_fraction) / 2.0
+        fine_min = max(resolution_min, coarse_best_res - fine_half_range)
+        fine_max = min(resolution_max, coarse_best_res + fine_half_range)
+
+        fine_resolutions = np.linspace(fine_min, fine_max, fine_steps)
+        logger.info(
+            "Two-phase search: fine phase in [%.2f, %.2f] with %d steps",
+            fine_min,
+            fine_max,
+            fine_steps,
+        )
+
+        best_res, best_qual = coarse_best_res, coarse_best_qual
+        best_partition = None
+        fine_partitions = _leiden_partitions_for_resolutions(
+            graph,
+            fine_resolutions,
+            progress=progress,
+            progress_desc="Fine resolution search",
+        )
+        for res, partition in fine_partitions.items():
+            qual = partition.quality()
+            if qual > best_qual:
+                best_qual, best_res = qual, res
+                if return_modules:
+                    best_partition = partition
+
+        logger.info(
+            "Two-phase search complete: optimal resolution=%.3f (modularity=%.4f)",
+            best_res,
+            best_qual,
+        )
+    else:
+        # Single-phase search (original behavior)
+        resolutions = np.linspace(resolution_min, resolution_max, n_steps)
+
+        best_res, best_qual = 1.0, -np.inf
+        best_partition = None
+        logger.info(
+            "Searching for optimal resolution in [%.2f, %.2f] with %d steps",
+            resolution_min,
+            resolution_max,
+            n_steps,
+        )
+
+        partitions = _leiden_partitions_for_resolutions(
+            graph,
+            resolutions,
+            progress=progress,
+            progress_desc="Optimizing Leiden resolution",
+        )
+        for res, partition in partitions.items():
+            qual = partition.quality()
+            if qual > best_qual:
+                best_qual, best_res = qual, res
+                if return_modules:
+                    best_partition = partition
+
+        logger.info("Optimal resolution: %.3f (modularity=%.4f)", best_res, best_qual)
 
     if return_modules:
+        if best_partition is None:
+            # Re-run for the best resolution if partition wasn't stored
+            best_partition = _leiden_partitions_for_resolutions(graph, [best_res])[best_res]
         modules = pd.Series(best_partition.membership, index=list(genes), name="module")
         logger.info(format_module_feedback("Leiden", modules, resolution=best_res))
         return best_res, best_qual, modules
