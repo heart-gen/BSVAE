@@ -22,6 +22,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TYP
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from bsvae.networks.utils import transform_adjacency_for_clustering
 from sklearn.cluster import SpectralClustering
@@ -316,18 +317,57 @@ def prepare_leiden_graph(
     return graph, genes
 
 
-def _leiden_partitions_for_resolutions(graph, resolutions: Iterable[float]):
+def _leiden_partitions_for_resolutions(
+    graph,
+    resolutions: Iterable[float],
+    *,
+    progress: bool = False,
+    progress_desc: str = "Leiden resolution search",
+):
+    """Run Leiden clustering for multiple resolutions.
+
+    Parameters
+    ----------
+    graph:
+        igraph Graph to cluster.
+    resolutions:
+        Iterable of resolution values to test.
+    progress:
+        If True, display a tqdm progress bar.
+    progress_desc:
+        Description string for the progress bar.
+
+    Returns
+    -------
+    dict
+        Mapping from resolution value to leidenalg partition.
+    """
     import leidenalg
 
     edge_weights = graph.es["weight"] if "weight" in graph.es.attributes() else None
+    resolutions_list = list(resolutions)
     partitions = {}
-    for res in resolutions:
+
+    iterator = resolutions_list
+    if progress:
+        iterator = tqdm(
+            resolutions_list,
+            desc=progress_desc,
+            unit="res",
+            leave=False,
+        )
+
+    for res in iterator:
         partitions[res] = leidenalg.find_partition(
             graph,
             leidenalg.RBConfigurationVertexPartition,
             resolution_parameter=res,
             weights=edge_weights,
         )
+        if progress and hasattr(iterator, "set_postfix"):
+            n_modules = len(partitions[res])
+            iterator.set_postfix(resolution=f"{res:.2f}", modules=n_modules)
+
     return partitions
 
 
@@ -344,10 +384,33 @@ def leiden_modules_for_resolutions(
     graph,
     genes: Sequence[str],
     resolutions: Iterable[float],
+    *,
+    progress: bool = False,
 ) -> Dict[float, pd.Series]:
-    """Run Leiden clustering for multiple resolutions using a pre-built graph."""
+    """Run Leiden clustering for multiple resolutions using a pre-built graph.
 
-    partitions = _leiden_partitions_for_resolutions(graph, resolutions)
+    Parameters
+    ----------
+    graph:
+        Pre-built igraph Graph.
+    genes:
+        Gene names aligned to vertex indices.
+    resolutions:
+        Iterable of resolution values to test.
+    progress:
+        If True, display a progress bar.
+
+    Returns
+    -------
+    dict
+        Mapping from resolution to module assignments (pd.Series).
+    """
+    partitions = _leiden_partitions_for_resolutions(
+        graph,
+        resolutions,
+        progress=progress,
+        progress_desc="Leiden resolution sweep",
+    )
     modules_by_resolution = {}
     for res, partition in partitions.items():
         modules_by_resolution[res] = pd.Series(partition.membership, index=list(genes), name="module")
@@ -367,6 +430,7 @@ def optimize_resolution_modularity(
     genes: Optional[Sequence[str]] = None,
     transformed_adjacency: Optional[np.ndarray] = None,
     return_modules: bool = False,
+    progress: bool = False,
 ) -> tuple[float, float] | tuple[float, float, pd.Series]:
     """Find optimal Leiden resolution by maximizing modularity.
 
@@ -399,6 +463,8 @@ def optimize_resolution_modularity(
     return_modules:
         If True, also return the module assignments for the best resolution,
         avoiding redundant re-computation of Leiden clustering.
+    progress:
+        If True, display a progress bar during resolution search.
 
     Returns
     -------
@@ -453,7 +519,12 @@ def optimize_resolution_modularity(
         n_steps,
     )
 
-    partitions = _leiden_partitions_for_resolutions(graph, resolutions)
+    partitions = _leiden_partitions_for_resolutions(
+        graph,
+        resolutions,
+        progress=progress,
+        progress_desc="Optimizing Leiden resolution",
+    )
     for res, partition in partitions.items():
         qual = partition.quality()
         if qual > best_qual:
