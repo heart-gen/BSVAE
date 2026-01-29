@@ -137,7 +137,33 @@ def build_parser() -> argparse.ArgumentParser:
         "--resolution-steps",
         type=int,
         default=30,
-        help="Number of resolution values to test during auto-optimization (default: 30)",
+        help="Number of resolution values to test during auto-optimization (default: 30). "
+        "Ignored when --resolution-two-phase is used.",
+    )
+    module_parser.add_argument(
+        "--resolution-two-phase",
+        action="store_true",
+        help="Use memory-efficient two-phase search: coarse sweep to find ballpark, "
+        "then fine sweep in narrower range. Reduces peak memory usage.",
+    )
+    module_parser.add_argument(
+        "--resolution-coarse-steps",
+        type=int,
+        default=10,
+        help="Number of steps in coarse phase of two-phase search (default: 10)",
+    )
+    module_parser.add_argument(
+        "--resolution-fine-steps",
+        type=int,
+        default=10,
+        help="Number of steps in fine phase of two-phase search (default: 10)",
+    )
+    module_parser.add_argument(
+        "--resolution-fine-range",
+        type=float,
+        default=0.3,
+        help="Fraction of original range for fine search, centered on best coarse "
+        "resolution (default: 0.3 = 30%% of original range)",
     )
     module_parser.add_argument("--n-clusters", type=int, help="Number of clusters for spectral clustering")
     module_parser.add_argument("--n-components", type=int, help="Number of eigenvectors for spectral clustering")
@@ -377,7 +403,11 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
 
     # Handle resolution auto-optimization
     if args.resolution_auto and args.cluster_method == "leiden":
-        logger.info("Running resolution auto-optimization (modularity-based)")
+        two_phase = getattr(args, "resolution_two_phase", False)
+        if two_phase:
+            logger.info("Running two-phase resolution auto-optimization (modularity-based)")
+        else:
+            logger.info("Running resolution auto-optimization (modularity-based)")
         best_res, best_qual, auto_modules = optimize_resolution_modularity(
             adjacency_df,
             adjacency_mode=args.adjacency_mode,
@@ -387,6 +417,10 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
             graph=leiden_graph,
             return_modules=True,
             progress=getattr(args, "progress", False),
+            two_phase=two_phase,
+            coarse_steps=getattr(args, "resolution_coarse_steps", 10),
+            fine_steps=getattr(args, "resolution_fine_steps", 10),
+            fine_range_fraction=getattr(args, "resolution_fine_range", 0.3),
         )
         auto_output = Path(args.output_dir) / "res_auto"
         resolutions_to_run.append((best_res, "auto", auto_output, auto_modules))
