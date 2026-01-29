@@ -541,6 +541,7 @@ def optimize_resolution_modularity(
         )
 
         coarse_best_res, coarse_best_qual = 1.0, -np.inf
+        coarse_best_partition = None
         coarse_partitions = _leiden_partitions_for_resolutions(
             graph,
             coarse_resolutions,
@@ -551,6 +552,8 @@ def optimize_resolution_modularity(
             qual = partition.quality()
             if qual > coarse_best_qual:
                 coarse_best_qual, coarse_best_res = qual, res
+                if return_modules:
+                    coarse_best_partition = partition
 
         # Free coarse partitions before fine search
         del coarse_partitions
@@ -575,7 +578,7 @@ def optimize_resolution_modularity(
         )
 
         best_res, best_qual = coarse_best_res, coarse_best_qual
-        best_partition = None
+        best_partition = coarse_best_partition if return_modules else None
         fine_partitions = _leiden_partitions_for_resolutions(
             graph,
             fine_resolutions,
