@@ -157,6 +157,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="w_similarity",
         help="Network extraction method to run when computing adjacency (default: w_similarity)",
     )
+    module_parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show progress bar during resolution auto-optimization",
+    )
 
     latent_analysis_parser = subparsers.add_parser("latent-analysis", help="Sample-level latent space analysis.")
     latent_analysis_parser.add_argument("--model-path", required=True, help="Directory with specs.json/model.pt or checkpoint path")
@@ -381,6 +386,7 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
             n_steps=args.resolution_steps,
             graph=leiden_graph,
             return_modules=True,
+            progress=getattr(args, "progress", False),
         )
         auto_output = Path(args.output_dir) / "res_auto"
         resolutions_to_run.append((best_res, "auto", auto_output, auto_modules))
