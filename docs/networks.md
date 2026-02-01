@@ -92,7 +92,7 @@ bsvae-networks extract-modules \
   --adjacency results/networks/w_similarity_adjacency.npz \
   --expr data/expression.csv \
   --output-dir results/modules \
-  --resolutions 1.0 2.0 5.0 10.0
+  --resolutions 0.5 0.75 1.0 1.25 1.5
 ```
 
 See the [BSVAE Networks documentation](bsvae_networks.md#2-extract-gene-modules-wgcna-like)

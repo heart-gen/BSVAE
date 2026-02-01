@@ -130,14 +130,14 @@ def build_parser() -> argparse.ArgumentParser:
     module_parser.add_argument(
         "--resolution-max",
         type=float,
-        default=15.0,
-        help="Maximum resolution for auto-optimization search (default: 15.0)",
+        default=1.5,
+        help="Maximum resolution for auto-optimization search (default: 1.5)",
     )
     module_parser.add_argument(
         "--resolution-steps",
         type=int,
-        default=30,
-        help="Number of resolution values to test during auto-optimization (default: 30). "
+        default=10,
+        help="Number of resolution values to test during auto-optimization (default: 10). "
         "Ignored when --resolution-two-phase is used.",
     )
     module_parser.add_argument(
@@ -187,6 +187,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--progress",
         action="store_true",
         help="Show progress bar during resolution auto-optimization",
+    )
+    module_parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=1,
+        help="Number of parallel jobs for resolution sweeps. Use -1 for all CPUs (default: 1)",
     )
 
     latent_analysis_parser = subparsers.add_parser("latent-analysis", help="Sample-level latent space analysis.")
@@ -421,6 +427,7 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
             coarse_steps=getattr(args, "resolution_coarse_steps", 10),
             fine_steps=getattr(args, "resolution_fine_steps", 10),
             fine_range_fraction=getattr(args, "resolution_fine_range", 0.3),
+            n_jobs=getattr(args, "n_jobs", 1),
         )
         auto_output = Path(args.output_dir) / "res_auto"
         resolutions_to_run.append((best_res, "auto", auto_output, auto_modules))
