@@ -317,12 +317,26 @@ def prepare_leiden_graph(
     return graph, genes
 
 
+def _run_leiden_single(graph, resolution: float, edge_weights):
+    """Run Leiden clustering for a single resolution (helper for parallel execution)."""
+    import leidenalg
+
+    partition = leidenalg.find_partition(
+        graph,
+        leidenalg.RBConfigurationVertexPartition,
+        resolution_parameter=resolution,
+        weights=edge_weights,
+    )
+    return resolution, partition
+
+
 def _leiden_partitions_for_resolutions(
     graph,
     resolutions: Iterable[float],
     *,
     progress: bool = False,
     progress_desc: str = "Leiden resolution search",
+    n_jobs: int = 1,
 ):
     """Run Leiden clustering for multiple resolutions.
 
@@ -336,6 +350,8 @@ def _leiden_partitions_for_resolutions(
         If True, display a tqdm progress bar.
     progress_desc:
         Description string for the progress bar.
+    n_jobs:
+        Number of parallel jobs. Use -1 for all CPUs, 1 for sequential (default).
 
     Returns
     -------
@@ -346,8 +362,22 @@ def _leiden_partitions_for_resolutions(
 
     edge_weights = graph.es["weight"] if "weight" in graph.es.attributes() else None
     resolutions_list = list(resolutions)
-    partitions = {}
 
+    # Use parallel execution when n_jobs != 1
+    if n_jobs != 1:
+        from joblib import Parallel, delayed
+
+        if progress:
+            logger.info("%s: running %d resolutions with n_jobs=%d", progress_desc, len(resolutions_list), n_jobs)
+
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(_run_leiden_single)(graph, res, edge_weights)
+            for res in resolutions_list
+        )
+        return dict(results)
+
+    # Sequential execution (original behavior)
+    partitions = {}
     iterator = resolutions_list
     if progress:
         iterator = tqdm(
@@ -386,6 +416,7 @@ def leiden_modules_for_resolutions(
     resolutions: Iterable[float],
     *,
     progress: bool = False,
+    n_jobs: int = 1,
 ) -> Dict[float, pd.Series]:
     """Run Leiden clustering for multiple resolutions using a pre-built graph.
 
@@ -399,6 +430,8 @@ def leiden_modules_for_resolutions(
         Iterable of resolution values to test.
     progress:
         If True, display a progress bar.
+    n_jobs:
+        Number of parallel jobs. Use -1 for all CPUs, 1 for sequential (default).
 
     Returns
     -------
@@ -410,6 +443,7 @@ def leiden_modules_for_resolutions(
         resolutions,
         progress=progress,
         progress_desc="Leiden resolution sweep",
+        n_jobs=n_jobs,
     )
     modules_by_resolution = {}
     for res, partition in partitions.items():
@@ -422,8 +456,8 @@ def optimize_resolution_modularity(
     *,
     adjacency_mode: str = "wgcna-signed",
     resolution_min: float = 0.5,
-    resolution_max: float = 15.0,
-    n_steps: int = 30,
+    resolution_max: float = 1.5,
+    n_steps: int = 10,
     graph: Optional["ig.Graph"] = None,
     edges: Optional[np.ndarray] = None,
     weights: Optional[Sequence[float]] = None,
@@ -435,6 +469,7 @@ def optimize_resolution_modularity(
     coarse_steps: int = 10,
     fine_steps: int = 10,
     fine_range_fraction: float = 0.3,
+    n_jobs: int = 1,
 ) -> tuple[float, float] | tuple[float, float, pd.Series]:
     """Find optimal Leiden resolution by maximizing modularity.
 
@@ -483,6 +518,9 @@ def optimize_resolution_modularity(
         Fraction of the original range to use for fine search, centered on
         the best coarse resolution (default: 0.3 = 30% of original range).
         Only used when ``two_phase=True``.
+    n_jobs:
+        Number of parallel jobs for resolution search. Use -1 for all CPUs,
+        1 for sequential execution (default).
 
     Returns
     -------
@@ -547,6 +585,7 @@ def optimize_resolution_modularity(
             coarse_resolutions,
             progress=progress,
             progress_desc="Coarse resolution search",
+            n_jobs=n_jobs,
         )
         for res, partition in coarse_partitions.items():
             qual = partition.quality()
@@ -584,6 +623,7 @@ def optimize_resolution_modularity(
             fine_resolutions,
             progress=progress,
             progress_desc="Fine resolution search",
+            n_jobs=n_jobs,
         )
         for res, partition in fine_partitions.items():
             qual = partition.quality()
@@ -615,6 +655,7 @@ def optimize_resolution_modularity(
             resolutions,
             progress=progress,
             progress_desc="Optimizing Leiden resolution",
+            n_jobs=n_jobs,
         )
         for res, partition in partitions.items():
             qual = partition.quality()

@@ -167,7 +167,7 @@ bsvae-networks extract-modules \
   --resolution-auto
 ```
 
-This searches resolutions in [0.5, 15.0] (configurable) and selects the one
+This searches resolutions in [0.5, 1.5] (configurable) and selects the one
 with highest modularity score. No ground truth labels are required.
 
 **Tuning the search:**
@@ -179,8 +179,28 @@ bsvae-networks extract-modules \
   --output-dir modules/ \
   --resolution-auto \
   --resolution-min 0.1 \
-  --resolution-max 20.0 \
-  --resolution-steps 50
+  --resolution-max 2.0 \
+  --resolution-steps 15
+```
+
+**Parallel execution for HPC:**
+
+```bash
+# Use all available CPUs
+bsvae-networks extract-modules \
+  --adjacency networks/w_similarity_adjacency.csv \
+  --expr data/log2rpkm.tsv.gz \
+  --output-dir modules/ \
+  --resolution-auto \
+  --n-jobs -1
+
+# Or specify core count (match your SLURM --cpus-per-task)
+bsvae-networks extract-modules \
+  --adjacency networks/w_similarity_adjacency.csv \
+  --expr data/log2rpkm.tsv.gz \
+  --output-dir modules/ \
+  --resolution-auto \
+  --n-jobs 16
 ```
 
 ### Option D: Resolution sweep
@@ -192,7 +212,7 @@ bsvae-networks extract-modules \
   --adjacency networks/w_similarity_adjacency.csv \
   --expr data/log2rpkm.tsv.gz \
   --output-dir modules/ \
-  --resolutions 1.0 2.0 5.0 10.0
+  --resolutions 0.5 0.75 1.0 1.25 1.5
 ```
 
 This creates separate subdirectories for each resolution. You can combine
@@ -208,8 +228,9 @@ fixed resolutions in one run.
 | `--resolution-auto` | Auto-select resolution by maximizing modularity |
 | `--resolutions` | Run multiple resolutions (e.g., `1.0 2.0 5.0`) |
 | `--resolution-min` | Min resolution for auto search (default: 0.5) |
-| `--resolution-max` | Max resolution for auto search (default: 15.0) |
-| `--resolution-steps` | Number of steps in auto search (default: 30) |
+| `--resolution-max` | Max resolution for auto search (default: 1.5) |
+| `--resolution-steps` | Number of steps in auto search (default: 10) |
+| `--n-jobs` | Parallel jobs for resolution sweeps (-1 = all CPUs, default: 1) |
 | `--n-clusters` | Number of clusters for spectral method |
 | `--n-components` | Number of eigenvectors for spectral method |
 | `--adjacency-mode` | `wgcna-signed` (default) or `signed` |
