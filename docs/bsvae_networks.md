@@ -219,6 +219,17 @@ This creates separate subdirectories for each resolution. You can combine
 `--resolution-auto` with `--resolutions` to include both auto-selected and
 fixed resolutions in one run.
 
+**Parallel resolution sweep:**
+
+```bash
+bsvae-networks extract-modules \
+  --adjacency networks/w_similarity_adjacency.csv \
+  --expr data/log2rpkm.tsv.gz \
+  --output-dir modules/ \
+  --resolutions 0.5 0.75 1.0 1.25 1.5 \
+  --n-jobs -1
+```
+
 ### Clustering Options
 
 | Option | Description |

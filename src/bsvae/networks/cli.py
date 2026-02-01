@@ -192,7 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--n-jobs",
         type=int,
         default=1,
-        help="Number of parallel jobs for resolution sweeps. Use -1 for all CPUs (default: 1)",
+        help="Number of parallel jobs for --resolution-auto and --resolutions sweeps. Use -1 for all CPUs (default: 1)",
     )
 
     latent_analysis_parser = subparsers.add_parser("latent-analysis", help="Sample-level latent space analysis.")
@@ -272,6 +272,49 @@ def _load_covariates(path: str, sample_ids: Sequence[str]) -> pd.DataFrame:
     return df
 
 
+def _run_clustering_task(
+    resolution: float,
+    label: str,
+    output_dir: Path,
+    precomputed_modules: Optional[pd.Series],
+    adjacency_df: pd.DataFrame,
+    expr_df: pd.DataFrame,
+    adjacency_mode: str,
+    cluster_method: str,
+    n_clusters: Optional[int],
+    n_components: Optional[int],
+    graph,
+    genes: Optional[Sequence[str]],
+    compute_eigengenes: bool,
+) -> dict:
+    """Wrapper for parallel execution of clustering tasks.
+
+    Returns a dict with resolution, label, n_modules, and output_dir.
+    """
+    n_modules = _run_single_clustering(
+        adjacency_df=adjacency_df,
+        expr_df=expr_df,
+        output_dir=output_dir,
+        resolution=resolution,
+        adjacency_mode=adjacency_mode,
+        cluster_method=cluster_method,
+        n_clusters=n_clusters,
+        n_components=n_components,
+        logger=None,  # No logging in parallel workers
+        resolution_label=label,
+        graph=graph,
+        genes=genes,
+        compute_eigengenes=compute_eigengenes,
+        precomputed_modules=precomputed_modules,
+    )
+    return {
+        "resolution": resolution,
+        "label": label,
+        "n_modules": n_modules,
+        "output_dir": str(output_dir),
+    }
+
+
 def _run_single_clustering(
     adjacency_df: pd.DataFrame,
     expr_df: pd.DataFrame,
@@ -281,7 +324,7 @@ def _run_single_clustering(
     cluster_method: str,
     n_clusters: Optional[int],
     n_components: Optional[int],
-    logger: logging.Logger,
+    logger: Optional[logging.Logger],
     resolution_label: Optional[str] = None,
     graph=None,
     genes: Optional[Sequence[str]] = None,
@@ -302,17 +345,19 @@ def _run_single_clustering(
 
     if precomputed_modules is not None:
         modules = precomputed_modules
-        logger.info(
-            "Using precomputed modules (resolution=%.3f, %d modules)",
-            resolution,
-            modules.nunique(),
-        )
+        if logger:
+            logger.info(
+                "Using precomputed modules (resolution=%.3f, %d modules)",
+                resolution,
+                modules.nunique(),
+            )
     elif cluster_method == "leiden":
-        logger.info(
-            "Running Leiden clustering (resolution=%.3f, adjacency_mode=%s)",
-            resolution,
-            adjacency_mode,
-        )
+        if logger:
+            logger.info(
+                "Running Leiden clustering (resolution=%.3f, adjacency_mode=%s)",
+                resolution,
+                adjacency_mode,
+            )
         if graph is not None and genes is not None:
             modules = leiden_modules_from_graph(graph, genes, resolution)
         else:
@@ -336,7 +381,8 @@ def _run_single_clustering(
         eigengenes = compute_module_eigengenes(expr_df, modules)
         save_eigengenes(eigengenes, output_dir / "eigengenes.csv")
     else:
-        logger.info("Skipping eigengene computation for resolution %.3f", resolution)
+        if logger:
+            logger.info("Skipping eigengene computation for resolution %.3f", resolution)
 
     # Save resolution metadata for reproducibility
     if cluster_method == "leiden":
@@ -351,12 +397,13 @@ def _run_single_clustering(
         with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2)
 
-    logger.info(
-        "Resolution %.3f: %d modules detected, saved to %s",
-        resolution,
-        n_modules,
-        output_dir,
-    )
+    if logger:
+        logger.info(
+            "Resolution %.3f: %d modules detected, saved to %s",
+            resolution,
+            n_modules,
+            output_dir,
+        )
     return n_modules
 
 
@@ -448,30 +495,67 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
     # Run clustering for each resolution
     results_summary = []
     multiple_resolutions = len(resolutions_to_run) > 1
-    for resolution, label, output_dir, precomputed_modules in resolutions_to_run:
-        compute_eigengenes = not (label == "auto" and multiple_resolutions)
-        n_modules = _run_single_clustering(
-            adjacency_df=adjacency_df,
-            expr_df=expr_df,
-            output_dir=output_dir,
-            resolution=resolution,
-            adjacency_mode=args.adjacency_mode,
-            cluster_method=args.cluster_method,
-            n_clusters=args.n_clusters,
-            n_components=args.n_components,
-            logger=logger,
-            resolution_label=label,
-            graph=leiden_graph,
-            genes=leiden_genes,
-            compute_eigengenes=compute_eigengenes,
-            precomputed_modules=precomputed_modules,
+    n_jobs = getattr(args, "n_jobs", 1)
+
+    # Use parallel execution when n_jobs != 1 and multiple resolutions
+    if n_jobs != 1 and multiple_resolutions:
+        from joblib import Parallel, delayed
+
+        logger.info("Running %d resolutions in parallel with n_jobs=%d", len(resolutions_to_run), n_jobs)
+
+        results_summary = Parallel(n_jobs=n_jobs)(
+            delayed(_run_clustering_task)(
+                resolution=resolution,
+                label=label,
+                output_dir=output_dir,
+                precomputed_modules=precomputed_modules,
+                adjacency_df=adjacency_df,
+                expr_df=expr_df,
+                adjacency_mode=args.adjacency_mode,
+                cluster_method=args.cluster_method,
+                n_clusters=args.n_clusters,
+                n_components=args.n_components,
+                graph=leiden_graph,
+                genes=leiden_genes,
+                compute_eigengenes=not (label == "auto" and multiple_resolutions),
+            )
+            for resolution, label, output_dir, precomputed_modules in resolutions_to_run
         )
-        results_summary.append({
-            "resolution": resolution,
-            "label": label,
-            "n_modules": n_modules,
-            "output_dir": str(output_dir),
-        })
+
+        # Log results after parallel execution
+        for result in results_summary:
+            logger.info(
+                "Resolution %.3f: %d modules detected, saved to %s",
+                result["resolution"],
+                result["n_modules"],
+                result["output_dir"],
+            )
+    else:
+        # Sequential execution (original behavior)
+        for resolution, label, output_dir, precomputed_modules in resolutions_to_run:
+            compute_eigengenes = not (label == "auto" and multiple_resolutions)
+            n_modules = _run_single_clustering(
+                adjacency_df=adjacency_df,
+                expr_df=expr_df,
+                output_dir=output_dir,
+                resolution=resolution,
+                adjacency_mode=args.adjacency_mode,
+                cluster_method=args.cluster_method,
+                n_clusters=args.n_clusters,
+                n_components=args.n_components,
+                logger=logger,
+                resolution_label=label,
+                graph=leiden_graph,
+                genes=leiden_genes,
+                compute_eigengenes=compute_eigengenes,
+                precomputed_modules=precomputed_modules,
+            )
+            results_summary.append({
+                "resolution": resolution,
+                "label": label,
+                "n_modules": n_modules,
+                "output_dir": str(output_dir),
+            })
 
     # Save summary if multiple resolutions were run
     if len(resolutions_to_run) > 1:
