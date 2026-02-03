@@ -1,4 +1,5 @@
-"""Utilities for extracting gene modules from adjacency matrices.
+"""
+Utilities for extracting gene modules from adjacency matrices.
 
 This module provides Leiden and spectral clustering helpers along with
 convenience utilities to compute module eigengenes and persist results to disk.
@@ -17,17 +18,37 @@ Example
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
-
 import numpy as np
 import pandas as pd
+from dataclasses import dataclass
 from tqdm import tqdm
+from pathlib import Path
+from typing import (
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    TYPE_CHECKING
+)
 
-from bsvae.networks.utils import transform_adjacency_for_clustering
-from sklearn.cluster import SpectralClustering
+
+@dataclass
+class PartitionResult:
+    """Serializable container for Leiden partition results.
+
+    This class holds the essential outputs from Leiden clustering in a format
+    that can be pickled for parallel execution with joblib.
+    """
+    membership: List[int]
+    quality: float
+
 from sklearn.decomposition import PCA
+from sklearn.cluster import SpectralClustering
 from sklearn.preprocessing import StandardScaler
+from bsvae.networks.utils import transform_adjacency_for_clustering
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +65,9 @@ def _infer_separator(path: str) -> str:
     return ","
 
 
-def _ensure_array_and_genes(A: np.ndarray | pd.DataFrame, genes: Optional[Sequence[str]] = None) -> Tuple[np.ndarray, List[str]]:
+def _ensure_array_and_genes(
+    A: np.ndarray | pd.DataFrame, genes: Optional[Sequence[str]] = None
+) -> Tuple[np.ndarray, List[str]]:
     if isinstance(A, pd.DataFrame):
         genes = list(A.index)
         arr = A.values
@@ -60,12 +83,11 @@ def _ensure_array_and_genes(A: np.ndarray | pd.DataFrame, genes: Optional[Sequen
 
 
 def load_adjacency(
-    path: str,
-    genes_path: Optional[str] = None,
-    *,
+    path: str, genes_path: Optional[str] = None, *,
     return_type: str = "dense",
 ) -> Tuple[np.ndarray, List[str]] | Tuple[np.ndarray, np.ndarray, List[str]] | Tuple["ig.Graph", List[str]]:
-    """Load an adjacency matrix with gene labels.
+    """
+    Load an adjacency matrix with gene labels.
 
     Supports multiple formats:
     - CSV/TSV files with genes as index and columns (legacy dense format)
@@ -205,7 +227,8 @@ def build_graph_from_edge_list(
 
 
 def _module_size_summary(modules: Mapping[str, int] | pd.Series) -> Tuple[int, int]:
-    """Return the number of modules and median module size.
+    """
+    Return the number of modules and median module size.
 
     Parameters
     ----------
@@ -218,7 +241,6 @@ def _module_size_summary(modules: Mapping[str, int] | pd.Series) -> Tuple[int, i
         ``(n_modules, median_size)`` where ``median_size`` is 0 when no modules
         are present.
     """
-
     module_series = pd.Series(modules, name="module")
     counts = module_series.value_counts()
     if counts.empty:
@@ -227,13 +249,11 @@ def _module_size_summary(modules: Mapping[str, int] | pd.Series) -> Tuple[int, i
 
 
 def format_module_feedback(
-    method: str,
-    modules: Mapping[str, int] | pd.Series,
-    *,
-    resolution: Optional[float] = None,
-    n_clusters: Optional[int] = None,
+    method: str, modules: Mapping[str, int] | pd.Series, *,
+    resolution: Optional[float] = None, n_clusters: Optional[int] = None,
 ) -> str:
-    """Human-friendly summary of module extraction results.
+    """
+    Human-friendly summary of module extraction results.
 
     Examples
     --------
@@ -241,7 +261,6 @@ def format_module_feedback(
     >>> format_module_feedback("Leiden", modules, resolution=1.0)
     'Leiden resolution=1.0 produced 2 modules (median size=2 genes)'
     """
-
     n_modules, median_size = _module_size_summary(modules)
     details = []
     if resolution is not None:
@@ -252,8 +271,11 @@ def format_module_feedback(
     return f"{method}{detail_str} produced {n_modules} modules (median size={median_size} genes)"
 
 
-def build_graph_from_adjacency(A: np.ndarray | pd.DataFrame, genes: Optional[Sequence[str]] = None):
-    """Construct an igraph Graph from an adjacency matrix.
+def build_graph_from_adjacency(
+    A: np.ndarray | pd.DataFrame, genes: Optional[Sequence[str]] = None
+):
+    """
+    Construct an igraph Graph from an adjacency matrix.
 
     Parameters
     ----------
@@ -267,7 +289,6 @@ def build_graph_from_adjacency(A: np.ndarray | pd.DataFrame, genes: Optional[Seq
     igraph.Graph
         Undirected weighted graph with gene names as vertex attributes.
     """
-
     import igraph as ig
 
     arr, genes = _ensure_array_and_genes(A, genes)
@@ -279,21 +300,18 @@ def build_graph_from_adjacency(A: np.ndarray | pd.DataFrame, genes: Optional[Seq
 
 
 def prepare_leiden_graph(
-    A: np.ndarray | pd.DataFrame,
-    genes: Optional[Sequence[str]] = None,
-    *,
-    adjacency_mode: str = "wgcna-signed",
+    A: np.ndarray | pd.DataFrame, genes: Optional[Sequence[str]] = None,
+    *, adjacency_mode: str = "wgcna-signed",
 ):
-    """Transform adjacency and build the Leiden graph once.
+    """
+    Transform adjacency and build the Leiden graph once.
 
     Returns the igraph Graph and ordered gene list.
     """
-
     arr, genes = _ensure_array_and_genes(A, genes)
     logger.info(
         "Preparing Leiden graph for %d genes (adjacency_mode=%s)",
-        len(genes),
-        adjacency_mode,
+        len(genes), adjacency_mode,
     )
     adj = transform_adjacency_for_clustering(arr, mode=adjacency_mode)
 
@@ -318,7 +336,11 @@ def prepare_leiden_graph(
 
 
 def _run_leiden_single(graph, resolution: float, edge_weights):
-    """Run Leiden clustering for a single resolution (helper for parallel execution)."""
+    """Run Leiden clustering for a single resolution (helper for parallel execution).
+
+    Returns a PartitionResult (serializable) instead of the raw leidenalg partition
+    to avoid pickling issues with PyCapsule objects in parallel execution.
+    """
     import leidenalg
 
     partition = leidenalg.find_partition(
@@ -327,18 +349,19 @@ def _run_leiden_single(graph, resolution: float, edge_weights):
         resolution_parameter=resolution,
         weights=edge_weights,
     )
-    return resolution, partition
+    # Extract serializable data before returning to avoid pickle errors
+    return resolution, PartitionResult(
+        membership=list(partition.membership),
+        quality=partition.quality(),
+    )
 
 
 def _leiden_partitions_for_resolutions(
-    graph,
-    resolutions: Iterable[float],
-    *,
-    progress: bool = False,
-    progress_desc: str = "Leiden resolution search",
-    n_jobs: int = 1,
-):
-    """Run Leiden clustering for multiple resolutions.
+    graph, resolutions: Iterable[float], *, progress: bool = False,
+    progress_desc: str = "Leiden resolution search", n_jobs: int = 1,
+) -> Dict[float, PartitionResult]:
+    """
+    Run Leiden clustering for multiple resolutions.
 
     Parameters
     ----------
@@ -356,7 +379,8 @@ def _leiden_partitions_for_resolutions(
     Returns
     -------
     dict
-        Mapping from resolution value to leidenalg partition.
+        Mapping from resolution value to PartitionResult containing membership
+        and quality score.
     """
     import leidenalg
 
@@ -368,7 +392,8 @@ def _leiden_partitions_for_resolutions(
         from joblib import Parallel, delayed
 
         if progress:
-            logger.info("%s: running %d resolutions with n_jobs=%d", progress_desc, len(resolutions_list), n_jobs)
+            logger.info("%s: running %d resolutions with n_jobs=%d",
+                        progress_desc, len(resolutions_list), n_jobs)
 
         results = Parallel(n_jobs=n_jobs)(
             delayed(_run_leiden_single)(graph, res, edge_weights)
@@ -381,21 +406,20 @@ def _leiden_partitions_for_resolutions(
     iterator = resolutions_list
     if progress:
         iterator = tqdm(
-            resolutions_list,
-            desc=progress_desc,
-            unit="res",
-            leave=False,
+            resolutions_list, desc=progress_desc, unit="res", leave=False,
         )
 
     for res in iterator:
-        partitions[res] = leidenalg.find_partition(
-            graph,
-            leidenalg.RBConfigurationVertexPartition,
-            resolution_parameter=res,
-            weights=edge_weights,
+        partition = leidenalg.find_partition(
+            graph, leidenalg.RBConfigurationVertexPartition,
+            resolution_parameter=res, weights=edge_weights,
+        )
+        partitions[res] = PartitionResult(
+            membership=list(partition.membership),
+            quality=partition.quality(),
         )
         if progress and hasattr(iterator, "set_postfix"):
-            n_modules = len(partitions[res])
+            n_modules = len(set(partitions[res].membership))
             iterator.set_postfix(resolution=f"{res:.2f}", modules=n_modules)
 
     return partitions
@@ -411,14 +435,11 @@ def leiden_modules_from_graph(graph, genes: Sequence[str], resolution: float) ->
 
 
 def leiden_modules_for_resolutions(
-    graph,
-    genes: Sequence[str],
-    resolutions: Iterable[float],
-    *,
-    progress: bool = False,
-    n_jobs: int = 1,
+    graph, genes: Sequence[str], resolutions: Iterable[float], *,
+    progress: bool = False, n_jobs: int = 1,
 ) -> Dict[float, pd.Series]:
-    """Run Leiden clustering for multiple resolutions using a pre-built graph.
+    """
+    Run Leiden clustering for multiple resolutions using a pre-built graph.
 
     Parameters
     ----------
@@ -439,39 +460,32 @@ def leiden_modules_for_resolutions(
         Mapping from resolution to module assignments (pd.Series).
     """
     partitions = _leiden_partitions_for_resolutions(
-        graph,
-        resolutions,
-        progress=progress,
-        progress_desc="Leiden resolution sweep",
-        n_jobs=n_jobs,
+        graph, resolutions, progress=progress,
+        progress_desc="Leiden resolution sweep", n_jobs=n_jobs,
     )
     modules_by_resolution = {}
     for res, partition in partitions.items():
-        modules_by_resolution[res] = pd.Series(partition.membership, index=list(genes), name="module")
+        modules_by_resolution[res] = pd.Series(partition.membership,
+                                               index=list(genes), name="module")
     return modules_by_resolution
 
 
 def optimize_resolution_modularity(
-    A: np.ndarray | pd.DataFrame | None = None,
-    *,
+    A: np.ndarray | pd.DataFrame | None = None, *,
     adjacency_mode: str = "wgcna-signed",
-    resolution_min: float = 0.5,
-    resolution_max: float = 1.5,
-    n_steps: int = 10,
-    graph: Optional["ig.Graph"] = None,
+    resolution_min: float = 0.5, resolution_max: float = 1.5,
+    n_steps: int = 10, graph: Optional["ig.Graph"] = None,
     edges: Optional[np.ndarray] = None,
     weights: Optional[Sequence[float]] = None,
     genes: Optional[Sequence[str]] = None,
     transformed_adjacency: Optional[np.ndarray] = None,
-    return_modules: bool = False,
-    progress: bool = False,
-    two_phase: bool = False,
-    coarse_steps: int = 10,
-    fine_steps: int = 10,
-    fine_range_fraction: float = 0.3,
+    return_modules: bool = False, progress: bool = False,
+    two_phase: bool = False, coarse_steps: int = 5,
+    fine_steps: int = 10, fine_range_fraction: float = 0.4,
     n_jobs: int = 1,
 ) -> tuple[float, float] | tuple[float, float, pd.Series]:
-    """Find optimal Leiden resolution by maximizing modularity.
+    """
+    Find optimal Leiden resolution by maximizing modularity.
 
     This method selects resolution without using ground truth labels,
     making it suitable for unbiased benchmarking.
@@ -509,14 +523,14 @@ def optimize_resolution_modularity(
         find a ballpark resolution, then a fine sweep in a narrower range.
         This reduces peak memory by avoiding storing all partitions at once.
     coarse_steps:
-        Number of resolution values in the coarse phase (default: 10).
+        Number of resolution values in the coarse phase (default: 5).
         Only used when ``two_phase=True``.
     fine_steps:
         Number of resolution values in the fine phase (default: 10).
         Only used when ``two_phase=True``.
     fine_range_fraction:
         Fraction of the original range to use for fine search, centered on
-        the best coarse resolution (default: 0.3 = 30% of original range).
+        the best coarse resolution (default: 0.4 = 40% of original range).
         Only used when ``two_phase=True``.
     n_jobs:
         Number of parallel jobs for resolution search. Use -1 for all CPUs,
@@ -573,22 +587,17 @@ def optimize_resolution_modularity(
         coarse_resolutions = np.linspace(resolution_min, resolution_max, coarse_steps)
         logger.info(
             "Two-phase search: coarse phase in [%.2f, %.2f] with %d steps",
-            resolution_min,
-            resolution_max,
-            coarse_steps,
+            resolution_min, resolution_max, coarse_steps,
         )
 
         coarse_best_res, coarse_best_qual = 1.0, -np.inf
         coarse_best_partition = None
         coarse_partitions = _leiden_partitions_for_resolutions(
-            graph,
-            coarse_resolutions,
-            progress=progress,
-            progress_desc="Coarse resolution search",
-            n_jobs=n_jobs,
+            graph, coarse_resolutions, progress=progress,
+            progress_desc="Coarse resolution search", n_jobs=n_jobs,
         )
         for res, partition in coarse_partitions.items():
-            qual = partition.quality()
+            qual = partition.quality
             if qual > coarse_best_qual:
                 coarse_best_qual, coarse_best_res = qual, res
                 if return_modules:
@@ -599,8 +608,7 @@ def optimize_resolution_modularity(
 
         logger.info(
             "Coarse phase complete: best resolution=%.3f (modularity=%.4f)",
-            coarse_best_res,
-            coarse_best_qual,
+            coarse_best_res, coarse_best_qual,
         )
 
         # Phase 2: Fine search around coarse best
@@ -611,22 +619,17 @@ def optimize_resolution_modularity(
         fine_resolutions = np.linspace(fine_min, fine_max, fine_steps)
         logger.info(
             "Two-phase search: fine phase in [%.2f, %.2f] with %d steps",
-            fine_min,
-            fine_max,
-            fine_steps,
+            fine_min, fine_max, fine_steps,
         )
 
         best_res, best_qual = coarse_best_res, coarse_best_qual
         best_partition = coarse_best_partition if return_modules else None
         fine_partitions = _leiden_partitions_for_resolutions(
-            graph,
-            fine_resolutions,
-            progress=progress,
-            progress_desc="Fine resolution search",
-            n_jobs=n_jobs,
+            graph, fine_resolutions, progress=progress,
+            progress_desc="Fine resolution search", n_jobs=n_jobs,
         )
         for res, partition in fine_partitions.items():
-            qual = partition.quality()
+            qual = partition.quality
             if qual > best_qual:
                 best_qual, best_res = qual, res
                 if return_modules:
@@ -634,8 +637,7 @@ def optimize_resolution_modularity(
 
         logger.info(
             "Two-phase search complete: optimal resolution=%.3f (modularity=%.4f)",
-            best_res,
-            best_qual,
+            best_res, best_qual,
         )
     else:
         # Single-phase search (original behavior)
@@ -645,20 +647,15 @@ def optimize_resolution_modularity(
         best_partition = None
         logger.info(
             "Searching for optimal resolution in [%.2f, %.2f] with %d steps",
-            resolution_min,
-            resolution_max,
-            n_steps,
+            resolution_min, resolution_max, n_steps,
         )
 
         partitions = _leiden_partitions_for_resolutions(
-            graph,
-            resolutions,
-            progress=progress,
-            progress_desc="Optimizing Leiden resolution",
-            n_jobs=n_jobs,
+            graph, resolutions, progress=progress,
+            progress_desc="Optimizing Leiden resolution", n_jobs=n_jobs,
         )
         for res, partition in partitions.items():
-            qual = partition.quality()
+            qual = partition.quality
             if qual > best_qual:
                 best_qual, best_res = qual, res
                 if return_modules:
@@ -678,16 +675,13 @@ def optimize_resolution_modularity(
 
 
 def leiden_modules(
-    A: np.ndarray | pd.DataFrame | None = None,
-    resolution: float = 1.0,
-    *,
-    adjacency_mode: str = "wgcna-signed",
-    graph: Optional["ig.Graph"] = None,
-    edges: Optional[np.ndarray] = None,
-    weights: Optional[Sequence[float]] = None,
+    A: np.ndarray | pd.DataFrame | None = None, resolution: float = 1.0,
+    *, adjacency_mode: str = "wgcna-signed", graph: Optional["ig.Graph"] = None,
+    edges: Optional[np.ndarray] = None, weights: Optional[Sequence[float]] = None,
     genes: Optional[Sequence[str]] = None,
 ) -> pd.Series:
-    """Cluster genes into modules using Leiden community detection.
+    """
+    Cluster genes into modules using Leiden community detection.
 
     Parameters
     ----------
@@ -754,21 +748,17 @@ def leiden_modules(
 
     logger.info(
         "Running Leiden clustering on %d genes (resolution=%.3f, adjacency_mode=%s)",
-        len(genes),
-        resolution,
-        adjacency_mode,
+        len(genes), resolution, adjacency_mode,
     )
     return leiden_modules_from_graph(graph, genes, resolution)
 
 
 def spectral_modules(
-    A: np.ndarray | pd.DataFrame,
-    n_clusters: Optional[int] = None,
-    n_components: Optional[int] = None,
-    *,
-    adjacency_mode: str = "wgcna-signed",
+    A: np.ndarray | pd.DataFrame, n_clusters: Optional[int] = None,
+    n_components: Optional[int] = None, *, adjacency_mode: str = "wgcna-signed",
 ) -> pd.Series:
-    """Cluster genes using spectral clustering on the adjacency Laplacian.
+    """
+    Cluster genes using spectral clustering on the adjacency Laplacian.
 
     Parameters
     ----------
@@ -789,7 +779,6 @@ def spectral_modules(
     pandas.Series
         Module assignments indexed by gene identifiers.
     """
-
     arr, genes = _ensure_array_and_genes(A)
     n_genes = len(genes)
     if n_clusters is None:
@@ -816,11 +805,9 @@ def spectral_modules(
     np.fill_diagonal(arr, 0.0)
 
     clustering = SpectralClustering(
-        n_clusters=n_clusters,
-        n_components=n_components,
-        affinity="precomputed",
-        assign_labels="kmeans",
-        random_state=0,
+        n_clusters=n_clusters, n_components=n_components,
+        affinity="precomputed", assign_labels="kmeans",
+        random_state=13,
     )
     labels = clustering.fit_predict(arr)
     modules = pd.Series(labels, index=genes, name="module")
@@ -828,8 +815,11 @@ def spectral_modules(
     return modules
 
 
-def compute_module_eigengenes(datExpr: pd.DataFrame, modules: Mapping[str, int]) -> pd.DataFrame:
-    """Compute module eigengenes (first principal component per module).
+def compute_module_eigengenes(
+    datExpr: pd.DataFrame, modules: Mapping[str, int]
+) -> pd.DataFrame:
+    """
+    Compute module eigengenes (first principal component per module).
 
     Parameters
     ----------
@@ -843,14 +833,11 @@ def compute_module_eigengenes(datExpr: pd.DataFrame, modules: Mapping[str, int])
     pandas.DataFrame
         Samples × modules matrix of eigengene values.
     """
-
     module_series = pd.Series(modules, name="module")
     shared_genes = module_series.index.intersection(datExpr.index)
     logger.debug(
         "Expression genes: %d | Module genes: %d | Overlap: %d",
-        datExpr.shape[0],
-        len(module_series),
-        len(shared_genes),
+        datExpr.shape[0], len(module_series), len(shared_genes),
     )
     if shared_genes.empty:
         raise ValueError("No overlapping genes between expression matrix and modules")
@@ -884,7 +871,8 @@ def compute_module_eigengenes(datExpr: pd.DataFrame, modules: Mapping[str, int])
 
 
 def save_modules(modules: Mapping[str, int] | pd.Series, output_path: str) -> None:
-    """Save gene-to-module assignments to CSV.
+    """
+    Save gene-to-module assignments to CSV.
 
     Parameters
     ----------
@@ -893,7 +881,6 @@ def save_modules(modules: Mapping[str, int] | pd.Series, output_path: str) -> No
     output_path:
         Destination CSV/TSV path.
     """
-
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     module_series = pd.Series(modules, name="module")
@@ -905,7 +892,8 @@ def save_modules(modules: Mapping[str, int] | pd.Series, output_path: str) -> No
 
 
 def save_eigengenes(eigengenes: pd.DataFrame, output_path: str) -> None:
-    """Persist eigengenes matrix to disk.
+    """
+    Persist eigengenes matrix to disk.
 
     Parameters
     ----------
@@ -914,7 +902,6 @@ def save_eigengenes(eigengenes: pd.DataFrame, output_path: str) -> None:
     output_path:
         Destination CSV/TSV path.
     """
-
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     sep = "\t" if path.suffix.lower() == ".tsv" else ","

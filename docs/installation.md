@@ -1,19 +1,36 @@
 # Installation
 
 ## Requirements
+
 - Python ≥ 3.11
-- PyTorch ≥ 2.0 with optional CUDA support (2.8 recommended)
-- GCC toolchain and build essentials for compiling native extensions
+- PyTorch ≥ 2.8 with optional CUDA support
 - (Optional) CUDA toolkit if training on GPU
 
-## Install from Source
+## Install from PyPI
+
 ```bash
-git clone https://github.com/.../bsvae.git
-cd bsvae
+pip install bsvae
+```
+
+This installs BSVAE and all required dependencies.
+
+## Install Development Version
+
+For the latest features and bug fixes:
+
+```bash
+pip install git+https://github.com/heart-gen/BSVAE.git
+```
+
+Or for local development:
+
+```bash
+git clone https://github.com/heart-gen/BSVAE.git
+cd BSVAE
 pip install -e .
 ```
 
-The editable installation exposes the `bsvae-train` command-line entry point defined in `pyproject.toml`.
+The installation exposes three CLI entry points: `bsvae-train`, `bsvae-networks`, and `bsvae-download-ppi`.
 
 ## Verifying the Installation
 ```bash
