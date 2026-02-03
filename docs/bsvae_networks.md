@@ -100,13 +100,20 @@ bsvae-networks extract-networks \
 
 ### Outputs
 
+By default, adjacency matrices are saved in **sparse NPZ** format and edge lists
+in **Parquet** format for efficient storage:
+
 ```text
 networks/
-├── w_similarity_adjacency.csv
-├── w_similarity_edges.tsv
-├── laplacian_adjacency.csv
-└── heatmaps/
+├── w_similarity_adjacency.npz      # Sparse adjacency matrix
+├── w_similarity_edges.parquet      # Edge list with weights
+├── laplacian_adjacency.npz
+├── laplacian_edges.parquet
+└── heatmaps/                       # Optional (--heatmaps)
 ```
+
+Use `--no-sparse` for legacy dense CSV output, or `--quantize float32` to
+disable int8 quantization.
 
 ---
 
@@ -135,12 +142,14 @@ Adjacency matrices are **continuous** and must be clustered to obtain discrete m
 
 ```bash
 bsvae-networks extract-modules \
-  --adjacency networks/w_similarity_adjacency.csv \
+  --adjacency networks/w_similarity_adjacency.npz \
   --expr data/log2rpkm.tsv.gz \
   --output-dir modules/ \
   --cluster-method leiden \
   --resolution 1.0
 ```
+
+Accepts both sparse NPZ (default output from `extract-networks`) and dense CSV formats.
 
 ### Option B: Compute adjacency on the fly
 
@@ -160,7 +169,7 @@ Let BSVAE find the optimal Leiden resolution by maximizing modularity:
 
 ```bash
 bsvae-networks extract-modules \
-  --adjacency networks/w_similarity_adjacency.csv \
+  --adjacency networks/w_similarity_adjacency.npz \
   --expr data/log2rpkm.tsv.gz \
   --output-dir modules/ \
   --cluster-method leiden \
@@ -174,7 +183,7 @@ with highest modularity score. No ground truth labels are required.
 
 ```bash
 bsvae-networks extract-modules \
-  --adjacency networks/w_similarity_adjacency.csv \
+  --adjacency networks/w_similarity_adjacency.npz \
   --expr data/log2rpkm.tsv.gz \
   --output-dir modules/ \
   --resolution-auto \
@@ -188,7 +197,7 @@ bsvae-networks extract-modules \
 ```bash
 # Use all available CPUs
 bsvae-networks extract-modules \
-  --adjacency networks/w_similarity_adjacency.csv \
+  --adjacency networks/w_similarity_adjacency.npz \
   --expr data/log2rpkm.tsv.gz \
   --output-dir modules/ \
   --resolution-auto \
@@ -196,7 +205,7 @@ bsvae-networks extract-modules \
 
 # Or specify core count (match your SLURM --cpus-per-task)
 bsvae-networks extract-modules \
-  --adjacency networks/w_similarity_adjacency.csv \
+  --adjacency networks/w_similarity_adjacency.npz \
   --expr data/log2rpkm.tsv.gz \
   --output-dir modules/ \
   --resolution-auto \
@@ -209,7 +218,7 @@ Run clustering at multiple resolutions to compare results:
 
 ```bash
 bsvae-networks extract-modules \
-  --adjacency networks/w_similarity_adjacency.csv \
+  --adjacency networks/w_similarity_adjacency.npz \
   --expr data/log2rpkm.tsv.gz \
   --output-dir modules/ \
   --resolutions 0.5 0.75 1.0 1.25 1.5
@@ -223,7 +232,7 @@ fixed resolutions in one run.
 
 ```bash
 bsvae-networks extract-modules \
-  --adjacency networks/w_similarity_adjacency.csv \
+  --adjacency networks/w_similarity_adjacency.npz \
   --expr data/log2rpkm.tsv.gz \
   --output-dir modules/ \
   --resolutions 0.5 0.75 1.0 1.25 1.5 \

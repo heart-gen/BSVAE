@@ -1,10 +1,12 @@
 # BSVAE: Biologically Structured Variational Autoencoder
 
-[![PyTorch](https://img.shields.io/badge/PyTorch-%3E%3D2.0-orange)](https://pytorch.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-%3E%3D2.8-orange)](https://pytorch.org/)
+[![Python](https://img.shields.io/badge/Python-%3E%3D3.11-blue)](https://python.org/)
 [![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
+[![Documentation](https://readthedocs.org/projects/bsvae/badge/?version=latest)](https://bsvae.readthedocs.io/)
 [![DOI](https://zenodo.org/badge/1059699525.svg)](https://doi.org/10.5281/zenodo.17871790)
 
-**BSVAE** is a PyTorch package for **Structured Factor Variational Autoencoders** (StructuredFactorVAE).  
+**BSVAE** is a PyTorch package for **Structured Factor Variational Autoencoders** (StructuredFactorVAE).
 It is designed for **gene expression modeling with biological priors**, integrating **protein–protein interaction (PPI) networks** and **sparsity constraints** for interpretable latent representations.
 
 ---
@@ -12,23 +14,28 @@ It is designed for **gene expression modeling with biological priors**, integrat
 ## Features
 
 - **Structured VAE architecture** (`StructuredFactorVAE`)
-  - Factorized encoder/decoder with group sparsity
+  - Factorized encoder/decoder with group sparsity (L1 regularization)
   - Optional Laplacian regularization from PPI networks
+  - Per-gene variance learning
+  - GPU/CPU compatible
 - **Dataset utilities**
   - Load gene expression matrices (`GeneExpression`)
-  - Support for CSV full-matrix mode or pre-split train/test mode
+  - Support for CSV/TSV (including gzip-compressed) in full-matrix or pre-split mode
+  - Automatic correction of dataset orientation (genes × samples)
 - **Biological priors**
-  - Fetch and cache STRING PPI networks by NCBI TaxID
+  - Fetch and cache STRING v12.0 PPI networks by NCBI TaxID
   - Map gene symbols / Ensembl IDs to protein IDs using MyGene.info or BioMart
 - **Training and evaluation**
-  - Unified training loop (`Trainer`)
+  - Unified training loop (`Trainer`) with checkpointing and loss logging
   - Evaluation with reconstruction, KL, sparsity, and Laplacian penalties (`Evaluator`)
 - **Reproducibility**
   - Save/load models + metadata (`modelIO`)
   - Configurable hyperparameters via `hyperparam.ini`
-- **Post-training analysis**
-  - Gene–gene network extraction via decoder similarity, propagated covariance, Graphical Lasso, and Laplacian refinement
+- **Post-training network analysis** (`bsvae-networks`)
+  - Gene–gene network extraction via decoder similarity, latent covariance, Graphical Lasso, and Laplacian refinement
+  - Gene module clustering (Leiden with auto-resolution, spectral) with eigengene computation
   - Latent export (`mu`, `logvar`) to CSV or AnnData for downstream workflows
+  - Sample-level latent analysis (UMAP, t-SNE, K-means, GMM)
 
 ---
 
@@ -40,21 +47,19 @@ Install from PyPI:
 pip install bsvae
 ```
 
-Or install from source with [Poetry](https://python-poetry.org/):
+For the latest development version:
 
 ```bash
-git clone https://github.com/YOUR-LAB/BSVAE.git
-cd BSVAE
-poetry install
+pip install git+https://github.com/heart-gen/BSVAE.git
 ```
 
-Dependencies:
+**Requirements:**
 
 * Python 3.11+
 * PyTorch ≥ 2.8
-* pandas, numpy, scikit-learn
-* networkx, scipy
-* mygene (for gene annotation)
+
+Core dependencies (automatically installed): pandas, numpy, scipy, scikit-learn,
+networkx, igraph, leidenalg, mygene, anndata.
 
 ---
 
@@ -89,7 +94,7 @@ bsvae-train exp1 \
     --is-eval-only
 ```
 
-### 4. Extract networks and export latents
+### 4. Extract networks
 
 ```bash
 bsvae-networks extract-networks \
@@ -97,22 +102,37 @@ bsvae-networks extract-networks \
     --dataset data/expr.csv \
     --output-dir results/exp1/networks
 # optional: --methods latent_cov graphical_lasso laplacian
+```
 
+Outputs **sparse NPZ** adjacency matrices and **Parquet** edge lists by default.
+Use `--quantize int8` (default) to reduce file size. The decoder-loading cosine
+similarity (`w_similarity`) is computed by default; add other methods with `--methods`.
+
+### 5. Extract gene modules (WGCNA-like)
+
+```bash
+bsvae-networks extract-modules \
+    --adjacency results/exp1/networks/w_similarity_adjacency.npz \
+    --expr data/expr.csv \
+    --output-dir results/exp1/modules \
+    --cluster-method leiden \
+    --resolution-auto \
+    --n-jobs 4
+```
+
+Clusters the gene network into modules using Leiden community detection with
+automatic resolution optimization. Outputs module assignments and eigengenes.
+
+### 6. Export latents for downstream analysis
+
+```bash
 bsvae-networks export-latents \
     --model-path results/exp1 \
     --dataset data/expr.csv \
     --output results/exp1/latents.h5ad
 ```
 
-The extractor writes **sparse NPZ** adjacency matrices and **Parquet** edge
-lists by default (``--sparse`` and ``--compress`` are on unless disabled with
-``--no-sparse``/``--no-compress``). When ``--threshold 0`` with sparse output,
-an adaptive threshold is computed from ``--target-sparsity`` (default 0.01 =
-top 1% of edges). Use ``--quantize`` (default ``int8``) to reduce adjacency
-size. Legacy dense CSV/TSV/NPY outputs are available only with ``--no-sparse``
-or explicit legacy formats. By default the decoder-loading cosine similarity
-(``w_similarity``) is computed; add other methods with ``--methods``. Latent
-exports include per-sample ``mu`` and ``logvar`` as tidy CSV or AnnData files.
+Exports per-sample `mu` and `logvar` as AnnData (.h5ad) or CSV files.
 
 ---
 
@@ -178,16 +198,38 @@ Use `curl -k -L "<url>" -o "${OUTDIR}/9606_string.txt.gz"` if `wget` is unavaila
 
 ---
 
-## Integration notes
+## CLI Entry Points
+
+BSVAE provides three command-line tools:
+
+| Command | Description |
+|---------|-------------|
+| `bsvae-train` | Train and evaluate models |
+| `bsvae-networks` | Post-training network/module extraction and latent analysis |
+| `bsvae-download-ppi` | Pre-cache STRING PPI networks |
+
+### `bsvae-networks` subcommands
+
+| Subcommand | Description |
+|------------|-------------|
+| `extract-networks` | Compute gene–gene adjacency matrices |
+| `extract-modules` | Cluster networks into gene modules (Leiden/spectral) |
+| `export-latents` | Export encoder μ and log σ² to CSV or AnnData |
+| `latent-analysis` | Sample-level clustering, UMAP, t-SNE, covariate correlation |
+
+---
+
+## Integration Notes
 
 - The `bsvae-networks` workflows reuse the same gene ordering as training. When
   loading a standalone expression file, ensure columns correspond to the genes
   seen by the checkpoint.
 - The CLI automatically handles CPU/GPU placement based on availability; models
   are loaded in evaluation mode without modifying training metadata.
-- Network extraction functions are written to be test-friendly: they accept
-  PyTorch `DataLoader` instances, operate without global state, and persist
-  outputs as CSV/TSV/NPY for interoperability with graph toolchains.
+- Network extraction outputs sparse NPZ adjacency matrices and Parquet edge lists
+  by default for efficient storage and interoperability with graph toolchains.
+- Module extraction supports parallel execution (`--n-jobs`) for resolution sweeps
+  and auto-optimization on HPC systems.
 
 ---
 

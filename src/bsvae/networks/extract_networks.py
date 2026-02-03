@@ -1,4 +1,5 @@
-"""Network extraction utilities for BSVAE.
+"""
+Network extraction utilities for BSVAE.
 
 This module provides reusable helpers to derive gene–gene networks from
 trained :class:`~bsvae.models.StructuredFactorVAE` instances using several
@@ -31,27 +32,28 @@ See :mod:`bsvae.networks.module_extraction` for module extraction GPU notes.
 """
 from __future__ import annotations
 
+import os
 import gzip
 import heapq
 import logging
-import os
 import warnings
-from dataclasses import dataclass
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 import scipy.sparse as sp
+import pyarrow.parquet as pq
+
 import torch
 import torch.nn.functional as F
 from sklearn.covariance import GraphicalLasso
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 
-from bsvae.utils.modelIO import load_metadata
 from bsvae.utils import modelIO as model_io
+from bsvae.utils.modelIO import load_metadata
 from bsvae.latent.latent_export import extract_latents
 
 logger = logging.getLogger(__name__)
@@ -59,7 +61,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class NetworkResults:
-    """Container for multiple adjacency matrices.
+    """
+    Container for multiple adjacency matrices.
 
     Attributes
     ----------
@@ -77,7 +80,8 @@ class NetworkResults:
 
 
 def load_model(model_path: str, device: Optional[torch.device] = None) -> torch.nn.Module:
-    """Load a trained StructuredFactorVAE from a directory or checkpoint path.
+    """
+    Load a trained StructuredFactorVAE from a directory or checkpoint path.
 
     Parameters
     ----------
@@ -92,7 +96,6 @@ def load_model(model_path: str, device: Optional[torch.device] = None) -> torch.
     torch.nn.Module
         Loaded model in evaluation mode.
     """
-
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if os.path.isdir(model_path):
         directory, filename = model_path, model_io.MODEL_FILENAME
@@ -105,7 +108,8 @@ def load_model(model_path: str, device: Optional[torch.device] = None) -> torch.
 
 
 def load_weights(model: torch.nn.Module, masked: bool = True) -> torch.Tensor:
-    """Return the decoder weights ``W`` with optional masking applied.
+    """
+    Return the decoder weights ``W`` with optional masking applied.
 
     Parameters
     ----------
@@ -119,7 +123,6 @@ def load_weights(model: torch.nn.Module, masked: bool = True) -> torch.Tensor:
     torch.Tensor
         Decoder weights of shape ``(G, K)``.
     """
-
     W = model.decoder.W
     if masked and getattr(model.decoder, "mask", None) is not None:
         W = W * model.decoder.mask
@@ -127,7 +130,8 @@ def load_weights(model: torch.nn.Module, masked: bool = True) -> torch.Tensor:
 
 
 def compute_W_similarity(W: torch.Tensor, eps: float = 1e-8) -> np.ndarray:
-    """Compute cosine similarity between gene loading vectors (Method A).
+    """
+    Compute cosine similarity between gene loading vectors (Method A).
 
     **GPU**: Uses GPU if input tensor ``W`` is on a CUDA device.
 
@@ -143,15 +147,17 @@ def compute_W_similarity(W: torch.Tensor, eps: float = 1e-8) -> np.ndarray:
     np.ndarray
         Symmetric adjacency matrix ``(G, G)`` with cosine similarities.
     """
-
     W = W.float()
     W_norm = F.normalize(W, dim=1, eps=eps)
     adjacency = torch.matmul(W_norm, W_norm.T)
     return adjacency.cpu().numpy()
 
 
-def compute_latent_covariance(W: torch.Tensor, logvar_mean: torch.Tensor, eps: float = 1e-8) -> Tuple[np.ndarray, np.ndarray]:
-    """Propagate latent posterior variance through the decoder (Method B).
+def compute_latent_covariance(
+    W: torch.Tensor, logvar_mean: torch.Tensor, eps: float = 1e-8
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Propagate latent posterior variance through the decoder (Method B).
 
     Covariance is approximated as ``W diag(exp(logvar_mean)) W^T`` where
     ``logvar_mean`` is the dataset-average latent log-variance.
@@ -172,7 +178,6 @@ def compute_latent_covariance(W: torch.Tensor, logvar_mean: torch.Tensor, eps: f
     corr : np.ndarray
         Gene–gene Pearson correlation matrix ``(G, G)``.
     """
-
     if logvar_mean.dim() != 1:
         raise ValueError("logvar_mean must be a 1D tensor of length K")
 
@@ -187,13 +192,11 @@ def compute_latent_covariance(W: torch.Tensor, logvar_mean: torch.Tensor, eps: f
 
 
 def compute_graphical_lasso(
-    latent_samples: np.ndarray,
-    W: torch.Tensor,
-    alpha: float = 0.01,
-    max_iter: int = 100,
-    precision_tol: float = 1e-10,
+    latent_samples: np.ndarray, W: torch.Tensor, alpha: float = 0.01,
+    max_iter: int = 100, precision_tol: float = 1e-10,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Fit Graphical Lasso on reconstructed expression (Method C).
+    """
+    Fit Graphical Lasso on reconstructed expression (Method C).
 
     Parameters
     ----------
@@ -220,7 +223,6 @@ def compute_graphical_lasso(
     adjacency : np.ndarray
         Binary adjacency where non-zero precision entries indicate edges.
     """
-
     # Compute Xhat = Z @ W^T on GPU if W is on GPU, then transfer to CPU for sklearn
     latent_tensor = torch.from_numpy(latent_samples).to(W.device)
     Xhat = torch.matmul(latent_tensor, W.detach().T).cpu().numpy()
@@ -236,7 +238,8 @@ def compute_graphical_lasso(
 
 
 def compute_laplacian_refined(W: torch.Tensor, laplacian: torch.Tensor) -> np.ndarray:
-    """Mask decoder similarity by a Laplacian prior (Method D).
+    """
+    Mask decoder similarity by a Laplacian prior (Method D).
 
     Parameters
     ----------
@@ -250,7 +253,6 @@ def compute_laplacian_refined(W: torch.Tensor, laplacian: torch.Tensor) -> np.nd
     np.ndarray
         Adjacency matrix refined by the Laplacian structure.
     """
-
     similarity = torch.matmul(W, W.T)
     if laplacian.is_sparse:
         mask = laplacian.coalesce().to_dense() != 0
@@ -260,8 +262,11 @@ def compute_laplacian_refined(W: torch.Tensor, laplacian: torch.Tensor) -> np.nd
     return refined.cpu().numpy()
 
 
-def save_adjacency_matrix(adjacency: np.ndarray, output_path: str, genes: Optional[Sequence[str]] = None) -> None:
-    """Persist an adjacency matrix to disk.
+def save_adjacency_matrix(
+    adjacency: np.ndarray, output_path: str, genes: Optional[Sequence[str]] = None
+) -> None:
+    """
+    Persist an adjacency matrix to disk.
 
     Parameters
     ----------
@@ -273,7 +278,6 @@ def save_adjacency_matrix(adjacency: np.ndarray, output_path: str, genes: Option
     genes
         Optional gene identifiers to use as row/column labels.
     """
-
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.suffix.lower() in {".csv", ".tsv"}:
@@ -292,8 +296,12 @@ def save_adjacency_matrix(adjacency: np.ndarray, output_path: str, genes: Option
         np.save(path, adjacency)
 
 
-def save_edge_list(adjacency: np.ndarray, output_path: str, genes: Optional[Sequence[str]] = None, threshold: float = 0.0, include_self: bool = False) -> None:
-    """Save an adjacency matrix as an edge list.
+def save_edge_list(
+    adjacency: np.ndarray, output_path: str, genes: Optional[Sequence[str]] = None,
+    threshold: float = 0.0, include_self: bool = False
+) -> None:
+    """
+    Save an adjacency matrix as an edge list.
 
     Parameters
     ----------
@@ -308,7 +316,6 @@ def save_edge_list(adjacency: np.ndarray, output_path: str, genes: Optional[Sequ
     include_self
         Whether to keep self-loops.
     """
-
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -334,11 +341,11 @@ def _infer_separator(path: str) -> str:
 
 
 def _iter_upper_triangle(
-    adjacency: np.ndarray,
-    threshold: float = 0.0,
+    adjacency: np.ndarray, threshold: float = 0.0,
     include_diagonal: bool = False,
 ) -> Iterator[Tuple[int, int, float]]:
-    """Stream upper-triangle edges without materializing the full triangle.
+    """
+    Stream upper-triangle edges without materializing the full triangle.
 
     Yields (i, j, weight) tuples for edges with |weight| >= threshold.
     Iterates row-by-row to avoid O(n^2) memory allocation.
@@ -371,8 +378,11 @@ def _iter_upper_triangle(
                 yield i, start_j + offset, float(w)
 
 
-def compute_adaptive_threshold(adjacency: np.ndarray, target_sparsity: float = 0.01) -> float:
-    """Compute threshold to achieve target sparsity in the adjacency matrix.
+def compute_adaptive_threshold(
+    adjacency: np.ndarray, target_sparsity: float = 0.01
+) -> float:
+    """
+    Compute threshold to achieve target sparsity in the adjacency matrix.
 
     Uses a streaming heap-based algorithm to avoid materializing the full
     upper triangle, which is critical for large networks.
@@ -412,14 +422,11 @@ def compute_adaptive_threshold(adjacency: np.ndarray, target_sparsity: float = 0
 
 
 def save_adjacency_sparse(
-    adjacency: np.ndarray,
-    output_path: str,
-    genes: Optional[Sequence[str]] = None,
-    threshold: float = 0.0,
-    compress: bool = True,
-    quantize: Union[bool, str] = True,
+    adjacency: np.ndarray, output_path: str, genes: Optional[Sequence[str]] = None,
+    threshold: float = 0.0, compress: bool = True, quantize: Union[bool, str] = True,
 ) -> None:
-    """Save an adjacency matrix in compressed format.
+    """
+    Save an adjacency matrix in compressed format.
 
     For symmetric matrices, only the upper triangle values are stored (no indices
     needed for dense matrices), reducing size by ~50%. Combined with quantization
@@ -519,11 +526,7 @@ def save_adjacency_sparse(
         save_func(path, **save_dict)
         logger.info(
             "Saved sparse adjacency to %s: %d genes, %d edges (%.1f%% density), dtype=%s",
-            path,
-            n,
-            n_nonzero,
-            density * 100,
-            dtype_name,
+            path, n, n_nonzero, density * 100, dtype_name,
         )
         return
 
@@ -568,10 +571,7 @@ def save_adjacency_sparse(
         save_func(path, **save_dict)
         logger.info(
             "Saved dense adjacency to %s: %d genes, %.1f%% density, dtype=%s",
-            path,
-            n,
-            density * 100,
-            dtype_name,
+            path, n, density * 100, dtype_name,
         )
     else:
         # Sparse storage: store only non-zero entries with indices
@@ -604,16 +604,13 @@ def save_adjacency_sparse(
         save_func(path, **save_dict)
         logger.info(
             "Saved sparse adjacency to %s: %d genes, %d edges (%.1f%% density), dtype=%s",
-            path,
-            n,
-            n_nonzero,
-            density * 100,
-            dtype_name,
+            path, n, n_nonzero, density * 100, dtype_name,
         )
 
 
 def load_adjacency_sparse(path: str) -> Tuple[np.ndarray, List[str]]:
-    """Load an adjacency matrix from NPZ format.
+    """
+    Load an adjacency matrix from NPZ format.
 
     Handles multiple storage formats:
     - dense_triu: Upper triangle values stored as flat array (for dense matrices)
@@ -706,7 +703,8 @@ def load_adjacency_sparse(path: str) -> Tuple[np.ndarray, List[str]]:
 
 
 def load_adjacency_sparse_edges(path: str) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-    """Load sparse upper-triangle adjacency data as an edge list.
+    """
+    Load sparse upper-triangle adjacency data as an edge list.
 
     Parameters
     ----------
@@ -768,15 +766,13 @@ def load_adjacency_sparse_edges(path: str) -> Tuple[np.ndarray, np.ndarray, List
 
 
 def save_edge_list_compressed(
-    adjacency: np.ndarray,
-    output_path: str,
-    genes: Optional[Sequence[str]] = None,
-    threshold: float = 0.0,
-    include_self: bool = False,
-    compress: bool = True,
+    adjacency: np.ndarray, output_path: str,
+    genes: Optional[Sequence[str]] = None, threshold: float = 0.0,
+    include_self: bool = False, compress: bool = True,
     use_indices: bool = True,
 ) -> None:
-    """Save an adjacency matrix as a compressed edge list.
+    """
+    Save an adjacency matrix as a compressed edge list.
 
     .. deprecated::
         Use :func:`save_edge_list_parquet` instead for better compression
@@ -804,8 +800,7 @@ def save_edge_list_compressed(
     """
     warnings.warn(
         "save_edge_list_compressed is deprecated. Use save_edge_list_parquet instead.",
-        DeprecationWarning,
-        stacklevel=2,
+        DeprecationWarning, stacklevel=2,
     )
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -858,17 +853,15 @@ def save_edge_list_compressed(
 
     logger.info(
         "Saved compressed edge list to %s: %d edges (threshold=%.4f)",
-        path,
-        len(edges),
-        threshold,
+        path, len(edges), threshold,
     )
 
 
 def load_edge_list_compressed(
-    path: str,
-    genes_path: Optional[str] = None,
+    path: str, genes_path: Optional[str] = None,
 ) -> Tuple[np.ndarray, List[str]]:
-    """Load an adjacency matrix from a compressed edge list.
+    """
+    Load an adjacency matrix from a compressed edge list.
 
     .. deprecated::
         Use :func:`load_edge_list_parquet` instead for better performance.
@@ -890,8 +883,7 @@ def load_edge_list_compressed(
     """
     warnings.warn(
         "load_edge_list_compressed is deprecated. Use load_edge_list_parquet instead.",
-        DeprecationWarning,
-        stacklevel=2,
+        DeprecationWarning, stacklevel=2,
     )
     path = Path(path)
 
@@ -962,10 +954,10 @@ def load_edge_list_compressed(
 
 
 def load_edge_list_compressed_edges(
-    path: str,
-    genes_path: Optional[str] = None,
+    path: str, genes_path: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-    """Load a compressed edge list as indexed edges and weights.
+    """
+    Load a compressed edge list as indexed edges and weights.
 
     Parameters
     ----------
@@ -985,8 +977,7 @@ def load_edge_list_compressed_edges(
     """
     warnings.warn(
         "load_edge_list_compressed_edges is deprecated. Use load_edge_list_parquet_edges instead.",
-        DeprecationWarning,
-        stacklevel=2,
+        DeprecationWarning, stacklevel=2,
     )
     path = Path(path)
     is_compressed = str(path).endswith(".gz")
@@ -1048,14 +1039,11 @@ def load_edge_list_compressed_edges(
 
 
 def save_edge_list_parquet(
-    adjacency: np.ndarray,
-    output_path: str,
-    genes: Optional[Sequence[str]] = None,
-    threshold: float = 0.0,
-    include_self: bool = False,
-    compression: str = "zstd",
+    adjacency: np.ndarray, output_path: str, genes: Optional[Sequence[str]] = None,
+    threshold: float = 0.0, include_self: bool = False, compression: str = "zstd",
 ) -> None:
-    """Save an adjacency matrix as a Parquet edge list.
+    """
+    Save an adjacency matrix as a Parquet edge list.
 
     Parquet format provides better compression and faster read/write performance
     compared to gzipped CSV. Gene names are stored as metadata within the file,
@@ -1121,15 +1109,13 @@ def save_edge_list_parquet(
 
     logger.info(
         "Saved edge list to %s: %d edges (threshold=%.4f, compression=%s)",
-        path,
-        len(df),
-        threshold,
-        compression,
+        path, len(df), threshold, compression,
     )
 
 
 def load_edge_list_parquet(path: str) -> Tuple[np.ndarray, List[str]]:
-    """Load an adjacency matrix from a Parquet edge list.
+    """
+    Load an adjacency matrix from a Parquet edge list.
 
     Parameters
     ----------
@@ -1198,13 +1184,15 @@ def load_edge_list_parquet_edges(path: str) -> Tuple[np.ndarray, np.ndarray, Lis
 
 def load_expression(path: str) -> pd.DataFrame:
     """Load a gene expression matrix (genes × samples)."""
-
     sep = _infer_separator(path)
     return pd.read_csv(path, index_col=0, sep=sep)
 
 
-def create_dataloader_from_expression(path: str, batch_size: int = 128) -> Tuple[DataLoader, List[str], List[str]]:
-    """Create a DataLoader from a genes × samples matrix.
+def create_dataloader_from_expression(
+    path: str, batch_size: int = 128
+) -> Tuple[DataLoader, List[str], List[str]]:
+    """
+    Create a DataLoader from a genes × samples matrix.
 
     Parameters
     ----------
@@ -1222,7 +1210,6 @@ def create_dataloader_from_expression(path: str, batch_size: int = 128) -> Tuple
     samples : list of str
         Sample identifiers from the columns.
     """
-
     df = load_expression(path)
     tensor = torch.from_numpy(df.T.values.astype(np.float32))
     dataset = TensorDataset(tensor, torch.arange(tensor.shape[0]))
@@ -1245,20 +1232,14 @@ def create_dataloader_from_expression(path: str, batch_size: int = 128) -> Tuple
 
 
 def run_extraction(
-    model: torch.nn.Module,
-    dataloader: DataLoader,
-    genes: Sequence[str],
-    methods: Iterable[str],
-    threshold: float = 0.0,
-    alpha: float = 0.01,
-    output_dir: Optional[str] = None,
-    create_heatmaps: bool = False,
-    sparse: bool = True,
-    compress: bool = True,
-    target_sparsity: float = 0.01,
-    quantize: Union[bool, str] = "int8",
+    model: torch.nn.Module, dataloader: DataLoader, genes: Sequence[str],
+    methods: Iterable[str], threshold: float = 0.0, alpha: float = 0.01,
+    output_dir: Optional[str] = None, create_heatmaps: bool = False,
+    sparse: bool = True, compress: bool = True,
+    target_sparsity: float = 0.01, quantize: Union[bool, str] = "int8",
 ) -> List[NetworkResults]:
-    """Run requested network extraction methods.
+    """
+    Run requested network extraction methods.
 
     Parameters
     ----------
@@ -1295,7 +1276,6 @@ def run_extraction(
     list of NetworkResults
         One entry per computed method.
     """
-
     device = next(model.parameters()).device
     W = load_weights(model).to(device)
     methods = [m.lower() for m in methods]
@@ -1311,29 +1291,36 @@ def run_extraction(
     if "w_similarity" in methods:
         adjacency = compute_W_similarity(W)
         results.append(NetworkResults("w_similarity", adjacency))
-        _persist(adjacency, genes, output_dir, "w_similarity", threshold, create_heatmaps, sparse, compress, target_sparsity, quantize)
+        _persist(adjacency, genes, output_dir, "w_similarity", threshold,
+                 create_heatmaps, sparse, compress, target_sparsity, quantize)
 
     if "latent_cov" in methods:
         logvar_mean = torch.from_numpy(logvar).to(device).mean(dim=0)
         cov, corr = compute_latent_covariance(W, logvar_mean)
         results.append(NetworkResults("latent_cov", cov, {"correlation": corr}))
-        _persist(cov, genes, output_dir, "latent_cov", threshold, create_heatmaps, sparse, compress, target_sparsity, quantize)
+        _persist(cov, genes, output_dir, "latent_cov", threshold, create_heatmaps,
+                 sparse, compress, target_sparsity, quantize)
         if output_dir:
             # Also save correlation in sparse format
-            _persist(corr, genes, output_dir, "latent_cov_correlation", threshold, False, sparse, compress, target_sparsity, quantize)
+            _persist(corr, genes, output_dir, "latent_cov_correlation", threshold,
+                     False, sparse, compress, target_sparsity, quantize)
 
     if "graphical_lasso" in methods:
         precision, covariance, adjacency = compute_graphical_lasso(mu, W, alpha=alpha)
-        results.append(NetworkResults("graphical_lasso", adjacency, {"precision": precision, "covariance": covariance}))
-        _persist(adjacency, genes, output_dir, "graphical_lasso", threshold, create_heatmaps, sparse, compress, target_sparsity, quantize)
+        results.append(NetworkResults("graphical_lasso", adjacency,
+                                      {"precision": precision, "covariance": covariance}))
+        _persist(adjacency, genes, output_dir, "graphical_lasso", threshold,
+                 create_heatmaps, sparse, compress, target_sparsity, quantize)
         if output_dir:
-            _persist(precision, genes, output_dir, "graphical_lasso_precision", threshold, False, sparse, compress, target_sparsity, quantize)
+            _persist(precision, genes, output_dir, "graphical_lasso_precision",
+                     threshold, False, sparse, compress, target_sparsity, quantize)
 
     if "laplacian" in methods:
         if getattr(model, "laplacian_matrix", None) is not None:
             adjacency = compute_laplacian_refined(W, model.laplacian_matrix.to(device))
             results.append(NetworkResults("laplacian", adjacency))
-            _persist(adjacency, genes, output_dir, "laplacian", threshold, create_heatmaps, sparse, compress, target_sparsity, quantize)
+            _persist(adjacency, genes, output_dir, "laplacian", threshold,
+                     create_heatmaps, sparse, compress, target_sparsity, quantize)
         else:
             logger.warning(
                 "Laplacian method requested but model has no laplacian_matrix attribute; skipping."
@@ -1343,15 +1330,9 @@ def run_extraction(
 
 
 def _persist(
-    adjacency: np.ndarray,
-    genes: Sequence[str],
-    output_dir: Optional[str],
-    prefix: str,
-    threshold: float,
-    create_heatmaps: bool,
-    sparse: bool = True,
-    compress: bool = True,
-    target_sparsity: float = 0.01,
+    adjacency: np.ndarray, genes: Sequence[str], output_dir: Optional[str],
+    prefix: str, threshold: float, create_heatmaps: bool, sparse: bool = True,
+    compress: bool = True, target_sparsity: float = 0.01,
     quantize: Union[bool, str] = "int8",
 ) -> None:
     if not output_dir:
@@ -1364,36 +1345,29 @@ def _persist(
         edge_threshold = compute_adaptive_threshold(adjacency, target_sparsity)
         logger.info(
             "Using adaptive threshold %.4f for %s edge list (target sparsity=%.1f%%)",
-            edge_threshold,
-            prefix,
-            target_sparsity * 100,
+            edge_threshold, prefix, target_sparsity * 100,
         )
 
     if sparse:
         # Save FULL adjacency matrix (threshold=0) for clustering accuracy
         # Compression + quantization provides significant size reduction
         save_adjacency_sparse(
-            adjacency,
-            os.path.join(output_dir, f"{prefix}_adjacency.npz"),
-            genes,
-            threshold=0.0,  # Keep all edges for clustering
-            compress=compress,
-            quantize=quantize,
+            adjacency, os.path.join(output_dir, f"{prefix}_adjacency.npz"),
+            genes, threshold=0.0,  # Keep all edges for clustering
+            compress=compress, quantize=quantize,
         )
         # Save THRESHOLDED edge list for downstream analysis/visualization
         # Use Parquet format for better compression and performance
         compression = "zstd" if compress else None
         save_edge_list_parquet(
-            adjacency,
-            os.path.join(output_dir, f"{prefix}_edges.parquet"),
-            genes,
-            threshold=edge_threshold,
-            compression=compression,
+            adjacency, os.path.join(output_dir, f"{prefix}_edges.parquet"),
+            genes, threshold=edge_threshold, compression=compression,
         )
     else:
         # Legacy dense format
         save_adjacency_matrix(adjacency, os.path.join(output_dir, f"{prefix}_adjacency.csv"), genes)
-        save_edge_list(adjacency, os.path.join(output_dir, f"{prefix}_edges.csv"), genes, threshold=threshold)
+        save_edge_list(adjacency, os.path.join(output_dir, f"{prefix}_edges.csv"),
+                       genes, threshold=threshold)
 
     if create_heatmaps:
         try:

@@ -1,48 +1,54 @@
 # BSVAE Documentation
 
-Biologically Structured Variational Autoencoder (**BSVAE**) learns interpretable latent factors from bulk or single-cell gene-expression profiles by combining a β-VAE objective with sparsity and protein-protein interaction (PPI) smoothness priors. The command-line interface automates end-to-end training and evaluation workflows for reproducible biology-aware representation learning.
+Biologically Structured Variational Autoencoder (**BSVAE**) learns interpretable latent factors from bulk or single-cell gene-expression profiles by combining a β-VAE objective with sparsity and protein-protein interaction (PPI) smoothness priors. The command-line interface automates end-to-end training, evaluation, and post-training analysis workflows for reproducible biology-aware representation learning.
 
 ## Key Features
-- **Structured latent space** with configurable sparsity and Laplacian regularization.
-- **End-to-end CLI pipeline** for training, validation, and evaluation in a single command.
-- **Reproducible experiments** via `.ini` configuration sections and deterministic seeds.
-- **PPI-aware priors** that encourage biologically coherent factors.
 
-## What’s New in This Release
+- **Structured latent space** with configurable sparsity (L1) and Laplacian regularization
+- **End-to-end CLI pipeline** for training, validation, and evaluation in a single command
+- **Reproducible experiments** via `.ini` configuration sections and deterministic seeds
+- **PPI-aware priors** that encourage biologically coherent factors (STRING v12.0)
+- **Post-training network analysis** including gene–gene network extraction, WGCNA-like module clustering (Leiden/spectral), and latent space analysis
+- **GPU acceleration** for model inference and network extraction operations
 
-This release introduces major improvements across configuration handling, dataset flexibility, metadata stability, PPI integration, and training/evaluation robustness. Users should experience smoother training runs, more reproducible evaluation results, and expanded compatibility with common transcriptomics formats.
+## CLI Entry Points
 
-### Improved Model Metadata & Checkpointing
+BSVAE provides three command-line tools:
 
-* Unified and normalized model metadata for StructuredFactorVAE, including latent dimensionality, input gene count, and regularization settings.
-* Checkpoints now reliably store and reload Laplacian buffers and maintain device consistency.
-* Evaluation now validates gene dimensionality against the training dataset to prevent silent mismatches.
+| Command | Description |
+|---------|-------------|
+| `bsvae-train` | Train and evaluate StructuredFactorVAE models |
+| `bsvae-networks` | Post-training network extraction, module clustering, and latent analysis |
+| `bsvae-download-ppi` | Pre-cache STRING PPI networks for offline/HPC use |
 
-### Enhanced Input & Dataset Support
+## What's New
 
-* Gene expression files can now be supplied as CSV, TSV, or their compressed `.gz` variants.
-* Automatic correction of dataset orientation (genes × samples).
-* More robust parsing of dataset paths and safe handling of missing files.
+### Network Analysis Pipeline
 
-### Better PPI / STRING Integration
+* **Gene–gene network extraction** with four complementary methods: decoder similarity (`w_similarity`), latent covariance propagation (`latent_cov`), Graphical Lasso (`graphical_lasso`), and Laplacian refinement (`laplacian`)
+* **Sparse output formats**: NPZ adjacency matrices and Parquet edge lists with optional int8/float16 quantization for efficient storage
+* **GPU acceleration** for network extraction operations (except Graphical Lasso fitting)
 
-* New CLI tool for downloading STRING protein–protein interaction networks.
-* Laplacian matrices now use safer Tensor conversions and track device placement correctly.
+### Module Extraction (WGCNA-like)
 
-### Logging & Configuration Improvements
+* **Leiden community detection** with automatic resolution optimization (modularity-based)
+* **Resolution sweep** functionality with parallel execution support (`--n-jobs`)
+* **Eigengene computation** for module-level expression summaries
+* **Spectral clustering** alternative for different network types
 
-* Added a user-configurable `--log-level` flag to control verbosity.
-* All loss logging respects the selected logging level.
-* Standardization of training loss logs into `.csv` format for easier downstream analysis.
-* Safer creation of logging directories, even for runtimes with bare filenames.
+### Latent Space Analysis
 
-### Reliability Improvements for Training & Evaluation
+* **Export latents** to CSV or AnnData (.h5ad) format
+* **Sample-level clustering** with K-means and Gaussian Mixture Models
+* **Dimensionality reduction** with UMAP and t-SNE
+* **Covariate correlation** analysis
 
-* Default batch size behavior fixed for evaluation dataloaders.
-* Prevented evaluation failures due to empty batches by enforcing `drop_last=False`.
-* More stable model initialization and metadata resolution.
+### Robustness Improvements
 
-These changes collectively enhance reproducibility, dataset compatibility, and robustness across the entire BSVAE training and evaluation workflow.
+* Unified model metadata and checkpoint handling
+* CSV, TSV, and gzip-compressed input support with automatic orientation detection
+* STRING v12.0 PPI integration with improved caching
+* Configurable logging levels and standardized loss output formats
 
 ## Quick Install & Run
 ```bash
