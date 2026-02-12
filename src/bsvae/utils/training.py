@@ -80,14 +80,14 @@ class Trainer:
                     data = data[0]
                 data = data.to(self.device)
 
-                iter_loss = self._train_iteration(data, storer)
+                iter_loss = self._train_iteration(data, storer, epoch)
                 epoch_loss += iter_loss
                 t.set_postfix(loss=iter_loss)
                 t.update()
 
         return epoch_loss / len(data_loader)
 
-    def _train_iteration(self, x, storer):
+    def _train_iteration(self, x, storer, epoch=0):
         x = x.to(self.device)
         if hasattr(self.loss_f, "call_optimize"):
             loss = self.loss_f.call_optimize(data, self.model,
@@ -97,7 +97,8 @@ class Trainer:
             loss = self.loss_f(
                 x, recon_x, mu, logvar, self.model,
                 L=getattr(self.model, "laplacian_matrix", None),
-                storer=storer, is_train=self.model.training
+                storer=storer, is_train=self.model.training,
+                epoch=epoch
             )
 
             if hasattr(self.model, "l1_strength"):

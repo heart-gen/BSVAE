@@ -38,7 +38,8 @@ class StructuredFactorVAE(BaseVAE):
                  mask: torch.Tensor = None,
                  init_sd: float = 0.02,
                  learn_var: bool = False,
-                 L: torch.Tensor = None):
+                 L: torch.Tensor = None,
+                 use_batch_norm: bool = True):
         super().__init__(n_genes, n_latent)
         self.hidden_dims = hidden_dims or [512, 256, 128]
         self.dropout = dropout
@@ -46,7 +47,8 @@ class StructuredFactorVAE(BaseVAE):
             n_genes=n_genes,
             n_latent=n_latent,
             hidden_dims=hidden_dims,
-            dropout=dropout
+            dropout=dropout,
+            use_batch_norm=use_batch_norm
         )
         self.decoder = StructuredDecoder(
             n_genes=n_genes,

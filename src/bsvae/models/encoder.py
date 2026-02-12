@@ -24,18 +24,22 @@ class StructuredEncoder(nn.Module):
     """
     def __init__(self, n_genes: int, n_latent: int,
                  hidden_dims: list[int] = None,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1,
+                 use_batch_norm: bool = True):
         super().__init__()
         self.n_genes = n_genes
         self.n_latent = n_latent
         self.hidden_dims = hidden_dims if hidden_dims is not None else [512, 256, 128]
         self.dropout = dropout
+        self.use_batch_norm = use_batch_norm
 
         # Build feedforward encoder network
         modules = []
         input_dim = n_genes
         for h_dim in self.hidden_dims:
             modules.append(nn.Linear(input_dim, h_dim))
+            if use_batch_norm:
+                modules.append(nn.BatchNorm1d(h_dim))
             modules.append(nn.ReLU())
             if dropout > 0:
                 modules.append(nn.Dropout(dropout))
