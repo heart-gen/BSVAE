@@ -1,6 +1,13 @@
-"""Latent space analysis utilities."""
-from bsvae.latent import latent_analysis, latent_export
-from bsvae.latent.latent_analysis import *
-from bsvae.latent.latent_export import *
+"""Latent-space utilities."""
 
-__all__ = [*latent_analysis.__all__, *latent_export.__all__]
+from importlib import import_module
+
+__all__ = ["latent_analysis", "latent_export"]
+
+
+def __getattr__(name):
+    if name in __all__:
+        module = import_module(f"bsvae.latent.{name}")
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

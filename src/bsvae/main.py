@@ -11,7 +11,10 @@ from torch import optim
 
 from bsvae.models import StructuredFactorVAE
 from bsvae.models.losses import BaseLoss
-from bsvae.utils.datasets import get_dataloaders
+try:
+    from bsvae.utils.datasets import get_dataloaders
+except ImportError:  # pragma: no cover
+    get_dataloaders = None
 from bsvae.utils.helpers import (
     set_seed,
     get_device,
@@ -22,7 +25,10 @@ from bsvae.utils.helpers import (
     update_namespace_,
 )
 from bsvae.utils import Trainer, Evaluator
-from bsvae.utils.ppi import load_ppi_laplacian
+try:
+    from bsvae.utils.ppi import load_ppi_laplacian
+except ImportError:  # pragma: no cover
+    load_ppi_laplacian = None
 from bsvae.utils.modelIO import save_model, load_model, load_metadata
 
 def load_config(config_path: str, section: str = "Custom") -> dict:
@@ -84,13 +90,18 @@ def parse_arguments(cli_args):
 
     # Model
     parser.add_argument("--latent-dim", "-z", type=int,
-                        default=config.get("latent_dim", 10))
+                        default=config.get("latent_dim", 30))
     parser.add_argument("--hidden-dims", "-Z", type=ast_literal_eval,
-                        default=config.get("hidden_dims", [128, 64]))
+                        default=config.get("hidden_dims", [256, 128]))
     parser.add_argument("--dropout", type=float,
                         default=config.get("dropout", 0.1))
     parser.add_argument("--learn-var", action="store_true",
-                        default=config.get("learn_var", False))
+                        dest="learn_var",
+                        default=config.get("learn_var", True),
+                        help="Enable per-gene heteroscedastic decoder variance (default: True).")
+    parser.add_argument("--no-learn-var", action="store_false",
+                        dest="learn_var",
+                        help="Disable per-gene heteroscedastic decoder variance.")
     parser.add_argument("--init-sd", type=float,
                         default=config.get("init_sd", 0.02))
 
@@ -102,6 +113,9 @@ def parse_arguments(cli_args):
                         default=config.get("l1_strength", 1e-3))
     parser.add_argument("--lap-strength", type=float,
                         default=config.get("lap_strength", 1e-4))
+    parser.add_argument("--coexpr-strength", type=float,
+                        default=config.get("coexpr_strength", 0.1),
+                        help="Weight for co-expression preservation loss (default: 0.1).")
 
     # KL annealing and anti-collapse
     parser.add_argument("--kl-warmup-epochs", type=int,
@@ -173,10 +187,13 @@ def setup_logging(level: str = "info"):
 
 
 def main(args):
-    logger = setup_logging(args.log_level)
+    if get_dataloaders is None:
+        raise ImportError("bsvae.utils.datasets dependencies are missing; install optional training dependencies.")
+
+    logger = setup_logging(getattr(args, "log_level", "info"))
     set_seed(args.seed)
     device = get_device(use_gpu=not args.no_cuda)
-    exp_dir = join(args.outdir, args.name)
+    exp_dir = join(getattr(args, "outdir", "results"), args.name)
     logger.info(f"Experiment directory: {exp_dir}")
 
     # Training
@@ -197,21 +214,25 @@ def main(args):
         logger.info(f"Training dataset size: {len(train_loader.dataset)}")
 
         # PPI Laplacian
-        try:
-            gene_list = getattr(train_loader.dataset, "genes", None)
-            if gene_list is not None:
-                L, G = load_ppi_laplacian(
-                    gene_list,
-                    taxid=args.ppi_taxid,
-                    min_score=700,
-                    cache_dir=args.ppi_cache or "~/.bsvae/ppi",
-                )
-                logger.info(f"PPI Graph loaded: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
-            else:
-                L = None
-        except Exception as e:
-            logger.warning(f"Could not load PPI Laplacian: {e}")
+        if load_ppi_laplacian is None:
+            logger.warning("PPI dependencies unavailable; skipping Laplacian prior loading")
             L = None
+        else:
+            try:
+                gene_list = getattr(train_loader.dataset, "genes", None)
+                if gene_list is not None:
+                    L, G = load_ppi_laplacian(
+                        gene_list,
+                        taxid=args.ppi_taxid,
+                        min_score=700,
+                        cache_dir=args.ppi_cache or "~/.bsvae/ppi",
+                    )
+                    logger.info(f"PPI Graph loaded: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+                else:
+                    L = None
+            except Exception as e:
+                logger.warning(f"Could not load PPI Laplacian: {e}")
+                L = None
 
         # Model
         model = StructuredFactorVAE(
@@ -222,7 +243,7 @@ def main(args):
             init_sd=args.init_sd,
             learn_var=args.learn_var,
             L=L,
-            use_batch_norm=args.use_batch_norm
+            use_batch_norm=getattr(args, "use_batch_norm", True)
         ).to(device)
         logger.info(f"Model initialized with {n_genes} genes, {args.latent_dim} latent dims")
 
@@ -231,11 +252,12 @@ def main(args):
         loss_f = BaseLoss(beta=args.beta,
                           l1_strength=args.l1_strength,
                           lap_strength=args.lap_strength,
-                          kl_warmup_epochs=args.kl_warmup_epochs,
-                          kl_anneal_mode=args.kl_anneal_mode,
-                          kl_cycle_length=args.kl_cycle_length,
-                          kl_n_cycles=args.kl_n_cycles,
-                          free_bits=args.free_bits)
+                          kl_warmup_epochs=getattr(args, "kl_warmup_epochs", 0),
+                          kl_anneal_mode=getattr(args, "kl_anneal_mode", "linear"),
+                          kl_cycle_length=getattr(args, "kl_cycle_length", 50),
+                          kl_n_cycles=getattr(args, "kl_n_cycles", 4),
+                          free_bits=getattr(args, "free_bits", 0.0),
+                          coexpr_strength=getattr(args, "coexpr_strength", 0.1))
 
         trainer = Trainer(
             model, optimizer, loss_f, device=device, logger=logger,
@@ -275,7 +297,8 @@ def main(args):
             )
         loss_f = BaseLoss(beta=args.beta,
                           l1_strength=args.l1_strength,
-                          lap_strength=args.lap_strength)
+                          lap_strength=args.lap_strength,
+                          coexpr_strength=getattr(args, "coexpr_strength", 0.1))
         evaluator = Evaluator(
             model, loss_f, device=device, logger=logger, save_dir=exp_dir,
             is_progress_bar=not args.no_cuda,

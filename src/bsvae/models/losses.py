@@ -86,6 +86,29 @@ def kl_normal_loss_with_free_bits(mu, logvar, free_bits=0.0, reduction="mean"):
         return kl, kl_per_dim
 
 
+def coexpression_loss(x: torch.Tensor, recon_x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """Frobenius MSE between input and reconstructed gene correlation matrices."""
+    if x.ndim != 2 or recon_x.ndim != 2:
+        raise ValueError("coexpression_loss expects 2D tensors (batch, genes)")
+    if x.shape != recon_x.shape:
+        raise ValueError("x and recon_x must have matching shapes")
+    if x.shape[0] < 2:
+        return x.new_tensor(0.0)
+
+    x_c = x - x.mean(dim=0, keepdim=True)
+    r_c = recon_x - recon_x.mean(dim=0, keepdim=True)
+    denom = float(x.shape[0] - 1)
+
+    x_cov = (x_c.T @ x_c) / denom
+    r_cov = (r_c.T @ r_c) / denom
+
+    x_std = torch.sqrt(torch.diag(x_cov).clamp(min=eps))
+    r_std = torch.sqrt(torch.diag(r_cov).clamp(min=eps))
+    x_corr = x_cov / torch.outer(x_std, x_std)
+    r_corr = r_cov / torch.outer(r_std, r_std)
+    return F.mse_loss(r_corr, x_corr)
+
+
 class BaseLoss(nn.Module):
     """
     Base loss for StructuredFactorVAE with biological regularizers.
@@ -98,7 +121,8 @@ class BaseLoss(nn.Module):
                  kl_anneal_mode: str = "linear",
                  kl_cycle_length: int = 50,
                  kl_n_cycles: int = 4,
-                 free_bits: float = 0.0):
+                 free_bits: float = 0.0,
+                 coexpr_strength: float = 0.0):
         super().__init__()
         self.beta = beta
         self.l1_strength = l1_strength
@@ -110,6 +134,7 @@ class BaseLoss(nn.Module):
         self.kl_cycle_length = kl_cycle_length
         self.kl_n_cycles = kl_n_cycles
         self.free_bits = free_bits
+        self.coexpr_strength = coexpr_strength
 
     def get_beta_for_epoch(self, epoch: int) -> float:
         """Return effective beta based on annealing schedule."""
@@ -183,8 +208,12 @@ class BaseLoss(nn.Module):
                 model.laplacian_matrix, self.lap_strength
             )
 
+        coexpr_term = x.new_tensor(0.0)
+        if self.coexpr_strength > 0:
+            coexpr_term = self.coexpr_strength * coexpression_loss(x, recon_x)
+
         # Total loss
-        loss = recon_loss + effective_beta * kl_loss + sparsity_loss + laplacian_loss
+        loss = recon_loss + effective_beta * kl_loss + sparsity_loss + laplacian_loss + coexpr_term
 
         # Logging
         if storer is not None:
@@ -194,6 +223,8 @@ class BaseLoss(nn.Module):
             storer.setdefault("sparsity_loss", []).append(sparsity_loss.detach().item())
             if model.laplacian_matrix is not None:
                 storer.setdefault("laplacian_loss", []).append(laplacian_loss.detach().item())
+            if self.coexpr_strength > 0:
+                storer.setdefault("coexpr_loss", []).append(coexpr_term.detach().item())
             storer.setdefault("loss", []).append(loss.item())
             # Per-dimension KL monitoring
             for dim_idx in range(kl_per_dim.shape[0]):
