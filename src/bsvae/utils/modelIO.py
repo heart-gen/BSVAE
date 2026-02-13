@@ -39,6 +39,7 @@ def save_model(model, directory, metadata=None, filename=MODEL_FILENAME):
             latent_dim=model.encoder.n_latent,
             hidden_dims=model.encoder.hidden_dims,
             dropout=model.encoder.dropout,
+            use_batch_norm=getattr(model.encoder, "use_batch_norm", False),
             learn_var=model.decoder.learn_var,
             l1_strength=getattr(model, "l1_strength", 1e-3),
             lap_strength=getattr(model, "lap_strength", 1e-4),
@@ -50,6 +51,7 @@ def save_model(model, directory, metadata=None, filename=MODEL_FILENAME):
         metadata.setdefault("latent_dim", model.encoder.n_latent)
         metadata.setdefault("hidden_dims", model.encoder.hidden_dims)
         metadata.setdefault("dropout", model.encoder.dropout)
+        metadata.setdefault("use_batch_norm", getattr(model.encoder, "use_batch_norm", False))
         metadata.setdefault("learn_var", model.decoder.learn_var)
         metadata.setdefault("l1_strength", getattr(model, "l1_strength", 1e-3))
         metadata.setdefault("lap_strength", getattr(model, "lap_strength", 1e-4))
@@ -133,6 +135,9 @@ def _get_model(metadata, device, path_to_model):
     model_type = _resolve_model_name(metadata)
 
     state_dict = torch.load(path_to_model, map_location=device)
+    use_batch_norm = metadata.get("use_batch_norm")
+    if use_batch_norm is None:
+        use_batch_norm = _infer_encoder_batch_norm(state_dict)
 
     model = StructuredFactorVAE(
         n_genes=metadata["n_genes"],
@@ -140,6 +145,7 @@ def _get_model(metadata, device, path_to_model):
         hidden_dims=metadata.get("hidden_dims"),
         dropout=metadata.get("dropout", 0.1),
         learn_var=metadata.get("learn_var", False),
+        use_batch_norm=use_batch_norm,
     ).to(device)
 
     # store reg strengths for reproducibility
@@ -162,6 +168,14 @@ def _get_model(metadata, device, path_to_model):
     model.load_state_dict(state_dict)
     model.eval()
     return model
+
+
+def _infer_encoder_batch_norm(state_dict):
+    """Infer whether the encoder was built with BatchNorm from saved weights."""
+    return any(
+        key.startswith("encoder.encoder") and key.endswith("running_mean")
+        for key in state_dict
+    )
 
 
 # -------------------------
