@@ -50,13 +50,9 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+import scipy.sparse as sp
 import torch
 import torch.nn.functional as F
-
-try:
-    import scipy.sparse as sp
-except ImportError:  # pragma: no cover
-    sp = None
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from bsvae.utils import modelIO as model_io
