@@ -103,6 +103,33 @@ def parse_arguments(cli_args):
     parser.add_argument("--lap-strength", type=float,
                         default=config.get("lap_strength", 1e-4))
 
+    # KL annealing and anti-collapse
+    parser.add_argument("--kl-warmup-epochs", type=int,
+                        default=config.get("kl_warmup_epochs", 0),
+                        help="Epochs to linearly ramp beta from 0 to target (default: 0).")
+    parser.add_argument("--kl-anneal-mode", type=str,
+                        default=config.get("kl_anneal_mode", "linear"),
+                        choices=["linear", "cyclical"],
+                        help="KL annealing schedule (default: linear).")
+    parser.add_argument("--kl-cycle-length", type=int,
+                        default=config.get("kl_cycle_length", 50),
+                        help="Cycle length for cyclical annealing (default: 50).")
+    parser.add_argument("--kl-n-cycles", type=int,
+                        default=config.get("kl_n_cycles", 4),
+                        help="Number of cycles for cyclical annealing (default: 4).")
+    parser.add_argument("--free-bits", type=float,
+                        default=config.get("free_bits", 0.0),
+                        help="Minimum KL per latent dimension in nats (default: 0.0).")
+
+    # Encoder options
+    parser.add_argument("--use-batch-norm", action="store_true",
+                        dest="use_batch_norm",
+                        default=config.get("use_batch_norm", True),
+                        help="Use BatchNorm1d in encoder (default: True).")
+    parser.add_argument("--no-batch-norm", action="store_false",
+                        dest="use_batch_norm",
+                        help="Disable BatchNorm1d in encoder.")
+
     # Evaluation
     parser.add_argument("--is-eval-only", action="store_true",
                         default=config.get("is_eval_only"))
@@ -194,7 +221,8 @@ def main(args):
             dropout=args.dropout,
             init_sd=args.init_sd,
             learn_var=args.learn_var,
-            L=L
+            L=L,
+            use_batch_norm=args.use_batch_norm
         ).to(device)
         logger.info(f"Model initialized with {n_genes} genes, {args.latent_dim} latent dims")
 
@@ -202,7 +230,12 @@ def main(args):
         optimizer = optim.Adam(model.parameters(), lr=args.lr)
         loss_f = BaseLoss(beta=args.beta,
                           l1_strength=args.l1_strength,
-                          lap_strength=args.lap_strength)
+                          lap_strength=args.lap_strength,
+                          kl_warmup_epochs=args.kl_warmup_epochs,
+                          kl_anneal_mode=args.kl_anneal_mode,
+                          kl_cycle_length=args.kl_cycle_length,
+                          kl_n_cycles=args.kl_n_cycles,
+                          free_bits=args.free_bits)
 
         trainer = Trainer(
             model, optimizer, loss_f, device=device, logger=logger,
