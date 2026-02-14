@@ -37,7 +37,7 @@ The bundled `hyperparam.ini` illustrates recommended defaults. Comments highligh
     beta = 1.0                 # KL weight
     l1_strength = 1e-3         # sparsity regularizer
     lap_strength = 1e-4        # Laplacian smoothness
-    coexpr_strength = 0.1    # co-expression preservation
+    coexpr_strength = 0.0    # co-expression preservation (opt-in; O(G^2) cost)
 
     # Evaluations
     is_metrics = True
@@ -101,7 +101,7 @@ The bundled `hyperparam.ini` illustrates recommended defaults. Comments highligh
 | `beta` | KL divergence weight. | Larger β enforces disentanglement; too large may underfit reconstructions. |
 | `l1_strength` | Sparsity penalty on decoder loadings. | Higher values yield sparser, more interpretable factors. |
 | `lap_strength` | Graph Laplacian smoothness weight. | Controls PPI coherence; increase when using dense interaction networks. |
-| `coexpr_strength` | Co-expression preservation loss weight. | Default 0.1; recommended range 0.1–1.0 for stronger correlation matching. |
+| `coexpr_strength` | Co-expression preservation loss weight. | Default 0.0 (opt-in to avoid O(G^2) memory/time at large gene counts); when enabled, recommended range is 0.1–1.0. |
 | `learn_var` | Learn per-gene reconstruction variance. | Enabled by default (`True`) for heteroscedastic Gaussian reconstruction. |
 | `epochs`, `batch_size`, `lr` | Training schedule and optimizer settings. | Adjust to balance convergence speed and stability. |
 

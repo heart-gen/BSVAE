@@ -114,8 +114,8 @@ def parse_arguments(cli_args):
     parser.add_argument("--lap-strength", type=float,
                         default=config.get("lap_strength", 1e-4))
     parser.add_argument("--coexpr-strength", type=float,
-                        default=config.get("coexpr_strength", 0.1),
-                        help="Weight for co-expression preservation loss (default: 0.1).")
+                        default=config.get("coexpr_strength", 0.0),
+                        help="Weight for co-expression preservation loss (default: 0.0, opt-in due to O(G^2) memory/time cost).")
 
     # KL annealing and anti-collapse
     parser.add_argument("--kl-warmup-epochs", type=int,
@@ -257,7 +257,7 @@ def main(args):
                           kl_cycle_length=getattr(args, "kl_cycle_length", 50),
                           kl_n_cycles=getattr(args, "kl_n_cycles", 4),
                           free_bits=getattr(args, "free_bits", 0.0),
-                          coexpr_strength=getattr(args, "coexpr_strength", 0.1))
+                          coexpr_strength=getattr(args, "coexpr_strength", 0.0))
 
         trainer = Trainer(
             model, optimizer, loss_f, device=device, logger=logger,
@@ -298,7 +298,7 @@ def main(args):
         loss_f = BaseLoss(beta=args.beta,
                           l1_strength=args.l1_strength,
                           lap_strength=args.lap_strength,
-                          coexpr_strength=getattr(args, "coexpr_strength", 0.1))
+                          coexpr_strength=getattr(args, "coexpr_strength", 0.0))
         evaluator = Evaluator(
             model, loss_f, device=device, logger=logger, save_dir=exp_dir,
             is_progress_bar=not args.no_cuda,
