@@ -13,6 +13,10 @@ complimentary strategies:
    reconstructed expression ``\\hat{X} = Z W^T``.
 4. **Laplacian-refined network (Method D)** — constrain decoder similarity to a
    supplied Laplacian prior.
+5. **Soft-thresholded decoder similarity (Method E)** — WGCNA-style soft power
+   applied to cosine similarity of decoder loadings.
+6. **Jacobian encoder similarity (Method I)** — cosine similarity between
+   gene embeddings from average encoder Jacobians.
 
 The functions here are device-agnostic and written for integration in both CLI
 workflows and unit tests.
@@ -44,12 +48,11 @@ from typing import Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import scipy.sparse as sp
 import pyarrow.parquet as pq
 
+import scipy.sparse as sp
 import torch
 import torch.nn.functional as F
-from sklearn.covariance import GraphicalLasso
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from bsvae.utils import modelIO as model_io
@@ -130,26 +133,66 @@ def load_weights(model: torch.nn.Module, masked: bool = True) -> torch.Tensor:
 
 
 def compute_W_similarity(W: torch.Tensor, eps: float = 1e-8) -> np.ndarray:
-    """
-    Compute cosine similarity between gene loading vectors (Method A).
+    """Deprecated alias for ``compute_W_similarity_soft(..., power=1.0)``."""
+    warnings.warn(
+        "compute_W_similarity is deprecated; use compute_W_similarity_soft and set a soft-threshold power.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return compute_W_similarity_soft(W, power=1.0, eps=eps)
 
-    **GPU**: Uses GPU if input tensor ``W`` is on a CUDA device.
 
-    Parameters
-    ----------
-    W
-        Decoder weight matrix ``(G, K)``.
-    eps
-        Numerical stability constant added to norms.
-
-    Returns
-    -------
-    np.ndarray
-        Symmetric adjacency matrix ``(G, G)`` with cosine similarities.
-    """
+def compute_W_similarity_soft(
+    W: torch.Tensor, power: float = 6.0, eps: float = 1e-8
+) -> np.ndarray:
+    """Cosine similarity with WGCNA-style soft thresholding."""
     W = W.float()
     W_norm = F.normalize(W, dim=1, eps=eps)
     adjacency = torch.matmul(W_norm, W_norm.T)
+    adjacency = torch.clamp(adjacency, min=0.0)
+    adjacency = adjacency.pow(power)
+    return adjacency.cpu().numpy()
+
+
+def compute_jacobian_similarity(
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    device: torch.device,
+    eps: float = 1e-8,
+) -> np.ndarray:
+    """Gene-gene similarity via average encoder Jacobian embeddings."""
+    model.eval()
+    first_batch = next(iter(dataloader))[0]
+    n_genes = first_batch.shape[1]
+    n_latent = model.n_latent
+    embed_sum = torch.zeros((n_genes, n_latent), device=device)
+    total_samples = 0
+
+    for batch in dataloader:
+        x = batch[0] if isinstance(batch, (tuple, list)) else batch
+        x = x.to(device)
+        x = x.requires_grad_(True)
+        mu, _ = model.encoder(x)
+        batch_size = x.shape[0]
+
+        for k in range(mu.shape[1]):
+            grad_k = torch.autograd.grad(
+                mu[:, k].sum(),
+                x,
+                retain_graph=(k < mu.shape[1] - 1),
+                allow_unused=False,
+            )[0]
+            embed_sum[:, k] += grad_k.sum(dim=0)
+
+        total_samples += batch_size
+
+    if total_samples == 0:
+        raise ValueError("Dataloader is empty; cannot compute Jacobian similarity")
+
+    embeddings = embed_sum / float(total_samples)
+    emb_norm = F.normalize(embeddings, dim=1, eps=eps)
+    adjacency = torch.matmul(emb_norm, emb_norm.T)
+    adjacency = torch.clamp(adjacency, min=0.0)
     return adjacency.cpu().numpy()
 
 
@@ -227,6 +270,8 @@ def compute_graphical_lasso(
     latent_tensor = torch.from_numpy(latent_samples).to(W.device)
     Xhat = torch.matmul(latent_tensor, W.detach().T).cpu().numpy()
     del latent_tensor  # Free GPU memory before sklearn fitting
+
+    from sklearn.covariance import GraphicalLasso
 
     gl = GraphicalLasso(alpha=alpha, max_iter=max_iter)
     gl.fit(Xhat)
@@ -1237,6 +1282,7 @@ def run_extraction(
     output_dir: Optional[str] = None, create_heatmaps: bool = False,
     sparse: bool = True, compress: bool = True,
     target_sparsity: float = 0.01, quantize: Union[bool, str] = "int8",
+    soft_power: float = 6.0,
 ) -> List[NetworkResults]:
     """
     Run requested network extraction methods.
@@ -1289,9 +1335,20 @@ def run_extraction(
     results: List[NetworkResults] = []
 
     if "w_similarity" in methods:
+        warnings.warn(
+            "Method 'w_similarity' is deprecated; prefer 'w_similarity_soft'.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         adjacency = compute_W_similarity(W)
         results.append(NetworkResults("w_similarity", adjacency))
         _persist(adjacency, genes, output_dir, "w_similarity", threshold,
+                 create_heatmaps, sparse, compress, target_sparsity, quantize)
+
+    if "w_similarity_soft" in methods:
+        adjacency = compute_W_similarity_soft(W, power=soft_power)
+        results.append(NetworkResults("w_similarity_soft", adjacency, {"soft_power": soft_power}))
+        _persist(adjacency, genes, output_dir, "w_similarity_soft", threshold,
                  create_heatmaps, sparse, compress, target_sparsity, quantize)
 
     if "latent_cov" in methods:
@@ -1325,6 +1382,12 @@ def run_extraction(
             logger.warning(
                 "Laplacian method requested but model has no laplacian_matrix attribute; skipping."
             )
+
+    if "jacobian" in methods:
+        adjacency = compute_jacobian_similarity(model, dataloader, device=device)
+        results.append(NetworkResults("jacobian", adjacency))
+        _persist(adjacency, genes, output_dir, "jacobian", threshold,
+                 create_heatmaps, sparse, compress, target_sparsity, quantize)
 
     return results
 
@@ -1389,6 +1452,8 @@ __all__ = [
     "load_model",
     "load_weights",
     "compute_W_similarity",
+    "compute_W_similarity_soft",
+    "compute_jacobian_similarity",
     "compute_latent_covariance",
     "compute_graphical_lasso",
     "compute_laplacian_refined",

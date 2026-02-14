@@ -117,6 +117,7 @@ def test_main_training_and_eval(monkeypatch, tmp_path, fake_dataset_csv):
         beta=1.0,
         l1_strength=1e-3,
         lap_strength=1e-4,
+        coexpr_strength=0.1,
         epochs=1,
         checkpoint_every=1,
         ppi_taxid="9606",

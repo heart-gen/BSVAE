@@ -5,7 +5,12 @@ from bsvae.models.encoder import StructuredEncoder
 from bsvae.models.decoder import StructuredDecoder
 from bsvae.models.vae import BaseVAE
 from bsvae.models.structured import StructuredFactorVAE
-from bsvae.models.losses import BaseLoss, gaussian_nll, kl_normal_loss
+from bsvae.models.losses import (
+    BaseLoss,
+    coexpression_loss,
+    gaussian_nll,
+    kl_normal_loss,
+)
 
 
 @pytest.mark.parametrize("batch,n_genes,n_latent", [(4, 50, 8), (2, 10, 3)])
@@ -107,3 +112,40 @@ def test_gaussian_nll_and_kl(reduction):
     logvar = torch.zeros(3, 2)
     kl = kl_normal_loss(mu, logvar, reduction="sum")
     assert kl.item() >= 0
+
+
+def test_coexpression_loss():
+    x = torch.randn(8, 12)
+    loss_same = coexpression_loss(x, x)
+    assert loss_same.dim() == 0
+    assert loss_same.item() == pytest.approx(0.0, abs=1e-7)
+
+    recon = x + 0.1 * torch.randn_like(x)
+    loss_diff = coexpression_loss(x, recon)
+    assert loss_diff.item() >= 0
+
+
+def test_baseloss_with_coexpr():
+    x = torch.randn(6, 10)
+    vae = StructuredFactorVAE(10, 4)
+    recon_x, mu, logvar, _, _ = vae(x)
+    storer = {}
+
+    loss_f = BaseLoss(coexpr_strength=0.2)
+    loss = loss_f(x, recon_x, mu, logvar, vae, storer=storer)
+
+    assert torch.is_tensor(loss) and loss.dim() == 0
+    assert "coexpr_loss" in storer
+    assert storer["coexpr_loss"][0] >= 0
+
+
+def test_heteroscedastic_gaussian_gradients():
+    x = torch.randn(5, 16)
+    vae = StructuredFactorVAE(16, 5, learn_var=True)
+    recon_x, mu, logvar, _, _ = vae(x)
+
+    loss = BaseLoss()(x, recon_x, mu, logvar, vae)
+    loss.backward()
+
+    assert vae.decoder.log_var.grad is not None
+    assert torch.isfinite(vae.decoder.log_var.grad).all()
