@@ -1452,6 +1452,8 @@ __all__ = [
     "load_model",
     "load_weights",
     "compute_W_similarity",
+    "compute_W_similarity_soft",
+    "compute_jacobian_similarity",
     "compute_latent_covariance",
     "compute_graphical_lasso",
     "compute_laplacian_refined",
