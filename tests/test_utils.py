@@ -168,16 +168,34 @@ def test_map_genes_to_string_and_subset():
 # modelIO.py
 # --------------------------
 def test_save_and_load_model(tmp_path):
-    model = StructuredFactorVAE(n_genes=10, n_latent=3)
+    model = StructuredFactorVAE(n_genes=10, n_latent=3, use_batch_norm=False)
     dirpath = tmp_path / "model"
     modelIO.save_model(model, str(dirpath))
+
+    metadata = modelIO.load_metadata(str(dirpath))
+    assert metadata["use_batch_norm"] is False
+
     loaded = modelIO.load_model(str(dirpath), is_gpu=False)
     assert isinstance(loaded, StructuredFactorVAE)
+    assert loaded.encoder.use_batch_norm is False
 
     arrs = {"a": np.array([1, 2, 3])}
     modelIO.save_np_arrays(arrs, str(dirpath), "arrs.json")
     loaded = modelIO.load_np_arrays(str(dirpath), "arrs.json")
     assert np.allclose(loaded["a"], arrs["a"])
+
+
+def test_load_model_infers_batch_norm_from_state_dict_when_metadata_missing(tmp_path):
+    dirpath = tmp_path / "legacy_model"
+    model = StructuredFactorVAE(n_genes=10, n_latent=3, use_batch_norm=False)
+    modelIO.save_model(model, str(dirpath))
+
+    metadata = modelIO.load_metadata(str(dirpath))
+    metadata.pop("use_batch_norm", None)
+    modelIO.save_metadata(metadata, str(dirpath))
+
+    loaded = modelIO.load_model(str(dirpath), is_gpu=False)
+    assert loaded.encoder.use_batch_norm is False
 
 
 # --------------------------
