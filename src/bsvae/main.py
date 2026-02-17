@@ -347,7 +347,12 @@ def main(args):
             model, loss_f, device=device, logger=logger, save_dir=exp_dir,
             is_progress_bar=not args.no_cuda,
         )
-        evaluator(test_loader)
+        raw_eval_epoch = metadata.get("epochs", getattr(args, "epochs", 0))
+        try:
+            eval_epoch = max(int(raw_eval_epoch) - 1, 0)
+        except (TypeError, ValueError):
+            eval_epoch = 0
+        evaluator(test_loader, epoch=eval_epoch)
 
 
 def cli():

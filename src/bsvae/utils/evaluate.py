@@ -30,7 +30,7 @@ class Evaluator:
         self.is_progress_bar = is_progress_bar
         self.logger.info(f"Testing Device: {self.device}")
 
-    def __call__(self, data_loader, is_losses=True):
+    def __call__(self, data_loader, is_losses=True, epoch=0):
         start = default_timer()
         is_still_training = self.model.training
         self.model.eval()
@@ -38,7 +38,7 @@ class Evaluator:
         losses = None
         if is_losses:
             self.logger.info("Computing test losses...")
-            losses = self.compute_losses(data_loader)
+            losses = self.compute_losses(data_loader, epoch=epoch)
             self.logger.info(f"Test Losses: {losses}")
             torch.save(losses, os.path.join(self.save_dir, TEST_LOSSES_FILE))
 
@@ -50,7 +50,7 @@ class Evaluator:
 
         return losses
 
-    def compute_losses(self, dataloader):
+    def compute_losses(self, dataloader, epoch=0):
         storer = defaultdict(list)
         with torch.no_grad():
             for data in tqdm(dataloader, leave=False,
@@ -63,10 +63,17 @@ class Evaluator:
                     _ = self.loss_f.call_optimize(data, self.model, None, storer)
                 else:
                     recon_batch, mu, logvar, z, log_var = self.model(data)
-                    _ = self.loss_f(data, recon_batch, mu, logvar, self.model,
-                                    L=getattr(self.model, "laplacian_matrix", None),
-                                    is_train=self.model.training,
-                                    storer=storer)
+                    _ = self.loss_f(
+                        data,
+                        recon_batch,
+                        mu,
+                        logvar,
+                        self.model,
+                        L=getattr(self.model, "laplacian_matrix", None),
+                        is_train=self.model.training,
+                        storer=storer,
+                        epoch=epoch,
+                    )
 
                     if hasattr(self.model, "l1_strength"):
                         storer.setdefault("l1_strength", []).append(self.model.l1_strength)
