@@ -86,8 +86,18 @@ def kl_normal_loss_with_free_bits(mu, logvar, free_bits=0.0, reduction="mean"):
         return kl, kl_per_dim
 
 
-def coexpression_loss(x: torch.Tensor, recon_x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """Frobenius MSE between input and reconstructed gene correlation matrices."""
+def coexpression_loss(
+    x: torch.Tensor,
+    recon_x: torch.Tensor,
+    eps: float = 1e-8,
+    block_size: int = 512,
+    gamma: float = 6.0,
+    max_genes: Optional[int] = None,
+) -> torch.Tensor:
+    """Frobenius MSE between soft-thresholded gene correlation matrices.
+
+    Uses blockwise correlation to avoid materializing a full GxG matrix.
+    """
     if x.ndim != 2 or recon_x.ndim != 2:
         raise ValueError("coexpression_loss expects 2D tensors (batch, genes)")
     if x.shape != recon_x.shape:
@@ -95,18 +105,48 @@ def coexpression_loss(x: torch.Tensor, recon_x: torch.Tensor, eps: float = 1e-8)
     if x.shape[0] < 2:
         return x.new_tensor(0.0)
 
+    if max_genes is not None and x.shape[1] > max_genes:
+        idx = torch.randperm(x.shape[1], device=x.device)[:max_genes]
+        x = x[:, idx]
+        recon_x = recon_x[:, idx]
+
+    # Center
     x_c = x - x.mean(dim=0, keepdim=True)
     r_c = recon_x - recon_x.mean(dim=0, keepdim=True)
     denom = float(x.shape[0] - 1)
 
-    x_cov = (x_c.T @ x_c) / denom
-    r_cov = (r_c.T @ r_c) / denom
+    # Standard deviations for correlation normalization
+    x_std = torch.sqrt((x_c.pow(2).sum(dim=0) / denom).clamp(min=eps))
+    r_std = torch.sqrt((r_c.pow(2).sum(dim=0) / denom).clamp(min=eps))
 
-    x_std = torch.sqrt(torch.diag(x_cov).clamp(min=eps))
-    r_std = torch.sqrt(torch.diag(r_cov).clamp(min=eps))
-    x_corr = x_cov / torch.outer(x_std, x_std)
-    r_corr = r_cov / torch.outer(r_std, r_std)
-    return F.mse_loss(r_corr, x_corr)
+    G = x.shape[1]
+    block_size = max(1, int(block_size))
+
+    def soft_threshold(u: torch.Tensor) -> torch.Tensor:
+        if gamma == 1.0:
+            return u
+        return torch.sign(u) * torch.abs(u).pow(gamma)
+
+    total_sq = x.new_tensor(0.0)
+    for start in range(0, G, block_size):
+        end = min(start + block_size, G)
+        x_block = x_c[:, start:end]
+        r_block = r_c[:, start:end]
+
+        cov_x = (x_block.T @ x_c) / denom  # (b, G)
+        cov_r = (r_block.T @ r_c) / denom
+
+        x_std_block = x_std[start:end]
+        r_std_block = r_std[start:end]
+
+        x_corr = cov_x / (x_std_block[:, None] * x_std[None, :])
+        r_corr = cov_r / (r_std_block[:, None] * r_std[None, :])
+
+        diff = soft_threshold(r_corr) - soft_threshold(x_corr)
+        total_sq = total_sq + diff.pow(2).sum()
+
+    # Normalize by total elements to keep scale stable across G
+    return total_sq / float(G * G)
 
 
 class BaseLoss(nn.Module):
@@ -122,7 +162,14 @@ class BaseLoss(nn.Module):
                  kl_cycle_length: int = 50,
                  kl_n_cycles: int = 4,
                  free_bits: float = 0.0,
-                 coexpr_strength: float = 0.0):
+                 coexpr_strength: float = 1.0,
+                 coexpr_warmup_epochs: int = 50,
+                 coexpr_gamma: float = 6.0,
+                 coexpr_block_size: int = 512,
+                 coexpr_max_genes: Optional[int] = None,
+                 coexpr_auto_scale: bool = False,
+                 coexpr_ema_decay: float = 0.99,
+                 coexpr_scale_cap: float = 10.0):
         super().__init__()
         self.beta = beta
         self.l1_strength = l1_strength
@@ -135,11 +182,26 @@ class BaseLoss(nn.Module):
         self.kl_n_cycles = kl_n_cycles
         self.free_bits = free_bits
         self.coexpr_strength = coexpr_strength
+        self.coexpr_warmup_epochs = coexpr_warmup_epochs
+        self.coexpr_gamma = coexpr_gamma
+        self.coexpr_block_size = coexpr_block_size
+        self.coexpr_max_genes = coexpr_max_genes
+        self.coexpr_auto_scale = coexpr_auto_scale
+        self.coexpr_ema_decay = coexpr_ema_decay
+        self.coexpr_scale_cap = coexpr_scale_cap
+        self._ema_recon = None
+        self._ema_coexpr = None
 
     def get_beta_for_epoch(self, epoch: int) -> float:
         """Return effective beta based on annealing schedule."""
         if self.kl_anneal_mode == "cyclical":
             # Cyclical annealing: repeat linear warmup over cycles
+            if self.kl_cycle_length <= 0:
+                return self.beta
+            if self.kl_n_cycles is not None and self.kl_n_cycles > 0:
+                cycle_idx = epoch // self.kl_cycle_length
+                if cycle_idx >= self.kl_n_cycles:
+                    return self.beta
             cycle_pos = epoch % self.kl_cycle_length
             ratio = min(cycle_pos / max(self.kl_cycle_length // 2, 1), 1.0)
             return self.beta * ratio
@@ -149,6 +211,30 @@ class BaseLoss(nn.Module):
                 return self.beta
             ratio = min(epoch / self.kl_warmup_epochs, 1.0)
             return self.beta * ratio
+
+    def get_coexpr_strength_for_epoch(self, epoch: int) -> float:
+        """Return effective coexpression weight based on warmup schedule."""
+        if self.coexpr_strength <= 0:
+            return 0.0
+        if self.coexpr_warmup_epochs <= 0:
+            return self.coexpr_strength
+        ratio = min(epoch / self.coexpr_warmup_epochs, 1.0)
+        return self.coexpr_strength * ratio
+
+    def _update_ema(self, name: str, value: torch.Tensor) -> None:
+        if name == "recon":
+            ema = self._ema_recon
+        else:
+            ema = self._ema_coexpr
+        val = float(value.detach().item())
+        if ema is None:
+            ema = val
+        else:
+            ema = self.coexpr_ema_decay * ema + (1.0 - self.coexpr_ema_decay) * val
+        if name == "recon":
+            self._ema_recon = ema
+        else:
+            self._ema_coexpr = ema
 
     def forward(self,
                 x: torch.Tensor, recon_x: torch.Tensor,
@@ -209,8 +295,24 @@ class BaseLoss(nn.Module):
             )
 
         coexpr_term = x.new_tensor(0.0)
-        if self.coexpr_strength > 0:
-            coexpr_term = self.coexpr_strength * coexpression_loss(x, recon_x)
+        coexpr_raw = None
+        effective_coexpr = self.get_coexpr_strength_for_epoch(epoch)
+        if effective_coexpr > 0:
+            coexpr_raw = coexpression_loss(
+                x,
+                recon_x,
+                block_size=self.coexpr_block_size,
+                gamma=self.coexpr_gamma,
+                max_genes=self.coexpr_max_genes,
+            )
+            if self.coexpr_auto_scale and is_train:
+                self._update_ema("recon", recon_loss)
+                self._update_ema("coexpr", coexpr_raw)
+                if self._ema_coexpr is not None and self._ema_recon is not None:
+                    scale = self._ema_recon / max(self._ema_coexpr, 1e-12)
+                    scale = min(scale, self.coexpr_scale_cap)
+                    effective_coexpr = effective_coexpr * scale
+            coexpr_term = effective_coexpr * coexpr_raw
 
         # Total loss
         loss = recon_loss + effective_beta * kl_loss + sparsity_loss + laplacian_loss + coexpr_term
@@ -223,8 +325,16 @@ class BaseLoss(nn.Module):
             storer.setdefault("sparsity_loss", []).append(sparsity_loss.detach().item())
             if model.laplacian_matrix is not None:
                 storer.setdefault("laplacian_loss", []).append(laplacian_loss.detach().item())
-            if self.coexpr_strength > 0:
+            if effective_coexpr > 0:
                 storer.setdefault("coexpr_loss", []).append(coexpr_term.detach().item())
+                storer.setdefault("coexpr_strength", []).append(effective_coexpr)
+                if coexpr_raw is not None:
+                    storer.setdefault("coexpr_raw", []).append(coexpr_raw.detach().item())
+                if self.coexpr_auto_scale:
+                    if self._ema_recon is not None:
+                        storer.setdefault("coexpr_ema_recon", []).append(self._ema_recon)
+                    if self._ema_coexpr is not None:
+                        storer.setdefault("coexpr_ema_coexpr", []).append(self._ema_coexpr)
             storer.setdefault("loss", []).append(loss.item())
             # Per-dimension KL monitoring
             for dim_idx in range(kl_per_dim.shape[0]):

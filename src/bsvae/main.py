@@ -114,8 +114,33 @@ def parse_arguments(cli_args):
     parser.add_argument("--lap-strength", type=float,
                         default=config.get("lap_strength", 1e-4))
     parser.add_argument("--coexpr-strength", type=float,
-                        default=config.get("coexpr_strength", 0.0),
-                        help="Weight for co-expression preservation loss (default: 0.0, opt-in due to O(G^2) memory/time cost).")
+                        default=config.get("coexpr_strength", 1.0),
+                        help="Weight for co-expression preservation loss (default: 1.0).")
+    parser.add_argument("--coexpr-warmup-epochs", type=int,
+                        default=config.get("coexpr_warmup_epochs", 50),
+                        help="Warmup epochs to ramp coexpression loss from 0 to full weight (default: 50).")
+    parser.add_argument("--coexpr-gamma", type=float,
+                        default=config.get("coexpr_gamma", 6.0),
+                        help="Soft-thresholding power for coexpression (default: 6.0).")
+    parser.add_argument("--coexpr-block-size", type=int,
+                        default=config.get("coexpr_block_size", 512),
+                        help="Block size for correlation computation to limit memory (default: 512).")
+    parser.add_argument("--coexpr-max-genes", type=int,
+                        default=config.get("coexpr_max_genes", None),
+                        help="Optional cap on number of genes used for coexpression (default: None).")
+    parser.add_argument("--coexpr-auto-scale", action="store_true",
+                        dest="coexpr_auto_scale",
+                        default=config.get("coexpr_auto_scale", False),
+                        help="Enable EMA-based auto scaling for coexpression loss (default: False).")
+    parser.add_argument("--no-coexpr-auto-scale", action="store_false",
+                        dest="coexpr_auto_scale",
+                        help="Disable EMA-based auto scaling for coexpression loss.")
+    parser.add_argument("--coexpr-ema-decay", type=float,
+                        default=config.get("coexpr_ema_decay", 0.99),
+                        help="EMA decay for coexpression auto scaling (default: 0.99).")
+    parser.add_argument("--coexpr-scale-cap", type=float,
+                        default=config.get("coexpr_scale_cap", 10.0),
+                        help="Max multiplier for coexpression auto scaling (default: 10.0).")
 
     # KL annealing and anti-collapse
     parser.add_argument("--kl-warmup-epochs", type=int,
@@ -257,7 +282,14 @@ def main(args):
                           kl_cycle_length=getattr(args, "kl_cycle_length", 50),
                           kl_n_cycles=getattr(args, "kl_n_cycles", 4),
                           free_bits=getattr(args, "free_bits", 0.0),
-                          coexpr_strength=getattr(args, "coexpr_strength", 0.0))
+                          coexpr_strength=getattr(args, "coexpr_strength", 1.0),
+                          coexpr_warmup_epochs=getattr(args, "coexpr_warmup_epochs", 50),
+                          coexpr_gamma=getattr(args, "coexpr_gamma", 6.0),
+                          coexpr_block_size=getattr(args, "coexpr_block_size", 512),
+                          coexpr_max_genes=getattr(args, "coexpr_max_genes", None),
+                          coexpr_auto_scale=getattr(args, "coexpr_auto_scale", False),
+                          coexpr_ema_decay=getattr(args, "coexpr_ema_decay", 0.99),
+                          coexpr_scale_cap=getattr(args, "coexpr_scale_cap", 10.0))
 
         trainer = Trainer(
             model, optimizer, loss_f, device=device, logger=logger,
@@ -298,7 +330,19 @@ def main(args):
         loss_f = BaseLoss(beta=args.beta,
                           l1_strength=args.l1_strength,
                           lap_strength=args.lap_strength,
-                          coexpr_strength=getattr(args, "coexpr_strength", 0.0))
+                          kl_warmup_epochs=getattr(args, "kl_warmup_epochs", 0),
+                          kl_anneal_mode=getattr(args, "kl_anneal_mode", "linear"),
+                          kl_cycle_length=getattr(args, "kl_cycle_length", 50),
+                          kl_n_cycles=getattr(args, "kl_n_cycles", 4),
+                          free_bits=getattr(args, "free_bits", 0.0),
+                          coexpr_strength=getattr(args, "coexpr_strength", 1.0),
+                          coexpr_warmup_epochs=getattr(args, "coexpr_warmup_epochs", 50),
+                          coexpr_gamma=getattr(args, "coexpr_gamma", 6.0),
+                          coexpr_block_size=getattr(args, "coexpr_block_size", 512),
+                          coexpr_max_genes=getattr(args, "coexpr_max_genes", None),
+                          coexpr_auto_scale=getattr(args, "coexpr_auto_scale", False),
+                          coexpr_ema_decay=getattr(args, "coexpr_ema_decay", 0.99),
+                          coexpr_scale_cap=getattr(args, "coexpr_scale_cap", 10.0))
         evaluator = Evaluator(
             model, loss_f, device=device, logger=logger, save_dir=exp_dir,
             is_progress_bar=not args.no_cuda,

@@ -90,7 +90,7 @@ class Trainer:
     def _train_iteration(self, x, storer, epoch=0):
         x = x.to(self.device)
         if hasattr(self.loss_f, "call_optimize"):
-            loss = self.loss_f.call_optimize(data, self.model,
+            loss = self.loss_f.call_optimize(x, self.model,
                                              self.optimizer, storer)
         else:
             recon_x, mu, logvar, z, log_var = self.model(x)
