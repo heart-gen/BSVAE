@@ -1,176 +1,67 @@
 # Utility API
 
-BSVAE bundles helper classes and functions to streamline training, evaluation, graph-aware regularization, and post-training analysis. Below is an overview of the most commonly used utilities.
+## Data loading
 
----
+### `OmicsDataset`
 
-## Data Loading
+From `src/bsvae/utils/datasets.py`.
 
-### `get_dataloaders`
+- One row entity per item (feature-level training)
+- Returns `(profile_tensor, feature_id)`
+- Accepts `.csv`, `.tsv`, `.h5/.hdf5`, `.h5ad`
 
-```python
-from bsvae.utils.datasets import get_dataloaders
-train_loader = get_dataloaders(
-    dataset="genenet",
-    batch_size=64,
-    train=True,
-    gene_expression_filename="data/expression.csv",
-    logger=logger,
-)
-```
-
-Loads a registered dataset (default `GeneExpression`) and returns a `torch.utils.data.DataLoader`. Accepts `gene_expression_filename` or `gene_expression_dir` along with flags such as `batch_size`, `shuffle`, and `drop_last`.
-
-### `GeneExpression`
-
-The underlying dataset class that handles gene expression matrices:
-
-- Supports CSV, TSV, and gzip-compressed variants (`.csv.gz`, `.tsv.gz`)
-- Automatically detects and corrects orientation to genes × samples
-- Full-matrix mode: auto 10-fold CV split
-- Pre-split mode: expects `X_train.csv` and `X_test.csv` in directory
-
----
-
-## Training and Evaluation
-### `Trainer`
-Wraps a `StructuredFactorVAE`, optimizer, and loss function. Calling the trainer iterates over epochs, writes logs, and emits periodic checkpoints.
+### `get_omics_dataloader`
 
 ```python
-from bsvae.utils import Trainer
-trainer = Trainer(model, optimizer, loss_f, device=device, save_dir="results/my_experiment")
-trainer(train_loader, epochs=100, checkpoint_every=10)
+from bsvae.utils.datasets import get_omics_dataloader
+loader = get_omics_dataloader("data/expression.csv", batch_size=128)
 ```
 
-### `Evaluator`
-Runs evaluation loops with shared logging semantics. The evaluator saves averaged losses to `test_losses.pt` (a Torch-serialized dictionary) and returns a dictionary of metrics.
+## Training/evaluation
 
-```python
-from bsvae.utils import Evaluator
-evaluator = Evaluator(model, loss_f, device=device, save_dir="results/my_experiment")
-metrics = evaluator(test_loader)
-```
+From `src/bsvae/utils/training.py`:
 
-## PPI Priors
-### `load_ppi_laplacian`
-```python
-from bsvae.utils.ppi import load_ppi_laplacian
-L, G = load_ppi_laplacian(gene_list, taxid="9606", min_score=700, cache_dir="~/.bsvae/ppi")
-```
-Downloads STRING-DB edges, builds a NetworkX graph, and converts it to a Laplacian aligned with the provided gene list. Pass the Laplacian to `StructuredFactorVAE` for Laplacian regularization.
+- `Trainer`: two-phase warmup + GMM transition training loop
+- `Evaluator`: no-grad loss evaluation loop
+
+Trainer writes `train_losses.csv` and checkpoint files.
 
 ## Model I/O
-### `save_model` / `load_model`
-Use these helpers from `bsvae.utils.modelIO` to persist and restore experiments. `save_model(model, directory, metadata)` exports weights and metadata; `load_model(directory, is_gpu=True)` rebuilds the model on the desired device. Companion functions `save_metadata`, `load_metadata`, and `load_checkpoints` manage JSON metadata and intermediate checkpoints.
 
-## Reproducibility Helpers
-- `set_seed(seed)` – Sets NumPy, Python, and PyTorch seeds.
-- `get_device(use_gpu=True)` – Returns `cuda` or `cpu` based on availability.
-- `create_safe_directory(path)` – Archives existing experiment directories before creating new ones.
-- `get_n_params(model)` – Counts trainable parameters.
-- `update_namespace_(namespace, dictionary)` – Applies configuration overrides to argparse namespaces.
+From `src/bsvae/utils/modelIO.py`:
 
-💡 **Tip:** Combine `set_seed`, `create_safe_directory`, and `load_ppi_laplacian` within custom scripts to reproduce the CLI workflow programmatically.
+- `save_model(model, directory, metadata=None)`
+- `load_model(directory, is_gpu=True)`
+- `load_metadata(directory)`
+- `load_checkpoints(directory, is_gpu=True)`
 
----
+Persisted files are `model.pt` and `specs.json`.
 
-## Network Analysis Utilities
+## Network extraction helpers
 
-### Gene Mapping
+From `src/bsvae/networks/extract_networks.py`:
 
-Located in `bsvae.utils.mapping`:
+- `create_dataloader_from_expression(path, batch_size=128)`
+- `extract_mu_gamma(model, dataloader)`
+- `method_a_cosine(mu, top_k=50)`
+- `method_b_gamma_knn(gamma, top_k=50)`
+- `run_extraction(...)`
 
-```python
-from bsvae.utils.mapping import map_genes_to_proteins, resolve_gene_symbols
+## Module extraction helpers
 
-# Map gene symbols to STRING protein IDs
-protein_map = map_genes_to_proteins(gene_list, taxid=9606)
+From `src/bsvae/networks/module_extraction.py`:
 
-# Resolve gene symbols using MyGene.info or BioMart
-resolved = resolve_gene_symbols(gene_list, taxid=9606, method="mygene")
-```
+- `extract_gmm_modules(...)`
+- `compute_module_eigengenes_from_soft(...)`
+- `leiden_modules(...)`
+- `save_modules(...)`
 
-### Module Extraction
+## Latent utilities
 
-Located in `bsvae.networks.module_extraction`:
+From `src/bsvae/latent/latent_analysis.py` and `src/bsvae/latent/latent_export.py`:
 
-```python
-from bsvae.networks.module_extraction import (
-    leiden_modules,
-    optimize_resolution_modularity,
-    compute_module_eigengenes,
-    PartitionResult,
-)
-
-# Cluster genes into modules
-modules = leiden_modules(adjacency_matrix, resolution=1.0)
-
-# Auto-optimize resolution
-best_res, best_qual, modules = optimize_resolution_modularity(
-    adjacency_matrix,
-    resolution_min=0.5,
-    resolution_max=1.5,
-    n_steps=10,
-    return_modules=True,
-    n_jobs=4,  # Parallel execution
-)
-
-# Compute module eigengenes
-eigengenes = compute_module_eigengenes(expression_df, modules)
-```
-
-### `PartitionResult`
-
-A serializable container for Leiden partition results, used internally for
-parallel execution with joblib:
-
-```python
-@dataclass
-class PartitionResult:
-    membership: List[int]  # Module assignments per gene
-    quality: float         # Modularity score
-```
-
-### Network Extraction
-
-Located in `bsvae.networks.extract_networks`:
-
-```python
-from bsvae.networks.extract_networks import (
-    extract_network_from_model,
-    compute_w_similarity,
-    compute_latent_covariance,
-)
-
-# Extract gene-gene network using decoder weights
-adjacency = compute_w_similarity(model.decoder.W)
-
-# Full extraction with multiple methods
-results = extract_network_from_model(
-    model, dataloader,
-    methods=["w_similarity", "latent_cov"],
-    output_dir="networks/",
-)
-```
-
----
-
-## Latent Analysis
-
-Located in `bsvae.latent`:
-
-```python
-from bsvae.latent import export_latents, run_latent_analysis
-
-# Export encoder outputs
-export_latents(model, dataloader, output_path="latents.h5ad")
-
-# Run sample-level analysis (clustering, UMAP, etc.)
-run_latent_analysis(
-    model, dataloader,
-    output_dir="analysis/",
-    kmeans_k=6,
-    umap=True,
-    covariates_path="covariates.csv",
-)
-```
+- latent extraction
+- k-means / GMM clustering
+- UMAP / t-SNE embeddings
+- covariate correlation tables
+- CSV/H5AD export helpers (API-level)

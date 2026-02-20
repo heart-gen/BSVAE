@@ -1,55 +1,65 @@
 # Usage Guide
 
-This guide walks through a complete BSVAE workflow, from data preparation to factor interpretation.
+For a complete workflow, see the [Tutorial](tutorial.md).
 
-## 1. Prepare Data
-BSVAE expects gene-expression measurements where rows correspond to samples and columns to genes. Use either a single CSV (`--gene-expression-filename`) or a directory with explicit splits (`--gene-expression-dir`). When a directory is used, `get_dataloaders()` loads the following files:
+## End-to-end workflow
 
-```
-data/
-├── X_train.csv
-├── X_test.csv
-├── gene_names.txt
-```
+1. Train model
+2. Extract networks
+3. Extract modules
+4. Export/analyze latents
 
-Additional files such as `y_train.csv` are ignored unless referenced by custom dataset code.
+## Train
 
-## 2. Configure Hyperparameters
-Select or create a section in `hyperparam.ini` that specifies model architecture, training schedule, and loss weights. Override particular flags on the command line when exploring nearby settings.
-
-## 3. Launch Training
 ```bash
-bsvae-train my_experiment \
-  --section beta_genenet \
-  --gene-expression-dir data/splits/
+bsvae-train study1 \
+  --dataset data/expression.csv \
+  --epochs 120 \
+  --n-modules 24 \
+  --latent-dim 32
 ```
 
-The command creates `results/my_experiment/` and prints progress logs to stdout.
+## Post-training outputs
 
-## 4. Evaluate Results
-Unless `--no-test` is provided, the CLI loads the best checkpoint and runs `Evaluator` on the test split. Metrics, reconstruction losses, and β-VAE terms are appended to `logs.txt` and serialized to `metadata.json`.
+`results/study1/` contains:
 
-💡 **Tip:** Re-run with `--is-eval-only` to recompute metrics without additional training steps.
+- `model.pt`
+- `specs.json`
+- `train_losses.csv`
+- checkpoint files `model-<epoch>.pt` (if enabled)
 
-## 5. Interpret Latent Factors
-Checkpoints are saved as `model.pt`. Programmatic APIs enable downstream analysis:
+## Network extraction
 
-```python
-from bsvae.utils.modelIO import load_model
-from bsvae.utils.mapping import rank_genes_for_latent
-
-model = load_model("results/my_experiment", is_gpu=False)
-top_genes = rank_genes_for_latent(model, dim=0)
-print(top_genes[:10])
+```bash
+bsvae-networks extract-networks \
+  --model-path results/study1 \
+  --dataset data/expression.csv \
+  --output-dir results/study1/networks \
+  --methods mu_cosine
 ```
 
-This snippet ranks genes contributing to the first latent dimension, helping interpret biological processes captured by the model.
+## Module extraction
 
-## Checkpointing and Experiment Structure
-Each experiment directory contains:
-- `model.pt` – Serialized `StructuredFactorVAE` weights.
-- `metadata.json` – Full CLI argument snapshot.
-- `logs.txt` – Training and evaluation log stream.
-- `checkpoints/` (optional) – Periodic saves based on `--checkpoint-every`.
+```bash
+bsvae-networks extract-modules \
+  --model-path results/study1 \
+  --dataset data/expression.csv \
+  --output-dir results/study1/modules \
+  --soft-eigengenes \
+  --expr data/expression.csv
+```
 
-Optional scripts located in `bin/` provide plotting and metric aggregation helpers, such as `bin/metrics_all.sh` and `bin/plot_all.sh`. Adapt these wrappers to your HPC environment for large-scale sweeps.
+## Latent export and analysis
+
+```bash
+bsvae-networks export-latents \
+  --model-path results/study1 \
+  --dataset data/expression.csv \
+  --output results/study1/latents.npz
+
+bsvae-networks latent-analysis \
+  --model-path results/study1 \
+  --dataset data/expression.csv \
+  --output-dir results/study1/latent_analysis \
+  --kmeans-k 8 --umap
+```
