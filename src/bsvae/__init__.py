@@ -1,5 +1,6 @@
 """BSVAE — Gaussian Mixture VAE for multi-modal biological module discovery."""
 
+from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 
 from . import latent, networks, simulation

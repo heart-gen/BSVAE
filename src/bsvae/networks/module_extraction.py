@@ -45,9 +45,6 @@ class PartitionResult:
     membership: List[int]
     quality: float
 
-from sklearn.decomposition import PCA
-from sklearn.cluster import SpectralClustering
-from sklearn.preprocessing import StandardScaler
 from bsvae.networks.utils import transform_adjacency_for_clustering
 
 logger = logging.getLogger(__name__)
@@ -291,7 +288,7 @@ def build_graph_from_adjacency(
 
 def prepare_leiden_graph(
     A: np.ndarray | pd.DataFrame, genes: Optional[Sequence[str]] = None,
-    *, adjacency_mode: str = "wgcna-signed",
+    *, adjacency_mode: str = "wgcna-signed", soft_power: float = 6.0,
 ):
     """
     Transform adjacency and build the Leiden graph once.
@@ -303,7 +300,7 @@ def prepare_leiden_graph(
         "Preparing Leiden graph for %d genes (adjacency_mode=%s)",
         len(genes), adjacency_mode,
     )
-    adj = transform_adjacency_for_clustering(arr, mode=adjacency_mode)
+    adj = transform_adjacency_for_clustering(arr, mode=adjacency_mode, power=soft_power)
 
     # TODO: support signed community detection without violating Leiden's
     # non-negative edge weight requirement. Do NOT attempt signed Leiden
@@ -312,7 +309,7 @@ def prepare_leiden_graph(
         raise NotImplementedError(
             "Signed community detection is not yet supported. "
             "Leiden requires non-negative edge weights. "
-            "Use adjacency_mode='wgcna-signed'."
+            "Use adjacency_mode='wgcna-signed' or 'soft-threshold'."
         )
 
     if np.any(adj < 0):
@@ -463,6 +460,7 @@ def leiden_modules_for_resolutions(
 def optimize_resolution_modularity(
     A: np.ndarray | pd.DataFrame | None = None, *,
     adjacency_mode: str = "wgcna-signed",
+    soft_power: float = 6.0,
     resolution_min: float = 0.5, resolution_max: float = 1.5,
     n_steps: int = 10, graph: Optional["ig.Graph"] = None,
     edges: Optional[np.ndarray] = None,
@@ -536,7 +534,7 @@ def optimize_resolution_modularity(
         raise NotImplementedError(
             "Signed community detection is not yet supported. "
             "Leiden requires non-negative edge weights. "
-            "Use adjacency_mode='wgcna-signed'."
+            "Use adjacency_mode='wgcna-signed' or 'soft-threshold'."
         )
 
     if graph is None:
@@ -560,7 +558,7 @@ def optimize_resolution_modularity(
         else:
             if A is None:
                 raise ValueError("Provide adjacency data, edges, or a graph.")
-            graph, genes = prepare_leiden_graph(A, genes, adjacency_mode=adjacency_mode)
+            graph, genes = prepare_leiden_graph(A, genes, adjacency_mode=adjacency_mode, soft_power=soft_power)
     else:
         if genes is None:
             genes = list(graph.vs["name"]) if "name" in graph.vs.attributes() else [str(i) for i in range(graph.vcount())]
@@ -666,7 +664,7 @@ def optimize_resolution_modularity(
 
 def leiden_modules(
     A: np.ndarray | pd.DataFrame | None = None, resolution: float = 1.0,
-    *, adjacency_mode: str = "wgcna-signed", graph: Optional["ig.Graph"] = None,
+    *, adjacency_mode: str = "wgcna-signed", soft_power: float = 6.0, graph: Optional["ig.Graph"] = None,
     edges: Optional[np.ndarray] = None, weights: Optional[Sequence[float]] = None,
     genes: Optional[Sequence[str]] = None,
 ) -> pd.Series:
@@ -706,7 +704,7 @@ def leiden_modules(
         raise NotImplementedError(
             "Signed community detection is not yet supported. "
             "Leiden requires non-negative edge weights. "
-            "Use adjacency_mode='wgcna-signed'."
+            "Use adjacency_mode='wgcna-signed' or 'soft-threshold'."
         )
 
     if graph is None:
@@ -724,7 +722,7 @@ def leiden_modules(
         else:
             if A is None:
                 raise ValueError("Provide adjacency data, edges, or a graph.")
-            graph, genes = prepare_leiden_graph(A, genes, adjacency_mode=adjacency_mode)
+            graph, genes = prepare_leiden_graph(A, genes, adjacency_mode=adjacency_mode, soft_power=soft_power)
     else:
         if genes is None:
             genes = list(graph.vs["name"]) if "name" in graph.vs.attributes() else [str(i) for i in range(graph.vcount())]
@@ -745,7 +743,7 @@ def leiden_modules(
 
 def spectral_modules(
     A: np.ndarray | pd.DataFrame, n_clusters: Optional[int] = None,
-    n_components: Optional[int] = None, *, adjacency_mode: str = "wgcna-signed",
+    n_components: Optional[int] = None, *, adjacency_mode: str = "wgcna-signed", soft_power: float = 6.0,
 ) -> pd.Series:
     """
     Cluster genes using spectral clustering on the adjacency Laplacian.
@@ -782,7 +780,7 @@ def spectral_modules(
     )
 
     # Transform adjacency to handle negative weights
-    arr = transform_adjacency_for_clustering(arr, mode=adjacency_mode)
+    arr = transform_adjacency_for_clustering(arr, mode=adjacency_mode, power=soft_power)
 
     if adjacency_mode == "signed" and np.any(arr < 0):
         logger.warning(
@@ -793,6 +791,8 @@ def spectral_modules(
     arr = np.array(arr, dtype=float)
     arr = (arr + arr.T) / 2.0
     np.fill_diagonal(arr, 0.0)
+
+    from sklearn.cluster import SpectralClustering
 
     clustering = SpectralClustering(
         n_clusters=n_clusters, n_components=n_components,
@@ -823,6 +823,9 @@ def compute_module_eigengenes(
     pandas.DataFrame
         Samples × modules matrix of eigengene values.
     """
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
     module_series = pd.Series(modules, name="module")
     shared_genes = module_series.index.intersection(datExpr.index)
     logger.debug(

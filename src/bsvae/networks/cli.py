@@ -19,6 +19,7 @@ from bsvae.networks.extract_networks import (
 )
 from bsvae.latent.latent_export import extract_latents, save_latents
 from bsvae.networks.module_extraction import (
+    build_graph_from_edge_list,
     compute_module_eigengenes,
     leiden_modules_from_graph,
     leiden_modules,
@@ -51,12 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
     extract_parser.add_argument(
         "--methods",
         nargs="+",
-        default=["w_similarity"],
-        help="Methods to run: w_similarity (default), latent_cov, graphical_lasso, laplacian",
+        default=["w_similarity_soft"],
+        help="Methods to run: w_similarity_soft (default), recon_corr_soft, w_similarity (deprecated), latent_cov, graphical_lasso, laplacian, jacobian",
     )
     extract_parser.add_argument("--batch-size", type=int, default=128)
     extract_parser.add_argument("--threshold", type=float, default=0.0, help="Edge weight threshold when saving edge lists (0=auto)")
     extract_parser.add_argument("--alpha", type=float, default=0.01, help="Graphical Lasso regularization strength")
+    extract_parser.add_argument("--soft-power", type=float, default=6.0, help="Soft-threshold power for w_similarity_soft")
     extract_parser.add_argument("--heatmaps", action="store_true", help="Save heatmap visualizations of adjacencies")
     extract_parser.add_argument(
         "--sparse",
@@ -170,18 +172,24 @@ def build_parser() -> argparse.ArgumentParser:
     module_parser.add_argument("--batch-size", type=int, default=128)
     module_parser.add_argument(
         "--adjacency-mode",
-        choices=["wgcna-signed", "signed"],
+        choices=["wgcna-signed", "signed", "soft-threshold"],
         default="wgcna-signed",
         help=(
             "How to handle negative edge weights before clustering. "
             "'wgcna-signed' (default) clips negatives to zero, matching WGCNA signed networks. "
-            "'signed' preserves negative edges but is not yet supported for Leiden clustering."
+            "'signed' preserves negative edges but is not yet supported for Leiden clustering. 'soft-threshold' clips negatives then raises to --soft-power."
         ),
     )
     module_parser.add_argument(
         "--network-method",
-        default="w_similarity",
-        help="Network extraction method to run when computing adjacency (default: w_similarity)",
+        default="w_similarity_soft",
+        help="Network extraction method to run when computing adjacency (default: w_similarity_soft)",
+    )
+    module_parser.add_argument(
+        "--soft-power",
+        type=float,
+        default=6.0,
+        help="Soft-threshold power for adjacency_mode=soft-threshold and w_similarity_soft (default: 6.0)",
     )
     module_parser.add_argument(
         "--progress",
@@ -243,6 +251,7 @@ def handle_extract_networks(args, logger: logging.Logger) -> None:
         compress=compress,
         target_sparsity=args.target_sparsity,
         quantize=args.quantize,
+        soft_power=args.soft_power,
     )
     logger.info("Completed extraction; saved results to %s", args.output_dir)
 
@@ -286,6 +295,7 @@ def _run_clustering_task(
     graph,
     genes: Optional[Sequence[str]],
     compute_eigengenes: bool,
+    soft_power: float,
 ) -> dict:
     """Wrapper for parallel execution of clustering tasks.
 
@@ -306,6 +316,7 @@ def _run_clustering_task(
         genes=genes,
         compute_eigengenes=compute_eigengenes,
         precomputed_modules=precomputed_modules,
+        soft_power=soft_power,
     )
     return {
         "resolution": resolution,
@@ -330,6 +341,7 @@ def _run_single_clustering(
     genes: Optional[Sequence[str]] = None,
     compute_eigengenes: bool = True,
     precomputed_modules: Optional[pd.Series] = None,
+    soft_power: float = 6.0,
 ) -> int:
     """Run clustering at a single resolution and save results.
 
@@ -365,6 +377,7 @@ def _run_single_clustering(
                 adjacency_df,
                 resolution=resolution,
                 adjacency_mode=adjacency_mode,
+                soft_power=soft_power,
             )
     else:
         modules = spectral_modules(
@@ -372,6 +385,7 @@ def _run_single_clustering(
             n_clusters=n_clusters,
             n_components=n_components,
             adjacency_mode=adjacency_mode,
+            soft_power=soft_power,
         )
 
     n_modules = modules.nunique()
@@ -415,10 +429,43 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
 
     genes: Optional[List[str]] = None
     adjacency_path: Optional[Path] = None
+    adjacency_df: Optional[pd.DataFrame] = None
+    leiden_graph = None
+    leiden_genes = None
+    uses_sparse_graph = False
 
     if args.adjacency:
-        adjacency, genes = load_adjacency(args.adjacency)
         adjacency_path = Path(args.adjacency)
+        suffixes = [s.lower() for s in adjacency_path.suffixes]
+        # Prefer sparse edge list loading for NPZ/Parquet to avoid densifying
+        if args.cluster_method == "leiden" and any(s in suffixes for s in [".npz", ".parquet"]):
+            edges, weights, genes = load_adjacency(args.adjacency, return_type="edges")
+            if genes is None:
+                raise ValueError("Gene list missing in adjacency edge list.")
+            if args.adjacency_mode == "signed":
+                raise NotImplementedError(
+                    "Signed community detection is not supported for Leiden. "
+                    "Use adjacency_mode='wgcna-signed' or 'soft-threshold'."
+                )
+            if weights is None:
+                weights = np.ones(edges.shape[0], dtype=float)
+            else:
+                weights = weights.astype(float, copy=False)
+            # Apply adjacency_mode to edge weights
+            if args.adjacency_mode in {"wgcna-signed", "soft-threshold"}:
+                weights = np.maximum(weights, 0.0)
+                if args.adjacency_mode == "soft-threshold":
+                    weights = np.power(weights, args.soft_power)
+            # Drop zero-weight edges to keep graph sparse
+            keep = weights > 0
+            edges = edges[keep]
+            weights = weights[keep]
+            leiden_graph = build_graph_from_edge_list(edges, weights, genes)
+            leiden_genes = genes
+            uses_sparse_graph = True
+        else:
+            adjacency, genes = load_adjacency(args.adjacency)
+            adjacency_df = pd.DataFrame(adjacency, index=genes, columns=genes)
     else:
         logger.info("Computing adjacency using method %s", args.network_method)
         model = load_model(args.model_path)
@@ -429,6 +476,7 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
             genes=genes,
             methods=[args.network_method],
             output_dir=None,
+            soft_power=args.soft_power,
         )
         if not results:
             raise RuntimeError("No adjacency matrices were produced")
@@ -437,17 +485,14 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
         adjacency_path = Path(args.output_dir) / f"{args.network_method}_adjacency.npz"
         save_adjacency_sparse(adjacency, adjacency_path.as_posix(), genes, threshold=0.0, compress=True)
         logger.info("Saved computed adjacency to %s", adjacency_path)
+        adjacency_df = pd.DataFrame(adjacency, index=genes, columns=genes)
 
-    # Convert adjacency to DataFrame with gene labels so clustering functions
-    # return modules indexed by gene name instead of numeric indices
-    adjacency_df = pd.DataFrame(adjacency, index=genes, columns=genes)
     expr_df = load_expression(args.expr)
-    leiden_graph = None
-    leiden_genes = None
-    if args.cluster_method == "leiden":
+    if args.cluster_method == "leiden" and not uses_sparse_graph:
         leiden_graph, leiden_genes = prepare_leiden_graph(
             adjacency_df,
             adjacency_mode=args.adjacency_mode,
+            soft_power=args.soft_power,
         )
 
     # Determine which resolutions to run
@@ -456,6 +501,11 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
 
     # Handle resolution auto-optimization
     if args.resolution_auto and args.cluster_method == "leiden":
+        if uses_sparse_graph:
+            raise ValueError(
+                "resolution_auto is not supported for sparse edge-list adjacencies. "
+                "Provide a dense adjacency or disable --resolution-auto."
+            )
         two_phase = getattr(args, "resolution_two_phase", False)
         if two_phase:
             logger.info("Running two-phase resolution auto-optimization (modularity-based)")
@@ -464,6 +514,7 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
         best_res, best_qual, auto_modules = optimize_resolution_modularity(
             adjacency_df,
             adjacency_mode=args.adjacency_mode,
+            soft_power=args.soft_power,
             resolution_min=args.resolution_min,
             resolution_max=args.resolution_max,
             n_steps=args.resolution_steps,
@@ -518,6 +569,7 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
                 graph=leiden_graph,
                 genes=leiden_genes,
                 compute_eigengenes=not (label == "auto" and multiple_resolutions),
+                soft_power=args.soft_power,
             )
             for resolution, label, output_dir, precomputed_modules in resolutions_to_run
         )
@@ -549,6 +601,7 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
                 genes=leiden_genes,
                 compute_eigengenes=compute_eigengenes,
                 precomputed_modules=precomputed_modules,
+                soft_power=args.soft_power,
             )
             results_summary.append({
                 "resolution": resolution,
