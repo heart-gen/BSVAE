@@ -94,6 +94,7 @@ class Trainer:
 
         self._mu_buffer: List[torch.Tensor] = []
         self._mu_buffer_count = 0
+        self._feature_id_to_idx: Optional[Dict[str, int]] = None
 
         self.losses_logger = LossesLogger(
             os.path.join(save_dir, TRAIN_LOSSES_LOGFILE),
@@ -189,8 +190,17 @@ class Trainer:
                     feat_ids = None
                 x = x.to(self.device)
 
+                feature_idx = None
+                if self.gmm_loss_f.hier_strength > 0.0 and self.gene_groups:
+                    if feat_ids is None:
+                        raise ValueError(
+                            "Hierarchical loss requires batch feature ids, but the DataLoader "
+                            "returned only profiles. Ensure the dataset returns feature ids."
+                        )
+                    feature_idx = self._resolve_feature_idx(feat_ids, data_loader)
+
                 iter_loss = self._train_iteration(
-                    x, storer, epoch, in_warmup, gmm_weight
+                    x, storer, epoch, in_warmup, gmm_weight, feature_idx
                 )
                 epoch_loss += iter_loss
                 t.set_postfix(loss=iter_loss)
@@ -198,7 +208,7 @@ class Trainer:
 
         return epoch_loss / max(len(data_loader), 1)
 
-    def _train_iteration(self, x, storer, epoch, in_warmup, gmm_weight):
+    def _train_iteration(self, x, storer, epoch, in_warmup, gmm_weight, feature_idx=None):
         recon_x, mu, logvar, z, gamma = self.model(x)
 
         if in_warmup:
@@ -217,6 +227,7 @@ class Trainer:
                 x=x, recon_x=recon_x, mu=mu, logvar=logvar, gamma=gamma,
                 model=self.model, storer=storer, epoch=epoch,
                 gene_groups=self.gene_groups or None,
+                feature_idx=feature_idx,
                 gmm_weight=gmm_weight,
             )
 
@@ -224,6 +235,54 @@ class Trainer:
         loss.backward()
         self.optimizer.step()
         return loss.item()
+
+    def _resolve_feature_idx(self, feat_ids, data_loader) -> torch.Tensor:
+        if isinstance(feat_ids, torch.Tensor):
+            return feat_ids.to(self.device)
+
+        if isinstance(feat_ids, (list, tuple)):
+            if not feat_ids:
+                raise ValueError("Empty feature id list in batch; cannot map to dataset indices.")
+            if all(isinstance(fid, int) for fid in feat_ids):
+                return torch.tensor(feat_ids, device=self.device, dtype=torch.long)
+
+            id_to_idx = self._get_feature_id_to_idx(data_loader)
+            missing = [fid for fid in feat_ids if str(fid) not in id_to_idx]
+            if missing:
+                raise ValueError(
+                    f"{len(missing)} feature ids from batch not found in dataset feature_ids; "
+                    "cannot map to dataset indices for hierarchical loss."
+                )
+            idx = [id_to_idx[str(fid)] for fid in feat_ids]
+            return torch.tensor(idx, device=self.device, dtype=torch.long)
+
+        if isinstance(feat_ids, int):
+            return torch.tensor([feat_ids], device=self.device, dtype=torch.long)
+
+        if isinstance(feat_ids, str):
+            id_to_idx = self._get_feature_id_to_idx(data_loader)
+            if feat_ids not in id_to_idx:
+                raise ValueError(
+                    "Feature id from batch not found in dataset feature_ids; "
+                    "cannot map to dataset indices for hierarchical loss."
+                )
+            return torch.tensor([id_to_idx[feat_ids]], device=self.device, dtype=torch.long)
+
+        raise TypeError(
+            f"Unsupported feature id type {type(feat_ids)!r} for hierarchical loss mapping."
+        )
+
+    def _get_feature_id_to_idx(self, data_loader) -> Dict[str, int]:
+        if self._feature_id_to_idx is None:
+            dataset = getattr(data_loader, "dataset", None)
+            feature_ids = getattr(dataset, "feature_ids", None)
+            if feature_ids is None:
+                raise ValueError(
+                    "DataLoader dataset lacks feature_ids; cannot map batch feature ids "
+                    "to dataset indices for hierarchical loss."
+                )
+            self._feature_id_to_idx = {str(fid): i for i, fid in enumerate(feature_ids)}
+        return self._feature_id_to_idx
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,8 @@
-"""Sample-level latent space analysis utilities.
+"""Row-level latent space analysis utilities.
 
 The functions here operate on encoder outputs (``mu``/``logvar``) to enable
-clustering, visualization, and covariate correlation analyses.
+clustering, visualization, and covariate correlation analyses for arbitrary
+row entities (for example, samples or features).
 
 Example
 -------
@@ -9,8 +10,8 @@ Example
 >>> mu, logvar, z = extract_latents(model, dataloader)
 >>> labels = kmeans_on_mu(mu, k=5)
 >>> embedding = umap_mu(mu)
->>> sample_ids = [...]  # identifiers aligned to the dataloader order
->>> save_latent_results(mu, logvar, sample_ids, "results/", cluster_labels=labels, embedding=embedding)
+>>> row_ids = [...]  # identifiers aligned to the dataloader order
+>>> save_latent_results(mu, logvar, row_ids, "results/", cluster_labels=labels, embedding=embedding)
 """
 from __future__ import annotations
 
@@ -36,14 +37,14 @@ def extract_latents(
     device: Optional[torch.device] = None,
     disable_progress: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Extract latent statistics for all samples.
+    """Extract latent statistics for all rows.
 
     Parameters
     ----------
     model:
         Trained model with an ``encoder`` returning ``(mu, logvar)``.
     dataloader:
-        Iterable yielding ``(expression, sample_id)`` pairs.
+        Iterable yielding ``(expression, row_id)`` pairs.
     device:
         Torch device; defaults to CUDA when available.
     disable_progress:
@@ -52,11 +53,11 @@ def extract_latents(
     Returns
     -------
     mu : np.ndarray
-        Posterior means of shape ``(n_samples, K)``.
+        Posterior means of shape ``(n_rows, K)``.
     logvar : np.ndarray
-        Posterior log-variances of shape ``(n_samples, K)``.
+        Posterior log-variances of shape ``(n_rows, K)``.
     z_samples : np.ndarray
-        Reparameterized latent samples of shape ``(n_samples, K)``.
+        Reparameterized latent samples of shape ``(n_rows, K)``.
     """
 
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -82,7 +83,7 @@ def extract_latents(
     mu_arr = np.concatenate(mu_list, axis=0)
     logvar_arr = np.concatenate(logvar_list, axis=0)
     z_arr = np.concatenate(z_list, axis=0)
-    logger.info("Extracted latents for %d samples", mu_arr.shape[0])
+    logger.info("Extracted latents for %d rows", mu_arr.shape[0])
     return mu_arr, logvar_arr, z_arr
 
 
@@ -113,7 +114,7 @@ def umap_mu(mu: np.ndarray, n_neighbors: int = 15, min_dist: float = 0.1) -> pd.
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ImportError("umap-learn is required for UMAP embeddings") from exc
 
-    logger.info("Running UMAP on %d samples", mu.shape[0])
+    logger.info("Running UMAP on %d rows", mu.shape[0])
     reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, random_state=0)
     embedding = reducer.fit_transform(mu)
     return pd.DataFrame(embedding, columns=["UMAP1", "UMAP2"])
@@ -122,7 +123,7 @@ def umap_mu(mu: np.ndarray, n_neighbors: int = 15, min_dist: float = 0.1) -> pd.
 def tsne_mu(mu: np.ndarray, perplexity: float = 30.0) -> pd.DataFrame:
     """Compute a 2D t-SNE embedding of latent means."""
 
-    logger.info("Running t-SNE on %d samples", mu.shape[0])
+    logger.info("Running t-SNE on %d rows", mu.shape[0])
     tsne = TSNE(n_components=2, perplexity=perplexity, random_state=0, init="pca")
     embedding = tsne.fit_transform(mu)
     return pd.DataFrame(embedding, columns=["TSNE1", "TSNE2"])
@@ -137,7 +138,7 @@ def correlate_with_covariates(mu: np.ndarray | pd.DataFrame, cov_df: pd.DataFram
         mu_df = pd.DataFrame(mu, index=cov_df.index)
 
     if mu_df.shape[0] != cov_df.shape[0]:
-        raise ValueError("mu and covariates must have the same number of samples")
+        raise ValueError("mu and covariates must have the same number of rows")
 
     results = []
     for latent_name in mu_df.columns:
@@ -171,34 +172,41 @@ def correlate_with_covariates(mu: np.ndarray | pd.DataFrame, cov_df: pd.DataFram
 def save_latent_results(
     mu: np.ndarray,
     logvar: np.ndarray,
-    sample_ids: Sequence[str],
+    row_ids: Sequence[str],
     output_dir: str,
     cluster_labels: Optional[Sequence[int]] = None,
     embedding: Optional[pd.DataFrame] = None,
     correlation_df: Optional[pd.DataFrame] = None,
 ) -> None:
-    """Save latent statistics, clusters, embeddings, and correlations to CSV files."""
+    """Save latent statistics, clusters, embeddings, and correlations to CSV files.
+
+    Parameters
+    ----------
+    row_ids:
+        Identifiers aligned to the first dimension of ``mu``/``logvar``.
+        These may correspond to samples, features, or other entities.
+    """
 
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    mu_df = pd.DataFrame(mu, index=sample_ids)
-    mu_df.index.name = "sample_id"
+    mu_df = pd.DataFrame(mu, index=row_ids)
+    mu_df.index.name = "row_id"
     mu_df.to_csv(out_path / "latent_mu.csv")
 
-    logvar_df = pd.DataFrame(logvar, index=sample_ids)
-    logvar_df.index.name = "sample_id"
+    logvar_df = pd.DataFrame(logvar, index=row_ids)
+    logvar_df.index.name = "row_id"
     logvar_df.to_csv(out_path / "latent_logvar.csv")
 
     if cluster_labels is not None:
-        cluster_series = pd.Series(cluster_labels, index=sample_ids, name="cluster")
+        cluster_series = pd.Series(cluster_labels, index=row_ids, name="cluster")
         cluster_series.to_csv(out_path / "latent_clusters.csv")
-        logger.info("Saved cluster assignments for %d samples", len(cluster_series))
+        logger.info("Saved cluster assignments for %d rows", len(cluster_series))
 
     if embedding is not None:
         embed_df = embedding.copy()
-        embed_df.index = sample_ids
-        embed_df.index.name = "sample_id"
+        embed_df.index = row_ids
+        embed_df.index.name = "row_id"
         embed_df.to_csv(out_path / "latent_embeddings.csv")
         logger.info("Saved latent embeddings with shape %s", embed_df.shape)
 

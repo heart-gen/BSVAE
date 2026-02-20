@@ -659,7 +659,7 @@ def handle_latent_analysis(args, logger: logging.Logger) -> None:
     save_latent_results(
         mu=mu,
         logvar=logvar,
-        sample_ids=sample_ids,
+        row_ids=sample_ids,
         output_dir=args.output_dir,
         cluster_labels=clusters,
         embedding=embedding,

@@ -228,7 +228,7 @@ def handle_latent_analysis(args, logger: logging.Logger) -> None:
     import numpy as np
 
     model = load_model(args.model_path, is_gpu=not args.no_cuda)
-    dataloader, _, sample_ids = create_dataloader_from_expression(
+    dataloader, feature_ids, _ = create_dataloader_from_expression(
         args.dataset, batch_size=args.batch_size
     )
 
@@ -250,14 +250,14 @@ def handle_latent_analysis(args, logger: logging.Logger) -> None:
     if args.covariates:
         sep = "\t" if args.covariates.endswith(".tsv") else ","
         cov_df = pd.read_csv(args.covariates, sep=sep, index_col=0)
-        cov_df = cov_df.reindex(sample_ids)
+        cov_df = cov_df.reindex(feature_ids)
         if not cov_df.empty:
             correlation_df = correlate_with_covariates(
-                pd.DataFrame(mu, index=sample_ids), cov_df
+                pd.DataFrame(mu, index=feature_ids), cov_df
             )
 
     save_latent_results(
-        mu=mu, logvar=logvar, sample_ids=sample_ids,
+        mu=mu, logvar=logvar, row_ids=feature_ids,
         output_dir=args.output_dir,
         cluster_labels=clusters,
         embedding=embedding,

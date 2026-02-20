@@ -126,6 +126,16 @@ def method_a_cosine(
     adjacency : scipy.sparse.csr_matrix, shape (F, F)
     """
     F, D = mu.shape
+    if F <= 1:
+        return sp.csr_matrix((F, F), dtype=np.float32)
+    if top_k <= 0:
+        return sp.csr_matrix((F, F), dtype=np.float32)
+    if top_k > F - 1:
+        _LOG.warning(
+            "top_k=%d exceeds available neighbors (F=%d); clamping to %d",
+            top_k, F, F - 1,
+        )
+    k = min(top_k, F - 1)
 
     # L2-normalise
     norms = np.linalg.norm(mu, axis=1, keepdims=True)
@@ -143,7 +153,7 @@ def method_a_cosine(
         for local_i, row_sim in enumerate(sim):
             global_i = start + local_i
             row_sim[global_i] = -np.inf       # exclude self
-            top_idx = np.argpartition(row_sim, -top_k)[-top_k:]
+            top_idx = np.argpartition(row_sim, -k)[-k:]
             for j in top_idx:
                 s = row_sim[j]
                 if s > 0:
