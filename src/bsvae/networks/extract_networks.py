@@ -154,6 +154,42 @@ def compute_W_similarity_soft(
     return adjacency.cpu().numpy()
 
 
+def extract_reconstructions(
+    model: torch.nn.Module, dataloader: DataLoader, device: torch.device
+) -> np.ndarray:
+    """Reconstruct expression for all samples and return (N, G) array."""
+    model.eval()
+    outputs = []
+    with torch.no_grad():
+        for batch in dataloader:
+            x = batch[0] if isinstance(batch, (tuple, list)) else batch
+            x = x.to(device)
+            recon_x, _, _, _, _ = model(x)
+            outputs.append(recon_x.detach().cpu().numpy())
+    if not outputs:
+        raise ValueError("Dataloader is empty; cannot extract reconstructions")
+    return np.concatenate(outputs, axis=0)
+
+
+def compute_recon_correlation_soft(
+    recon_x: np.ndarray, power: float = 6.0, eps: float = 1e-8
+) -> np.ndarray:
+    """Pearson correlation of reconstructed expression with soft-thresholding."""
+    if recon_x.ndim != 2:
+        raise ValueError("recon_x must be a 2D array (samples, genes)")
+    # Center and standardize per gene
+    x = recon_x - recon_x.mean(axis=0, keepdims=True)
+    std = x.std(axis=0, ddof=1)
+    std = np.where(std < eps, 1.0, std)
+    x = x / std
+    # Correlation matrix (genes x genes)
+    corr = (x.T @ x) / float(x.shape[0] - 1)
+    corr = np.clip(corr, -1.0, 1.0)
+    # WGCNA-style soft-thresholding on signed network (clip negatives)
+    corr = np.maximum(corr, 0.0)
+    corr = np.power(corr, power)
+    return corr.astype(np.float32)
+
 def compute_jacobian_similarity(
     model: torch.nn.Module,
     dataloader: DataLoader,
@@ -1333,6 +1369,7 @@ def run_extraction(
 
     mu, logvar, sample_ids = extract_latents(model, dataloader, device=device)
     results: List[NetworkResults] = []
+    recon_x = None
 
     if "w_similarity" in methods:
         warnings.warn(
@@ -1349,6 +1386,14 @@ def run_extraction(
         adjacency = compute_W_similarity_soft(W, power=soft_power)
         results.append(NetworkResults("w_similarity_soft", adjacency, {"soft_power": soft_power}))
         _persist(adjacency, genes, output_dir, "w_similarity_soft", threshold,
+                 create_heatmaps, sparse, compress, target_sparsity, quantize)
+
+    if "recon_corr_soft" in methods:
+        if recon_x is None:
+            recon_x = extract_reconstructions(model, dataloader, device=device)
+        adjacency = compute_recon_correlation_soft(recon_x, power=soft_power)
+        results.append(NetworkResults("recon_corr_soft", adjacency, {"soft_power": soft_power}))
+        _persist(adjacency, genes, output_dir, "recon_corr_soft", threshold,
                  create_heatmaps, sparse, compress, target_sparsity, quantize)
 
     if "latent_cov" in methods:
@@ -1453,6 +1498,8 @@ __all__ = [
     "load_weights",
     "compute_W_similarity",
     "compute_W_similarity_soft",
+    "extract_reconstructions",
+    "compute_recon_correlation_soft",
     "compute_jacobian_similarity",
     "compute_latent_covariance",
     "compute_graphical_lasso",
