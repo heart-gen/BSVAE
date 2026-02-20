@@ -1,111 +1,108 @@
 # Command-Line Interface
 
-BSVAE exposes a single entry point, `bsvae-train`, for launching experiments, validating models, and exporting evaluation metrics. Arguments are loaded from an `.ini` configuration file and can be overridden directly on the command line.
+## `bsvae-train`
 
-## Basic Usage
-```bash
-bsvae-train EXPERIMENT_NAME [options]
-```
-
-`EXPERIMENT_NAME` determines the output directory under `results/` (for example, `results/my_experiment/`).
-
-## Configuration Hierarchy
-1. Defaults are read from the section specified by `--config` and `--section` (defaults: bundled `hyperparam.ini` and `[Custom]`).
-2. CLI flags override values from the configuration file.
-3. Resolved arguments are saved to `metadata.json` inside the experiment directory.
-
-💡 **Tip:** Store common presets as separate sections (e.g., `[beta_genenet]`) and override only the fields that change between runs.
-
-## Argument Reference
-
-### General
-- `--config`, `-c` – Path to the hyperparameter `.ini` file.
-- `--section` – Section within the `.ini` file to load.
-- `--seed` – Random seed applied via `set_seed()`.
-- `--no-cuda` – Force CPU execution.
-
-### Training
-- `--epochs` – Number of optimization epochs.
-- `--batch-size` – Training batch size.
-- `--lr` – Learning rate for Adam.
-- `--checkpoint-every` – Save checkpoints after this many epochs.
-- `--is-eval-only` – Skip training and run evaluation using an existing checkpoint.
-- `--no-test` – Disable evaluation after training.
-- `--eval-batchsize` – Batch size used during evaluation.
-
-### Model
-- `--latent-dim`, `-z` – Size of the latent factor space.
-- `--hidden-dims`, `-Z` – Encoder hidden-layer widths (Python literal list).
-- `--dropout` – Dropout rate applied to encoder layers.
-- `--learn-var` – Learn per-gene decoder variance.
-- `--init-sd` – Standard deviation for decoder weight initialization.
-
-### Loss
-- `--loss` – Choice of reconstruction loss (`VAE` or `beta`).
-- `--beta` – KL divergence weight (β-VAE).
-- `--l1-strength` – L1 sparsity penalty on decoder loadings.
-- `--lap-strength` – Laplacian smoothness penalty using PPI priors.
-
-### Dataset
-- `--dataset` – Registered dataset loader key (defaults to `genenet`).
-- `--gene-expression-filename` – CSV containing a gene-expression matrix (genes × samples). *Mutually exclusive with* `--gene-expression-dir`.
-- `--gene-expression-dir` – Directory containing `X_train.csv`, `X_test.csv`, and optional metadata files. *Mutually exclusive with* `--gene-expression-filename`.
-
-### PPI Priors
-- `--ppi-taxid` – NCBI taxonomy identifier for the PPI network (default `9606` for human).
-- `--ppi-cache` – Directory where downloaded STRING/IntAct PPI graphs are cached.
-
-## PPI cache downloader
-
-Download a STRING network into the configured cache without launching training:
+Train a `GMMModuleVAE` model.
 
 ```bash
-bsvae-download-ppi --taxid 9606 --cache-dir ~/.bsvae/ppi
+bsvae-train NAME --dataset PATH [options]
 ```
 
-This command respects the same defaults as `bsvae-train` (taxid `9606`, cache `~/.bsvae/ppi`).
+### Required arguments
 
-## Common Workflows
+- `NAME`: experiment name (output under `results/NAME` by default)
+- `--dataset`: expression matrix path (`features x samples`)
 
-Train with defaults using a CSV:
-```bash
-bsvae-train my_experiment --gene-expression-filename data/expression.csv
-```
+### Common options
 
-Run evaluation only on a completed experiment:
-```bash
-bsvae-train my_experiment --is-eval-only --no-test --gene-expression-filename data/expression.csv
-```
+- `--outdir` (default: `results`)
+- `--epochs` (default: `100`)
+- `--batch-size` (default: `128`)
+- `--lr` (default: `5e-4`)
+- `--warmup-epochs` (default: `20`)
+- `--transition-epochs` (default: `10`)
+- `--n-modules` (default: `20`)
+- `--latent-dim` (default: `32`)
+- `--hidden-dims` (default: `[512, 256, 128]`)
+- `--sigma-min` (default: `0.3`)
+- `--beta` (default: `1.0`)
+- `--free-bits` (default: `0.5`)
+- `--sep-strength` / `--bal-strength` / `--hier-strength`
+- `--tx2gene` (used with `--hier-strength > 0`)
+- `--checkpoint-every` (default: `10`)
+- `--no-eval` (skip evaluation pass)
+- `--no-cuda`
 
-Use a curated preset section:
-```bash
-bsvae-train beta_genenet_run \
-  --section beta_genenet \
-  --gene-expression-dir data/splits/
-```
+## `bsvae-networks`
 
-💡 **Tip:** If both input flags are provided, the parser raises `Specify exactly one of --gene-expression-filename or --gene-expression-dir.` Fix the invocation by choosing a single data source.
+Subcommands:
 
-## Network extraction and latent export
+- `extract-networks`
+- `extract-modules`
+- `export-latents`
+- `latent-analysis`
 
-Use the dedicated `bsvae-networks` entry point for post-training analysis:
+### `extract-networks`
 
 ```bash
 bsvae-networks extract-networks \
-  --model-path results/my_experiment \
+  --model-path results/run \
   --dataset data/expression.csv \
-  --output-dir results/networks
-# optional: --methods latent_cov graphical_lasso laplacian
+  --output-dir results/run/networks \
+  --methods mu_cosine gamma_knn
 ```
 
-The extractor defaults to decoder-loading cosine similarity (``w_similarity``);
-append ``--methods`` to enable additional estimators.
+Supported `--methods` values: `mu_cosine`, `gamma_knn`.
 
-To export latent means and log-variances for every sample, run:
+### `extract-modules`
+
+```bash
+bsvae-networks extract-modules \
+  --model-path results/run \
+  --dataset data/expression.csv \
+  --output-dir results/run/modules
+```
+
+Optional:
+
+- `--soft-eigengenes --expr <features x samples csv/tsv>`
+- `--use-leiden --leiden-resolution <float>`
+
+### `export-latents`
 
 ```bash
 bsvae-networks export-latents \
-  --model-path results/my_experiment \
+  --model-path results/run \
   --dataset data/expression.csv \
-  --output latents.h5ad
+  --output results/run/latents.npz
+```
+
+Writes compressed NPZ with keys: `mu`, `logvar`, `gamma`, `feature_ids`.
+
+### `latent-analysis`
+
+```bash
+bsvae-networks latent-analysis \
+  --model-path results/run \
+  --dataset data/expression.csv \
+  --output-dir results/run/latent_analysis \
+  --kmeans-k 10 --umap
+```
+
+Optional:
+
+- `--gmm-k`
+- `--tsne --tsne-perplexity`
+- `--covariates` (CSV/TSV indexed by row IDs)
+
+## `bsvae-simulate`
+
+Subcommands:
+
+- `generate`: create synthetic expression + optional ground-truth labels
+- `benchmark`: compute ARI/NMI from predicted module assignments
+
+```bash
+bsvae-simulate generate --output data/sim.csv --save-ground-truth data/gt.csv
+bsvae-simulate benchmark --dataset data/sim.csv --ground-truth data/gt.csv --model-path results/run --output results/run/sim.json
 ```

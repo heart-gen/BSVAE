@@ -50,11 +50,11 @@ def ast_literal_eval(val):
 
 
 def parse_arguments(cli_args):
-    """Parse CLI args, with defaults pulled from hyperparam.ini."""
+    """Legacy parser: CLI args with defaults pulled from deprecated hyperparam.ini."""
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--config", "-c", type=str,
                             default=join(dirname(__file__), "hyperparam.ini"),
-                            help="Path to hyperparam.ini")
+                            help="Path to legacy hyperparam.ini (deprecated).")
     pre_parser.add_argument("--section", type=str, default="Custom",
                             help="Section of .ini to load")
     config_args, _ = pre_parser.parse_known_args(cli_args)
