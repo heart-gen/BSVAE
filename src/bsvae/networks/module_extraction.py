@@ -119,43 +119,33 @@ def load_adjacency(
 
     # Handle sparse NPZ format
     if ".npz" in suffixes:
-        if return_type in {"edges", "graph"}:
-            from bsvae.networks.extract_networks import load_adjacency_sparse_edges
-            edges, weights, genes = load_adjacency_sparse_edges(path)
-            if return_type == "graph":
-                return build_graph_from_edge_list(edges, weights, genes), genes
-            return edges, weights, genes
-        from bsvae.networks.extract_networks import load_adjacency_sparse
-        return load_adjacency_sparse(path)
+        from bsvae.networks.extract_networks import load_adjacency_npz
+        adj, feat_ids = load_adjacency_npz(str(path))
+        genes_list = feat_ids or [str(i) for i in range(adj.shape[0])]
+        if return_type == "edges":
+            coo = adj.tocoo()
+            edges = np.column_stack((coo.row, coo.col))
+            return edges, coo.data.tolist(), genes_list
+        if return_type == "graph":
+            coo = adj.tocoo()
+            edges = np.column_stack((coo.row, coo.col))
+            g = build_graph_from_edge_list(edges, coo.data.tolist(), genes_list)
+            return g, genes_list
+        return adj.toarray(), genes_list
 
-    # Handle Parquet edge list format (recommended)
+    # Handle Parquet edge list format (legacy — not supported in GMM-VAE version)
     if ".parquet" in suffixes:
-        if return_type in {"edges", "graph"}:
-            from bsvae.networks.extract_networks import load_edge_list_parquet_edges
-            edges, weights, genes = load_edge_list_parquet_edges(path)
-            if return_type == "graph":
-                return build_graph_from_edge_list(edges, weights, genes), genes
-            return edges, weights, genes
-        from bsvae.networks.extract_networks import load_edge_list_parquet
-        return load_edge_list_parquet(path)
+        raise NotImplementedError(
+            "Parquet loading is not supported in this version. "
+            "Use NPZ format (save_adjacency_npz)."
+        )
 
     # Handle compressed edge list format (deprecated)
-    if ".gz" in suffixes:
-        import warnings
-        warnings.warn(
-            "Loading from gzipped edge list is deprecated. "
-            "Use Parquet format (.parquet) for better performance.",
-            DeprecationWarning,
-            stacklevel=2,
+    if ".gz" in suffixes and ".csv" not in suffixes and ".tsv" not in suffixes:
+        raise NotImplementedError(
+            "Gzipped edge list loading is not supported in this version. "
+            "Use NPZ format (save_adjacency_npz)."
         )
-        if return_type in {"edges", "graph"}:
-            from bsvae.networks.extract_networks import load_edge_list_compressed_edges
-            edges, weights, genes = load_edge_list_compressed_edges(path, genes_path)
-            if return_type == "graph":
-                return build_graph_from_edge_list(edges, weights, genes), genes
-            return edges, weights, genes
-        from bsvae.networks.extract_networks import load_edge_list_compressed
-        return load_edge_list_compressed(path, genes_path)
 
     # Legacy dense CSV/TSV format
     sep = _infer_separator(path)
@@ -923,4 +913,132 @@ __all__ = [
     "compute_module_eigengenes",
     "save_modules",
     "save_eigengenes",
+    # GMM-VAE specific
+    "extract_gmm_modules",
+    "compute_module_eigengenes_from_soft",
 ]
+
+
+# ---------------------------------------------------------------------------
+# GMM-VAE specific module extraction
+# ---------------------------------------------------------------------------
+
+def extract_gmm_modules(
+    model,
+    dataloader,
+    feature_ids: Optional[Sequence[str]] = None,
+    output_dir: Optional[str] = None,
+    device=None,
+    disable_progress: bool = False,
+) -> dict:
+    """
+    Extract GMM soft/hard module assignments from a GMMModuleVAE.
+
+    Parameters
+    ----------
+    model : GMMModuleVAE
+    dataloader : DataLoader
+        Yields (profiles, feature_ids) batches.
+    feature_ids : list of str or None
+    output_dir : str or None
+        If provided, save gamma.npz and hard_assignments.npz here.
+    device : torch.device or None
+    disable_progress : bool
+
+    Returns
+    -------
+    result : dict with keys:
+        "gamma"            — np.ndarray (F, K), float32
+        "hard_assignments" — np.ndarray (F,), int
+        "feature_ids"      — list of str
+    """
+    from bsvae.networks.extract_networks import extract_mu_gamma
+
+    mu, gamma, extracted_ids = extract_mu_gamma(
+        model, dataloader, device=device, disable_progress=disable_progress
+    )
+    if feature_ids is None:
+        feature_ids = extracted_ids
+
+    hard = gamma.argmax(axis=1).astype(np.int32)
+
+    result = {
+        "gamma": gamma,
+        "hard_assignments": hard,
+        "feature_ids": list(feature_ids),
+    }
+
+    if output_dir is not None:
+        import os
+        os.makedirs(output_dir, exist_ok=True)
+        np.savez_compressed(
+            os.path.join(output_dir, "gamma.npz"),
+            gamma=gamma,
+            feature_ids=np.array(feature_ids, dtype=object),
+        )
+        np.savez_compressed(
+            os.path.join(output_dir, "hard_assignments.npz"),
+            hard_assignments=hard,
+            feature_ids=np.array(feature_ids, dtype=object),
+        )
+        logger.info("Saved GMM module outputs to %s", output_dir)
+
+    return result
+
+
+def compute_module_eigengenes_from_soft(
+    expr: "pd.DataFrame",
+    gamma: np.ndarray,
+    feature_ids: Sequence[str],
+    min_weight: float = 0.05,
+) -> "pd.DataFrame":
+    """
+    Compute soft-weighted eigengenes: first PC of γ-weighted expression per module.
+
+    Parameters
+    ----------
+    expr : pd.DataFrame
+        Expression matrix, features × samples (index = feature IDs).
+    gamma : np.ndarray, shape (F, K)
+        Soft GMM assignments.
+    feature_ids : list of str
+        Feature IDs in the same order as gamma rows.
+    min_weight : float
+        Minimum γ weight to include a feature in a module. Default: 0.05.
+
+    Returns
+    -------
+    eigengenes : pd.DataFrame
+        Samples × modules.
+    """
+    K = gamma.shape[1]
+    sample_ids = list(expr.columns)
+    eigengenes = {}
+
+    for k in range(K):
+        weights = gamma[:, k]
+        mask = weights >= min_weight
+        if mask.sum() < 2:
+            eigengenes[f"module_{k}"] = np.zeros(len(sample_ids))
+            continue
+
+        fids_k = [fid for fid, m in zip(feature_ids, mask) if m]
+        w_k = weights[mask]
+
+        # Subset expression for this module's features
+        common = [f for f in fids_k if f in expr.index]
+        if len(common) < 2:
+            eigengenes[f"module_{k}"] = np.zeros(len(sample_ids))
+            continue
+
+        w_common = np.array([w_k[fids_k.index(f)] for f in common])
+        sub_expr = expr.loc[common].values.T  # (S, n_feat)
+
+        # Weight features by γ_k
+        sub_expr_weighted = sub_expr * w_common[np.newaxis, :]
+
+        pca = PCA(n_components=1)
+        pc1 = pca.fit_transform(sub_expr_weighted).ravel()  # (S,)
+        eigengenes[f"module_{k}"] = pc1
+
+    return pd.DataFrame(eigengenes, index=sample_ids)

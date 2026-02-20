@@ -1,119 +1,96 @@
-import io
-import gzip
-import torch
+"""Extra utility tests (hierarchy, modelIO helpers)."""
+
+import tempfile
+import os
+import numpy as np
 import pandas as pd
 import pytest
+import torch
 
-import bsvae.utils.mapping as mapping
-import bsvae.utils.ppi as ppi
-
-
-# ---------------------------
-# mapping.py
-# ---------------------------
-
-def test_fetch_with_mygene_dict_and_list(monkeypatch):
-    class DummyMG:
-        def querymany(self, *a, **k):
-            # Return df with both dict and list ensembl formats
-            return pd.DataFrame({
-                "query": ["g1", "g2"],
-                "symbol": ["sym1", "sym2"],
-                "ensembl": [
-                    {"gene": "E1", "protein": "P1"},
-                    [{"gene": "E2", "protein": "P2"}],
-                ],
-                "_id": ["id1", "id2"]
-            }).set_index("query")
-
-    monkeypatch.setattr(mapping.mygene, "MyGeneInfo", lambda: DummyMG())
-    df = mapping._fetch_with_mygene(["g1", "g2"], "human")
-    assert set(df.columns) == {"input_id", "symbol", "ensembl_gene", "ensembl_protein"}
-    assert "E1" in df["ensembl_gene"].values
+from bsvae.utils.hierarchy import load_tx2gene, group_isoforms_by_gene
+from bsvae.utils.modelIO import save_metadata, load_metadata, numpy_serialize
 
 
-def test_fetch_with_mygene_unmatched(monkeypatch, caplog):
-    class DummyMG:
-        def querymany(self, *a, **k):
-            return pd.DataFrame({
-                "query": ["g1"],
-                "symbol": ["sym1"],
-                "ensembl": [None],
-                "_id": [None]  # triggers unmatched warning
-            }).set_index("query")
+# ---------------------------------------------------------------------------
+# modelIO helpers
+# ---------------------------------------------------------------------------
 
-    monkeypatch.setattr(mapping.mygene, "MyGeneInfo", lambda: DummyMG())
-    df = mapping._fetch_with_mygene(["g1"], "human")
-    assert df["ensembl_gene"].isna().all()
-    assert any("could not be matched" in m for m in caplog.text.splitlines())
+def test_save_load_metadata(tmp_path):
+    meta = {"n_features": 100, "n_modules": 10, "latent_dim": 32}
+    save_metadata(meta, str(tmp_path))
+    loaded = load_metadata(str(tmp_path))
+    assert loaded == meta
 
 
-def test_fetch_with_biomart_success(monkeypatch):
-    fake_tsv = "Gene name\tGene stable ID\tProtein stable ID\nSYM\tE1\tP1\n"
-    class DummyResp:
-        text = fake_tsv
-        def raise_for_status(self): return None
-    monkeypatch.setattr(mapping, "requests", type("R", (), {"get": lambda *a, **k: DummyResp()})())
-    df = mapping._fetch_with_biomart(["SYM"], "human")
-    assert list(df.columns) == ["input_id", "symbol", "ensembl_gene", "ensembl_protein"]
-    assert df.iloc[0]["ensembl_gene"] == "E1"
+def test_numpy_serialize_array():
+    arr = np.array([1.0, 2.0, 3.0])
+    result = numpy_serialize(arr)
+    assert result == [1.0, 2.0, 3.0]
 
 
-def test_fetch_with_biomart_bad_columns(monkeypatch):
-    fake_tsv = "wrongcol1\twrongcol2\nA\tB\n"
-    class DummyResp:
-        text = fake_tsv
-        def raise_for_status(self): return None
-    monkeypatch.setattr(mapping, "requests", type("R", (), {"get": lambda *a, **k: DummyResp()})())
+def test_numpy_serialize_scalar():
+    val = np.float32(3.14)
+    result = numpy_serialize(val)
+    assert abs(result - 3.14) < 1e-3
+
+
+def test_numpy_serialize_unknown_type():
+    with pytest.raises(TypeError):
+        numpy_serialize("not_numpy")
+
+
+# ---------------------------------------------------------------------------
+# hierarchy — edge cases
+# ---------------------------------------------------------------------------
+
+def test_load_tx2gene_missing_path_and_ids_raises():
     with pytest.raises(ValueError):
-        mapping._fetch_with_biomart(["SYM"], "human")
+        load_tx2gene(path=None, feature_ids=None)
 
 
-def test_fetch_gene_mapping_invalid_source():
-    with pytest.raises(ValueError):
-        mapping.fetch_gene_mapping(["g1"], source="invalid")
+def test_load_tx2gene_non_ensembl_maps_to_itself():
+    feat_ids = ["custom_gene_1", "custom_gene_2"]
+    tx2gene = load_tx2gene(feature_ids=feat_ids)
+    assert tx2gene["custom_gene_1"] == "custom_gene_1"
 
 
-# ---------------------------
-# ppi.py
-# ---------------------------
-
-def test_download_string_and_load(monkeypatch, tmp_path):
-    # Patch urlretrieve to just write a dummy gzip file
-    dummy_path = tmp_path / "9606_string.txt.gz"
-    def fake_urlretrieve(url, filename):
-        with gzip.open(filename, "wt") as f:
-            f.write("protein1 protein2 combined_score\n9606.A 9606.B 900\n")
-    monkeypatch.setattr(ppi.urllib.request, "urlretrieve", fake_urlretrieve)
-
-    # Should not raise
-    path = ppi.download_string("9606", cache_dir=tmp_path)
-    assert path.endswith(".gz")
-
-    # Now load it
-    edges = ppi.load_string_ppi("9606", min_score=800, cache_dir=tmp_path)
-    assert list(edges.columns) == ["protein1", "protein2", "score"]
-    assert edges.iloc[0]["protein1"] == "A"
+def test_group_isoforms_by_gene_empty():
+    tx2gene = pd.Series({"tx1": "gA", "tx2": "gB"})  # each gene has 1 isoform
+    feature_ids = ["tx1", "tx2"]
+    groups = group_isoforms_by_gene(tx2gene, feature_ids)
+    assert len(groups) == 0  # no multi-isoform genes
 
 
-def test_build_graph_from_ppi_and_laplacian():
-    edges = pd.DataFrame({"protein1": ["A"], "protein2": ["B"], "score": [1.0]})
-    G = ppi.build_graph_from_ppi(edges)
-    assert G.has_edge("A", "B")
-
-    # Dense Laplacian
-    L = ppi.graph_to_laplacian(G, ["A", "B"], sparse=False)
-    assert isinstance(L, torch.Tensor)
-    assert L.shape == (2, 2)
-
-    # Sparse Laplacian
-    Ls = ppi.graph_to_laplacian(G, ["A", "B"], sparse=True)
-    assert Ls.is_sparse
+def test_group_isoforms_feature_not_in_tx2gene():
+    tx2gene = pd.Series({"tx1": "gA", "tx2": "gA"})
+    # feature_ids has an extra feature not in tx2gene
+    feature_ids = ["tx1", "tx2", "tx3"]
+    groups = group_isoforms_by_gene(tx2gene, feature_ids)
+    assert "gA" in groups
+    assert len(groups["gA"]) == 2  # only tx1 and tx2 found
 
 
-def test_load_ppi_laplacian(monkeypatch):
-    fake_edges = pd.DataFrame({"protein1": ["A"], "protein2": ["B"], "score": [1.0]})
-    monkeypatch.setattr(ppi, "load_string_ppi", lambda *a, **k: fake_edges)
-    L, G = ppi.load_ppi_laplacian(["A", "B"])
-    assert isinstance(L, torch.Tensor)
-    assert G.number_of_nodes() == 2
+# ---------------------------------------------------------------------------
+# OmicsDataset HDF5 (requires h5py)
+# ---------------------------------------------------------------------------
+
+def test_omics_dataset_hdf5(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    from bsvae.utils.datasets import OmicsDataset
+
+    n_feat, n_samp = 15, 10
+    feat_ids = [f"gene_{i}".encode() for i in range(n_feat)]
+    sample_ids = [f"sample_{j}".encode() for j in range(n_samp)]
+    data = np.random.randn(n_feat, n_samp).astype(np.float32)
+
+    path = str(tmp_path / "expr.h5")
+    with h5py.File(path, "w") as f:
+        f.create_dataset("data", data=data)
+        f.create_dataset("features", data=feat_ids)
+        f.create_dataset("samples", data=sample_ids)
+
+    ds = OmicsDataset(path)
+    assert len(ds) == n_feat
+    assert ds.n_samples == n_samp
+    profile, fid = ds[0]
+    assert profile.shape == (n_samp,)

@@ -1,18 +1,19 @@
 [tool.poetry]
 name = "bsvae"
 version = "0.0.0"  # dynamically resolved by poetry-dynamic-versioning
-description = "Biologically structured variational autoencoder for gene expression data with PPI priors."
+description = "Gaussian Mixture VAE for multi-modal biological module discovery in omics data."
 readme = "README.md"
 authors = ["Kynon J Benjamin <kj.benjamin90@gmail.com>"]
 license = "GPL-3.0-only"
 packages = [{ include = "bsvae", from = "src" }]
 keywords = [
     "variational-autoencoder",
-    "structured-vae",
+    "gaussian-mixture-model",
     "pytorch",
     "bioinformatics",
     "gene-expression",
-    "protein-protein-interaction",
+    "module-discovery",
+    "omics",
 ]
 classifiers = [
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
@@ -30,12 +31,15 @@ python = ">=3.11,<3.14"
 torch = ">=2.8.0,<3.0.0"
 numpy = "<2.3"
 pandas = ">=2.3.2,<3.0.0"
-pyarrow = ">=19.0.0,<20.0.0"
 scikit-learn = ">=1.7.2,<2.0.0"
 tqdm = ">=4.67.1,<5.0.0"
-mygene = ">=3.2.2,<4.0.0"
-networkx = ">=3.5,<4.0"
 scipy = ">=1.16.2,<2.0.0"
+h5py = ">=3.0"
+faiss-cpu = ">=1.7"
+
+[tool.poetry.dependencies.anndata]
+version = ">=0.10"
+optional = true
 
 [tool.poetry.urls]
 homepage = "https://bsvae.readthedocs.io/en/latest/"
@@ -43,9 +47,9 @@ repository = "https://github.com/heart-gen/BSVAE"
 "Bug Tracker" = "https://github.com/heart-gen/BSVAE/issues"
 
 [tool.poetry.scripts]
-bsvae-train = "bsvae.main:cli"
-bsvae-download-ppi = "bsvae.ppi_cli:cli"
-bsvae-networks = "bsvae.networks.cli:cli"
+bsvae-train = "bsvae.cli.train:cli"
+bsvae-networks = "bsvae.cli.networks:cli"
+bsvae-simulate = "bsvae.cli.simulate:cli"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.4.2,<9.0.0"
@@ -53,6 +57,10 @@ pytest-cov = ">=7.0.0,<8.0.0"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+markers = [
+    "slow: marks tests as slow-running integration tests (deselect with '-m not slow')",
+]
+addopts = ["-m", "not slow"]
 
 [tool.poetry-dynamic-versioning]
 enable = true

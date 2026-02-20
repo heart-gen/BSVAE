@@ -1,201 +1,190 @@
-# bsvae/utils/modelIO.py
+"""
+Model persistence for GMMModuleVAE.
+
+save_model / load_model handle GMMModuleVAE and write a specs.json
+that records all architecture hyperparameters needed to reconstruct
+the model without any additional arguments.
+"""
+
+import json
 import os
 import re
-import json
+from typing import Optional
+
 import numpy as np
 import torch
 
-from bsvae.models import StructuredFactorVAE
+from bsvae.models import GMMModuleVAE
 
 MODEL_FILENAME = "model.pt"
 META_FILENAME = "specs.json"
 
-# -------------------------
-# Save / Load Models
-# -------------------------
-def save_model(model, directory, metadata=None, filename=MODEL_FILENAME):
+
+# ---------------------------------------------------------------------------
+# Metadata helpers
+# ---------------------------------------------------------------------------
+
+def save_metadata(metadata: dict, directory: str, filename: str = META_FILENAME, **kwargs):
+    """Persist metadata dict as a JSON file."""
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, filename)
+    with open(path, "w") as f:
+        json.dump(metadata, f, indent=4, sort_keys=True, **kwargs)
+
+
+def load_metadata(directory: str, filename: str = META_FILENAME) -> dict:
+    """Load metadata JSON from directory."""
+    path = os.path.join(directory, filename)
+    with open(path) as f:
+        return json.load(f)
+
+
+# ---------------------------------------------------------------------------
+# GMMModuleVAE save / load
+# ---------------------------------------------------------------------------
+
+def save_model(
+    model: GMMModuleVAE,
+    directory: str,
+    metadata: Optional[dict] = None,
+    filename: str = MODEL_FILENAME,
+):
     """
-    Save a StructuredFactorVAE and corresponding metadata.
+    Save a GMMModuleVAE (weights + specs.json).
 
     Parameters
     ----------
-    model : nn.Module
-        The trained model.
+    model : GMMModuleVAE
     directory : str
-        Path to the directory where to save the model and metadata.
     metadata : dict or None
-        Additional metadata (e.g. hyperparameters).
-        If None, will infer from the model.
+        If None, inferred from model attributes.
     filename : str
-        Filename for the saved weights.
     """
     device = next(model.parameters()).device
     model.cpu()
 
     if metadata is None:
-        metadata = dict(
-            model_type="StructuredFactorVAE",
-            n_genes=model.encoder.n_genes,
-            latent_dim=model.encoder.n_latent,
-            hidden_dims=model.encoder.hidden_dims,
-            dropout=model.encoder.dropout,
-            use_batch_norm=getattr(model.encoder, "use_batch_norm", False),
-            learn_var=model.decoder.learn_var,
-            l1_strength=getattr(model, "l1_strength", 1e-3),
-            lap_strength=getattr(model, "lap_strength", 1e-4),
-        )
+        metadata = _metadata_from_model(model)
     else:
         metadata = dict(metadata)
-        metadata["model_type"] = _resolve_model_name(metadata)
-        metadata.setdefault("n_genes", model.encoder.n_genes)
-        metadata.setdefault("latent_dim", model.encoder.n_latent)
+        metadata.setdefault("model_type", "GMMModuleVAE")
+        metadata.setdefault("n_features", model.encoder.n_features)
+        metadata.setdefault("n_latent", model.n_latent)
+        metadata.setdefault("n_modules", model.n_modules)
         metadata.setdefault("hidden_dims", model.encoder.hidden_dims)
         metadata.setdefault("dropout", model.encoder.dropout)
-        metadata.setdefault("use_batch_norm", getattr(model.encoder, "use_batch_norm", False))
-        metadata.setdefault("learn_var", model.decoder.learn_var)
-        metadata.setdefault("l1_strength", getattr(model, "l1_strength", 1e-3))
-        metadata.setdefault("lap_strength", getattr(model, "lap_strength", 1e-4))
+        metadata.setdefault("use_batch_norm", model.encoder.use_batch_norm)
+        metadata.setdefault("sigma_min", model.gmm_prior.sigma_min)
 
     save_metadata(metadata, directory)
-
-    path_to_model = os.path.join(directory, filename)
-    torch.save(model.state_dict(), path_to_model)
-
+    torch.save(model.state_dict(), os.path.join(directory, filename))
     model.to(device)
 
 
-def load_metadata(directory, filename=META_FILENAME):
-    """Load the metadata of a training directory."""
-    path_to_metadata = os.path.join(directory, filename)
-    with open(path_to_metadata) as metadata_file:
-        return json.load(metadata_file)
-
-
-def save_metadata(metadata, directory, filename=META_FILENAME, **kwargs):
-    """Save metadata dictionary as JSON file."""
-    path_to_metadata = os.path.join(directory, filename)
-    os.makedirs(directory, exist_ok=True)
-    with open(path_to_metadata, 'w') as f:
-        json.dump(metadata, f, indent=4, sort_keys=True, **kwargs)
-
-
-def load_model(directory, is_gpu=True, filename=MODEL_FILENAME):
+def load_model(
+    directory: str,
+    is_gpu: bool = True,
+    filename: str = MODEL_FILENAME,
+) -> GMMModuleVAE:
     """
-    Load a trained StructuredFactorVAE.
+    Load a trained GMMModuleVAE from a directory.
 
     Parameters
     ----------
     directory : str
-        Directory where model + metadata are stored.
     is_gpu : bool
-        Whether to map to GPU if available.
     filename : str
-        Model weights file (default "model.pt").
+
+    Returns
+    -------
+    model : GMMModuleVAE (eval mode)
     """
     device = torch.device("cuda" if torch.cuda.is_available() and is_gpu else "cpu")
-
     metadata = load_metadata(directory)
     path_to_model = os.path.join(directory, filename)
-
-    model = _get_model(metadata, device, path_to_model)
-    return model
+    return _get_model(metadata, device, path_to_model)
 
 
-def _resolve_model_name(metadata):
-    """Resolve the model identifier used in metadata to a canonical name."""
-    model_type = metadata.get("model_type") or metadata.get("model")
-    if model_type is None:
-        return "StructuredFactorVAE"
-
-    if not isinstance(model_type, str):
-        raise ValueError(f"Invalid model_type: {model_type}")
-
-    if model_type.lower() in {"structuredfactorvae", "sfvae"}:
-        return "StructuredFactorVAE"
-
-    raise ValueError(f"Unknown model_type: {model_type}")
-
-
-def load_checkpoints(directory, is_gpu=True):
-    """Load all checkpointed models (saved as model-<epoch>.pt)."""
+def load_checkpoints(directory: str, is_gpu: bool = True) -> list:
+    """Load all checkpointed models (model-<epoch>.pt)."""
     checkpoints = []
     for root, _, filenames in os.walk(directory):
-        for filename in filenames:
-            results = re.search(r'.*?-([0-9].*?).pt', filename)
-            if results is not None:
-                epoch_idx = int(results.group(1))
-                model = load_model(root, is_gpu=is_gpu, filename=filename)
+        for fname in filenames:
+            m = re.search(r"model-([0-9]+)\.pt$", fname)
+            if m:
+                epoch_idx = int(m.group(1))
+                model = load_model(root, is_gpu=is_gpu, filename=fname)
                 checkpoints.append((epoch_idx, model))
-
     return checkpoints
 
 
-def _get_model(metadata, device, path_to_model):
-    """Instantiate a StructuredFactorVAE from metadata + load weights."""
-    model_type = _resolve_model_name(metadata)
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
-    state_dict = torch.load(path_to_model, map_location=device)
-    use_batch_norm = metadata.get("use_batch_norm")
+def _metadata_from_model(model: GMMModuleVAE) -> dict:
+    return dict(
+        model_type="GMMModuleVAE",
+        n_features=model.encoder.n_features,
+        n_latent=model.n_latent,
+        n_modules=model.n_modules,
+        hidden_dims=model.encoder.hidden_dims,
+        dropout=model.encoder.dropout,
+        use_batch_norm=model.encoder.use_batch_norm,
+        sigma_min=model.gmm_prior.sigma_min,
+    )
+
+
+def _get_model(metadata: dict, device: torch.device, path_to_model: str) -> GMMModuleVAE:
+    """Reconstruct a GMMModuleVAE from metadata and load its weights."""
+    use_batch_norm = metadata.get("use_batch_norm", True)
     if use_batch_norm is None:
+        # Infer from state dict
+        state_dict = torch.load(path_to_model, map_location=device, weights_only=True)
         use_batch_norm = _infer_encoder_batch_norm(state_dict)
+    else:
+        state_dict = None
 
-    model = StructuredFactorVAE(
-        n_genes=metadata["n_genes"],
-        n_latent=metadata["latent_dim"],
+    model = GMMModuleVAE(
+        n_features=metadata["n_features"],
+        n_latent=metadata["n_latent"],
+        n_modules=metadata["n_modules"],
         hidden_dims=metadata.get("hidden_dims"),
         dropout=metadata.get("dropout", 0.1),
-        learn_var=metadata.get("learn_var", False),
         use_batch_norm=use_batch_norm,
+        sigma_min=metadata.get("sigma_min", 0.3),
     ).to(device)
 
-    # store reg strengths for reproducibility
-    model.l1_strength = metadata.get("l1_strength", 1e-3)
-    model.lap_strength = metadata.get("lap_strength", 1e-4)
-
-    # Backwards compatibility: older checkpoints may contain a Laplacian
-    # buffer that is not registered in newly instantiated models unless a
-    # Laplacian matrix is provided at construction time.
-    if "laplacian_matrix" in state_dict:
-        laplacian = state_dict["laplacian_matrix"]
-        if "laplacian_matrix" not in model._buffers:
-            # Remove placeholder attribute from __init__ so the buffer can be registered
-            if hasattr(model, "laplacian_matrix"):
-                delattr(model, "laplacian_matrix")
-            model.register_buffer("laplacian_matrix", laplacian)
-        else:
-            model.laplacian_matrix = laplacian
-
+    if state_dict is None:
+        state_dict = torch.load(path_to_model, map_location=device, weights_only=True)
     model.load_state_dict(state_dict)
     model.eval()
     return model
 
 
-def _infer_encoder_batch_norm(state_dict):
-    """Infer whether the encoder was built with BatchNorm from saved weights."""
+def _infer_encoder_batch_norm(state_dict: dict) -> bool:
     return any(
-        key.startswith("encoder.encoder") and key.endswith("running_mean")
-        for key in state_dict
+        k.startswith("encoder.encoder") and k.endswith("running_mean")
+        for k in state_dict
     )
 
 
-# -------------------------
-# Save / Load NumPy Arrays
-# -------------------------
+# ---------------------------------------------------------------------------
+# Numpy array helpers (unchanged from original)
+# ---------------------------------------------------------------------------
+
 def numpy_serialize(obj):
     if type(obj).__module__ == np.__name__:
         if isinstance(obj, np.ndarray):
             return obj.tolist()
-        else:
-            return obj.item()
-    raise TypeError('Unknown type:', type(obj))
+        return obj.item()
+    raise TypeError(f"Unknown type: {type(obj)}")
 
 
-def save_np_arrays(arrays, directory, filename):
-    """Save dictionary of arrays in JSON format."""
+def save_np_arrays(arrays: dict, directory: str, filename: str):
     save_metadata(arrays, directory, filename=filename, default=numpy_serialize)
 
 
-def load_np_arrays(directory, filename):
-    """Load dictionary of arrays from JSON format into numpy arrays."""
+def load_np_arrays(directory: str, filename: str) -> dict:
     arrays = load_metadata(directory, filename=filename)
     return {k: np.array(v) for k, v in arrays.items()}
