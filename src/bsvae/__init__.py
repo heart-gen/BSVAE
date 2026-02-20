@@ -1,19 +1,13 @@
-"""BSVAE package entrypoint."""
+"""BSVAE — Gaussian Mixture VAE for multi-modal biological module discovery."""
 
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
+
+from . import latent, networks, simulation
 
 try:
     __version__ = version(__name__)
 except PackageNotFoundError:
     __version__ = "0.0.0"
 
-__all__ = ["latent", "networks", "__version__"]
-
-
-def __getattr__(name):
-    if name in {"latent", "networks"}:
-        module = import_module(f"bsvae.{name}")
-        globals()[name] = module
-        return module
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+__all__ = ["networks", "latent", "simulation", "__version__"]
