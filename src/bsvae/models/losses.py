@@ -369,8 +369,9 @@ class GMMVAELoss(nn.Module):
             recon_loss
             + effective_beta * gmm_weight * kl_loss
             + self.sep_strength * gmm_weight * sep_loss
-            + self.bal_strength * gmm_weight * bal_loss
-            + self.pi_entropy_strength * gmm_weight * pi_entropy_loss
+            # Keep balance and pi-entropy active during transition (no gmm_weight scaling)
+            + self.bal_strength * bal_loss
+            + self.pi_entropy_strength * pi_entropy_loss
             + self.hier_strength * hier_loss
         )
 
