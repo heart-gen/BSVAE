@@ -68,6 +68,7 @@ class Trainer:
         is_progress_bar: bool = True,
         warmup_epochs: int = 20,
         transition_epochs: int = 10,
+        freeze_gmm_epochs: int = 0,
         mu_buffer_size: int = 50_000,
         warmup_loss_f: Optional[WarmupLoss] = None,
         gene_groups: Optional[Dict] = None,
@@ -78,11 +79,13 @@ class Trainer:
         self.gmm_loss_f = gmm_loss_f
         self.warmup_epochs = warmup_epochs
         self.transition_epochs = transition_epochs
+        self.freeze_gmm_epochs = max(int(freeze_gmm_epochs), 0)
         self.mu_buffer_size = mu_buffer_size
         self.gene_groups = gene_groups or {}
         self.save_dir = save_dir
         self.is_progress_bar = is_progress_bar
         self.logger = logger
+        self._gmm_prior_trainable = True
 
         self.warmup_loss_f = warmup_loss_f or WarmupLoss(
             beta=gmm_loss_f.beta,
@@ -105,6 +108,11 @@ class Trainer:
             "Phase 1: %d warmup epochs | transition: %d epochs",
             warmup_epochs, transition_epochs,
         )
+        if self.freeze_gmm_epochs > 0:
+            self.logger.info(
+                "Freeze GMM prior for first %d GMM epochs",
+                self.freeze_gmm_epochs,
+            )
 
     # ------------------------------------------------------------------
     # Main training loop
@@ -125,6 +133,9 @@ class Trainer:
             # K-means warm-start at the transition point
             if epoch == self.warmup_epochs and self._mu_buffer:
                 self._kmeans_init()
+
+            # Optionally freeze GMM prior params for early GMM epochs
+            self._maybe_freeze_gmm_prior(epoch)
 
             mean_loss = self._train_epoch(
                 data_loader, storer, epoch, in_warmup, gmm_weight
@@ -159,6 +170,19 @@ class Trainer:
         if self.transition_epochs <= 0:
             return 1.0
         return min(t / self.transition_epochs, 1.0)
+
+    def _maybe_freeze_gmm_prior(self, epoch: int) -> None:
+        if self.freeze_gmm_epochs <= 0:
+            return
+        if epoch < self.warmup_epochs:
+            return
+        gmm_epoch = epoch - self.warmup_epochs
+        should_train = gmm_epoch >= self.freeze_gmm_epochs
+        if should_train == self._gmm_prior_trainable:
+            return
+        for p in self.model.gmm_prior.parameters():
+            p.requires_grad_(should_train)
+        self._gmm_prior_trainable = should_train
 
     def _kmeans_init(self):
         """Run K-means on the accumulated μ buffer to warm-start the GMM prior."""

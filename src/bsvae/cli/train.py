@@ -66,6 +66,8 @@ def parse_args(cli_args=None):
                    help="Phase 1 length: standard N(0,I) VAE (default: 20).")
     p.add_argument("--transition-epochs", type=int, default=10,
                    help="GMM loss ramp-in length (default: 10).")
+    p.add_argument("--freeze-gmm-epochs", type=int, default=0,
+                   help="Freeze GMM prior params for first N GMM epochs (default: 0).")
 
     # --- Model architecture ---
     p.add_argument("--n-modules", "-K", type=int, default=20,
@@ -195,6 +197,7 @@ def main(args):
         is_progress_bar=not args.no_progress_bar,
         warmup_epochs=args.warmup_epochs,
         transition_epochs=args.transition_epochs,
+        freeze_gmm_epochs=args.freeze_gmm_epochs,
         gene_groups=gene_groups,
     )
     trainer(train_loader, epochs=args.epochs, checkpoint_every=args.checkpoint_every)
