@@ -208,9 +208,10 @@ class GaussianMixturePrior(nn.Module):
         gamma: torch.Tensor,
         eps: float = 1e-8,
         update_ema: bool = True,
+        blend_alpha: float = 0.5,
     ) -> torch.Tensor:
         """
-        γ-usage balance loss: KL(uniform || ρ_ema + ε).
+        γ-usage balance loss: KL(uniform || ρ + ε).
 
         L_bal = (1/K) Σ_k log(1 / (K · (ρ_ema_k + ε)))
 
@@ -222,6 +223,9 @@ class GaussianMixturePrior(nn.Module):
             Stability term. Default: 1e-8.
         update_ema : bool
             Whether to update the EMA buffer (should be False at eval time).
+        blend_alpha : float
+            Blend EMA and batch usage: ρ = α·ρ_ema + (1-α)·ρ_batch.
+            Default: 0.5.
 
         Returns
         -------
@@ -235,7 +239,11 @@ class GaussianMixturePrior(nn.Module):
                     rho_batch.detach() * (1.0 - self.ema_alpha)
                 )
 
-        rho = self.rho_ema + eps
+        # Blend EMA and batch rho to balance stability and gradient signal.
+        # Gradients flow through rho_batch only.
+        alpha = float(blend_alpha)
+        rho = alpha * self.rho_ema + (1.0 - alpha) * rho_batch
+        rho = rho + eps
         # KL(uniform || rho): (1/K) Σ_k log(1 / (K * rho_k))
         #   = (1/K) Σ_k [-log(K) - log(rho_k)]
         K = float(self.K)

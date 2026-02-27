@@ -3,8 +3,12 @@ bsvae-simulate — Generate synthetic omics data and benchmark module methods.
 
 Subcommands
 -----------
-  generate     Simulate omics data with known block-diagonal module structure.
-  benchmark    ARI/NMI/enrichment vs WGCNA/GNVAE on simulated data.
+  generate           Simulate omics data with known block-diagonal module structure.
+  benchmark          ARI/NMI/enrichment vs WGCNA/GNVAE on simulated data.
+  init-config        Write starter simulation grid config.
+  generate-grid      Generate all scenarios/replicates defined in config.
+  generate-scenario  Generate one scenario/replicate.
+  validate-grid      Validate generated grid output structure.
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     gp.add_argument("--between-corr", type=float, default=0.0,
                     help="Between-module correlation (default: 0.0).")
     gp.add_argument("--noise-std", type=float, default=0.2)
-    gp.add_argument("--seed", type=int, default=42)
+    gp.add_argument("--seed", type=int, default=13)
     gp.add_argument("--save-ground-truth", help="Path to save ground-truth module labels CSV.")
 
     # ------------------------------------------------------------------
@@ -56,6 +60,37 @@ def build_parser() -> argparse.ArgumentParser:
     bp.add_argument("--output", required=True, help="Output JSON with benchmark metrics.")
     bp.add_argument("--batch-size", type=int, default=128)
     bp.add_argument("--no-cuda", action="store_true", default=False)
+
+    # ------------------------------------------------------------------
+    # init-config
+    # ------------------------------------------------------------------
+    cp = subs.add_parser("init-config", help="Write a starter simulation config file.")
+    cp.add_argument("--output", default="sim.yaml", help="Destination config path.")
+
+    # ------------------------------------------------------------------
+    # generate-grid
+    # ------------------------------------------------------------------
+    gp2 = subs.add_parser("generate-grid", help="Generate a scenario grid from config.")
+    gp2.add_argument("--config", required=True, help="Simulation config path.")
+    gp2.add_argument("--outdir", required=True, help="Output directory for scenario grid.")
+    gp2.add_argument("--reps", type=int, default=None, help="Override replicates per scenario.")
+    gp2.add_argument("--base-seed", type=int, default=None, help="Override base seed for all runs.")
+
+    # ------------------------------------------------------------------
+    # generate-scenario
+    # ------------------------------------------------------------------
+    sp = subs.add_parser("generate-scenario", help="Generate a single scenario/replicate from config.")
+    sp.add_argument("--config", required=True, help="Simulation config path.")
+    sp.add_argument("--scenario-id", required=True, help="Scenario identifier from config expansion.")
+    sp.add_argument("--rep", type=int, default=0, help="Replicate index.")
+    sp.add_argument("--outdir", required=True, help="Output directory for scenario grid.")
+    sp.add_argument("--base-seed", type=int, default=None, help="Override base seed for this run.")
+
+    # ------------------------------------------------------------------
+    # validate-grid
+    # ------------------------------------------------------------------
+    vp = subs.add_parser("validate-grid", help="Validate scenario grid output files.")
+    vp.add_argument("--grid-dir", required=True, help="Scenario grid output directory.")
 
     return parser
 
@@ -144,6 +179,58 @@ def handle_benchmark(args, logger: logging.Logger) -> None:
     logger.info("Benchmark metrics saved to %s", out)
 
 
+def handle_init_config(args, logger: logging.Logger) -> None:
+    from bsvae.simulation.scenario import write_starter_config
+
+    write_starter_config(args.output)
+    logger.info("Starter simulation config written to %s", args.output)
+
+
+def handle_generate_grid(args, logger: logging.Logger) -> None:
+    from bsvae.simulation.scenario import load_config, generate_grid
+
+    config = load_config(args.config)
+    summary = generate_grid(
+        config=config,
+        outdir=args.outdir,
+        reps=args.reps,
+        base_seed=args.base_seed,
+    )
+    logger.info(
+        "Grid complete: %d scenarios × %d reps = %d runs",
+        summary["n_scenarios"],
+        summary["n_reps"],
+        summary["n_runs"],
+    )
+    logger.info("Manifest: %s", summary["manifest"])
+
+
+def handle_generate_scenario(args, logger: logging.Logger) -> None:
+    from bsvae.simulation.scenario import load_config, generate_scenario
+
+    config = load_config(args.config)
+    run_dir = generate_scenario(
+        config=config,
+        scenario_id=args.scenario_id,
+        rep=args.rep,
+        outdir=args.outdir,
+        base_seed=args.base_seed,
+    )
+    logger.info("Scenario generated: %s", run_dir)
+
+
+def handle_validate_grid(args, logger: logging.Logger) -> None:
+    from bsvae.simulation.scenario import validate_grid
+
+    result = validate_grid(args.grid_dir)
+    logger.info(
+        "Grid validation: checked %d/%d rows, all required files present=%s",
+        result["checked_rows"],
+        result["manifest_rows"],
+        result["all_required_files_present"],
+    )
+
+
 def cli(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -153,6 +240,14 @@ def cli(argv=None):
         handle_generate(args, logger)
     elif args.command == "benchmark":
         handle_benchmark(args, logger)
+    elif args.command == "init-config":
+        handle_init_config(args, logger)
+    elif args.command == "generate-grid":
+        handle_generate_grid(args, logger)
+    elif args.command == "generate-scenario":
+        handle_generate_scenario(args, logger)
+    elif args.command == "validate-grid":
+        handle_validate_grid(args, logger)
     else:
         parser.error(f"Unknown command: {args.command}")
 

@@ -245,6 +245,10 @@ class GMMVAELoss(nn.Module):
         α — margin multiplier for σ-scaled separation. Default: 2.0.
     bal_strength : float
         λ_bal — weight for γ-usage balance loss. Default: 0.01.
+    pi_entropy_strength : float
+        λ_pi — weight for KL(uniform || π) penalty. Default: 0.0 (disabled).
+    bal_ema_blend : float
+        Blend factor for EMA vs batch usage in balance loss. Default: 0.5.
     hier_strength : float
         λ_hier — weight for hierarchical loss. Default: 0.0.
     """
@@ -260,6 +264,8 @@ class GMMVAELoss(nn.Module):
         sep_strength: float = 0.1,
         sep_alpha: float = 2.0,
         bal_strength: float = 0.01,
+        pi_entropy_strength: float = 0.0,
+        bal_ema_blend: float = 0.5,
         hier_strength: float = 0.0,
     ):
         super().__init__()
@@ -272,6 +278,8 @@ class GMMVAELoss(nn.Module):
         self.sep_strength = sep_strength
         self.sep_alpha = sep_alpha
         self.bal_strength = bal_strength
+        self.pi_entropy_strength = pi_entropy_strength
+        self.bal_ema_blend = bal_ema_blend
         self.hier_strength = hier_strength
 
     def get_beta_for_epoch(self, epoch: int) -> float:
@@ -341,7 +349,15 @@ class GMMVAELoss(nn.Module):
         sep_loss = prior.separation_loss(alpha=self.sep_alpha)
 
         # --- Balance ---
-        bal_loss = prior.balance_loss(gamma, update_ema=model.training)
+        bal_loss = prior.balance_loss(
+            gamma,
+            update_ema=model.training,
+            blend_alpha=self.bal_ema_blend,
+        )
+
+        # --- Pi entropy (encourage non-collapsed mixing weights) ---
+        pi_entropy = -(prior.pi * prior.log_pi).sum()
+        pi_entropy_loss = (math.log(float(prior.K)) - pi_entropy)
 
         # --- Hierarchical ---
         hier_loss = x.new_zeros(1).squeeze()
@@ -354,6 +370,7 @@ class GMMVAELoss(nn.Module):
             + effective_beta * gmm_weight * kl_loss
             + self.sep_strength * gmm_weight * sep_loss
             + self.bal_strength * gmm_weight * bal_loss
+            + self.pi_entropy_strength * gmm_weight * pi_entropy_loss
             + self.hier_strength * hier_loss
         )
 
@@ -363,6 +380,8 @@ class GMMVAELoss(nn.Module):
             storer.setdefault("effective_beta", []).append(effective_beta)
             storer.setdefault("sep_loss", []).append(sep_loss.item())
             storer.setdefault("bal_loss", []).append(bal_loss.item())
+            storer.setdefault("pi_entropy", []).append(pi_entropy.item())
+            storer.setdefault("pi_entropy_loss", []).append(pi_entropy_loss.item())
             storer.setdefault("hier_loss", []).append(hier_loss.item())
             storer.setdefault("gmm_weight", []).append(gmm_weight)
             storer.setdefault("loss", []).append(loss.item())

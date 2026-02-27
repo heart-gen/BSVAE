@@ -6,7 +6,7 @@ BSVAE provides a GMM-based variational autoencoder workflow for omics module dis
 
 - `bsvae-train`: train and optionally evaluate `GMMModuleVAE`
 - `bsvae-networks`: network extraction, module extraction, latent export/analysis
-- `bsvae-simulate`: synthetic data generation and benchmarking
+- `bsvae-simulate`: synthetic data generation, scenario-grid simulation, and benchmarking
 
 ## Current CLI Entry Points
 
@@ -14,7 +14,7 @@ BSVAE provides a GMM-based variational autoencoder workflow for omics module dis
 | --- | --- |
 | `bsvae-train` | Train a GMMModuleVAE model |
 | `bsvae-networks` | Post-training networks/modules/latents |
-| `bsvae-simulate` | Simulation and ARI/NMI benchmarking |
+| `bsvae-simulate` | Single-dataset simulation, scenario-grid generation, ARI/NMI benchmarking |
 
 ## Quick Start
 

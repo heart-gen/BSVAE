@@ -8,6 +8,7 @@ For a complete workflow, see the [Tutorial](tutorial.md).
 2. Extract networks
 3. Extract modules
 4. Export/analyze latents
+5. Simulate benchmark scenarios
 
 ## Train
 
@@ -63,3 +64,45 @@ bsvae-networks latent-analysis \
   --output-dir results/study1/latent_analysis \
   --kmeans-k 8 --umap
 ```
+
+## Scenario-grid simulation benchmark
+
+Create starter config:
+
+```bash
+bsvae-simulate init-config --output sim.yaml
+```
+
+Generate full grid:
+
+```bash
+bsvae-simulate generate-grid \
+  --config sim.yaml \
+  --outdir results/sim_pub_v1 \
+  --reps 30 \
+  --base-seed 13
+```
+
+Validate grid structure:
+
+```bash
+bsvae-simulate validate-grid --grid-dir results/sim_pub_v1
+```
+
+Generate one scenario only:
+
+```bash
+bsvae-simulate generate-scenario \
+  --config sim.yaml \
+  --scenario-id S001__confounding-none__n_samples-100__nonlinear_mode-off__overlap_rate-0.0__signal_scale-0.4 \
+  --rep 0 \
+  --outdir results/sim_pub_v1
+```
+
+Method-ready files in each run directory:
+
+- BSVAE input: `expr/features_x_samples.tsv.gz`
+- WGCNA input: `expr/samples_x_features.tsv.gz`
+- GNVAE input: `expr/features_x_samples.tsv.gz` or `gnvae/fold_*/X_train.tsv.gz`
+- Ground truth labels: `truth/modules_hard.csv`
+- Canonical path map: `method_inputs.json`

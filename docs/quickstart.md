@@ -47,3 +47,27 @@ bsvae-networks export-latents \
   --dataset data/expression.csv \
   --output results/pilot_run/latents.npz
 ```
+
+## 6. Build a simulation grid
+
+```bash
+bsvae-simulate init-config --output sim.yaml
+
+bsvae-simulate generate-grid \
+  --config sim.yaml \
+  --outdir results/sim_pub_v1 \
+  --reps 5 \
+  --base-seed 13
+```
+
+Validate outputs:
+
+```bash
+bsvae-simulate validate-grid --grid-dir results/sim_pub_v1
+```
+
+Per scenario replicate, use:
+
+- BSVAE/GNVAE: `expr/features_x_samples.tsv.gz`
+- WGCNA: `expr/samples_x_features.tsv.gz`
+- Canonical method paths: `method_inputs.json`

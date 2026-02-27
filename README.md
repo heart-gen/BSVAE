@@ -83,6 +83,8 @@ bsvae-networks export-latents \
 
 ### 5. Simulate and benchmark
 
+Single dataset:
+
 ```bash
 bsvae-simulate generate \
   --output data/sim_expr.csv \
@@ -94,6 +96,28 @@ bsvae-simulate benchmark \
   --model-path results/exp1 \
   --output results/exp1/sim_metrics.json
 ```
+
+Scenario grid for publication-style benchmarking:
+
+```bash
+bsvae-simulate init-config --output sim.yaml
+
+bsvae-simulate generate-grid \
+  --config sim.yaml \
+  --outdir results/sim_pub_v1 \
+  --reps 30 \
+  --base-seed 13
+
+bsvae-simulate validate-grid --grid-dir results/sim_pub_v1
+```
+
+Each scenario replicate writes method-ready files under
+`results/sim_pub_v1/scenarios/<scenario_id>/rep_<rep>/`, including:
+
+- `expr/features_x_samples.tsv.gz` (BSVAE, GNVAE)
+- `expr/samples_x_features.tsv.gz` (WGCNA)
+- `truth/modules_hard.csv` (hard labels for ARI/NMI)
+- `method_inputs.json` (canonical paths for each method)
 
 ## Training Outputs
 

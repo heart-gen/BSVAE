@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "base_seed": 13,
+  "reps": 30,
+  "generator": {
+    "family": "nb_latent_modules",
+    "n_features": 6000,
+    "n_modules": 20,
+    "module_size_distribution": "long_tail",
+    "hub_fraction": 0.05,
+    "hub_multiplier": 2.0,
+    "baseline_log_mean": -2.0,
+    "baseline_log_sd": 0.6,
+    "libsize_log_sd": 0.5,
+    "dispersion": "medium",
+    "signal_scale": 0.8,
+    "overlap_rate": 0.1,
+    "nonlinear_mode": "off",
+    "dropout_mode": "off",
+    "truth_edge_top_k": 25
+  },
+  "grid": {
+    "n_samples": [100, 300],
+    "signal_scale": [0.4, 0.8, 1.2],
+    "overlap_rate": [0.0, 0.2],
+    "confounding": ["none", "moderate"],
+    "nonlinear_mode": ["off", "on"]
+  },
+  "stress": [
+    {
+      "name": "high_dropout",
+      "dropout_mode": "high",
+      "dropout_target": 0.5
+    },
+    {
+      "name": "high_overlap_nonlinear",
+      "overlap_rate": 0.35,
+      "nonlinear_mode": "on",
+      "signal_scale": 0.6,
+      "confounding": "moderate"
+    }
+  ],
+  "outputs": {
+    "emit_wgcna_matrix": true,
+    "emit_gnvae_folds": true,
+    "gnvae_n_folds": 10
+  }
+}

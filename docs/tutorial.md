@@ -106,37 +106,42 @@ bsvae-networks latent-analysis \
 
 ## 4. Simulation Benchmark
 
-Generate a synthetic dataset with known module labels:
+Generate a publication-style scenario grid:
 
 ```bash
-bsvae-simulate generate \
-  --output data/sim_expr.csv \
-  --n-features 500 \
-  --n-samples 200 \
-  --n-modules 10 \
-  --save-ground-truth data/sim_truth.csv
+bsvae-simulate init-config --output sim.yaml
+
+bsvae-simulate generate-grid \
+  --config sim.yaml \
+  --outdir results/sim_pub_v1 \
+  --reps 30 \
+  --base-seed 13
+
+bsvae-simulate validate-grid --grid-dir results/sim_pub_v1
 ```
 
-Train on simulated data:
+Run one scenario replicate through BSVAE:
 
 ```bash
 bsvae-train sim_run \
-  --dataset data/sim_expr.csv \
-  --n-modules 10 \
+  --dataset results/sim_pub_v1/scenarios/S001__confounding-none__n_samples-100__nonlinear_mode-off__overlap_rate-0.0__signal_scale-0.4/rep_000/expr/features_x_samples.tsv.gz \
+  --n-modules 20 \
   --epochs 50
 ```
 
-Benchmark recovery:
+Benchmark hard-module recovery:
 
 ```bash
 bsvae-simulate benchmark \
-  --dataset data/sim_expr.csv \
-  --ground-truth data/sim_truth.csv \
+  --dataset results/sim_pub_v1/scenarios/S001__confounding-none__n_samples-100__nonlinear_mode-off__overlap_rate-0.0__signal_scale-0.4/rep_000/expr/features_x_samples.tsv.gz \
+  --ground-truth results/sim_pub_v1/scenarios/S001__confounding-none__n_samples-100__nonlinear_mode-off__overlap_rate-0.0__signal_scale-0.4/rep_000/truth/modules_hard.csv \
   --model-path results/sim_run \
   --output results/sim_run/sim_metrics.json
 ```
 
-Inspect `sim_metrics.json` for `ari` and `nmi`.
+For WGCNA, use `expr/samples_x_features.tsv.gz`.
+For GNVAE, use `expr/features_x_samples.tsv.gz` (or `gnvae/fold_*/X_train.tsv.gz`).
+`method_inputs.json` provides canonical paths for all three methods.
 
 ## 5. Troubleshooting
 

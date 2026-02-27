@@ -34,7 +34,7 @@ def simulate_omics_data(
     within_module_correlation: float = 0.8,
     between_module_correlation: float = 0.0,
     noise_std: float = 0.2,
-    seed: int = 42,
+    seed: int = 13,
 ) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """
     Simulate omics data with block-diagonal covariance structure.
@@ -54,7 +54,7 @@ def simulate_omics_data(
     noise_std : float
         Standard deviation of independent feature noise. Default: 0.2.
     seed : int
-        Random seed. Default: 42.
+        Random seed. Default: 13.
 
     Returns
     -------

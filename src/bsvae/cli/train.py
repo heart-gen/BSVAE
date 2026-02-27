@@ -94,6 +94,10 @@ def parse_args(cli_args=None):
                    help="α: margin multiplier for separation loss (default: 2.0).")
     p.add_argument("--bal-strength", type=float, default=0.01,
                    help="λ_bal: γ-usage balance loss weight (default: 0.01).")
+    p.add_argument("--bal-ema-blend", type=float, default=0.5,
+                   help="Balance loss blend α between EMA and batch (default: 0.5).")
+    p.add_argument("--pi-entropy-strength", type=float, default=0.0,
+                   help="λ_pi: KL(uniform || π) penalty weight (default: 0.0).")
     p.add_argument("--hier-strength", type=float, default=0.0,
                    help="λ_hier: hierarchical isoform loss weight (default: 0.0=disabled).")
     p.add_argument("--tx2gene", type=str, default=None,
@@ -166,6 +170,8 @@ def main(args):
         sep_strength=args.sep_strength,
         sep_alpha=args.sep_alpha,
         bal_strength=args.bal_strength,
+        pi_entropy_strength=args.pi_entropy_strength,
+        bal_ema_blend=args.bal_ema_blend,
         hier_strength=args.hier_strength,
     )
     warmup_loss = WarmupLoss(

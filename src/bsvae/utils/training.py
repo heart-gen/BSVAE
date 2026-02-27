@@ -211,6 +211,12 @@ class Trainer:
     def _train_iteration(self, x, storer, epoch, in_warmup, gmm_weight, feature_idx=None):
         recon_x, mu, logvar, z, gamma = self.model(x)
 
+        # Log soft usage (mean gamma) per component for this batch
+        if storer is not None and gamma is not None:
+            usage = gamma.mean(dim=0).detach().cpu().tolist()
+            for k, val in enumerate(usage):
+                storer.setdefault(f"usage_soft_{k}", []).append(float(val))
+
         if in_warmup:
             loss = self.warmup_loss_f(x, recon_x, mu, logvar, storer=storer, epoch=epoch)
             # Accumulate μ for K-means init
