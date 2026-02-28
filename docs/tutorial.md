@@ -31,21 +31,7 @@ Sanity checks:
 
 ## 2. Production Run
 
-Goal: run a longer job with checkpointing and explicit settings.
-
-```bash
-bsvae-train study_prod \
-  --dataset data/expression.csv \
-  --epochs 150 \
-  --batch-size 256 \
-  --lr 5e-4 \
-  --checkpoint-every 10 \
-  --n-modules 24 \
-  --latent-dim 32 \
-  --hidden-dims "[512, 256, 128]" \
-  --beta 1.0 \
-  --free-bits 0.5
-```
+Goal: select K robustly, then train the final production model.
 
 ### 2.1 Tuning the number of modules (K)
 
@@ -85,7 +71,7 @@ Recommended checks during/after run:
 
 - loss is finite in logs
 - checkpoints appear as `model-<epoch>.pt`
-- final artifacts exist in `results/study_prod/`
+- final artifacts exist in `results/sweep_prod/final_k<K>/`
 
 ## 3. Post-Training Analysis
 
@@ -93,25 +79,25 @@ Recommended checks during/after run:
 
 ```bash
 bsvae-networks extract-networks \
-  --model-path results/study_prod \
+  --model-path results/sweep_prod/final_k16 \
   --dataset data/expression.csv \
-  --output-dir results/study_prod/networks \
+  --output-dir results/sweep_prod/final_k16/networks \
   --methods mu_cosine gamma_knn \
   --top-k 50
 ```
 
 Expected outputs:
 
-- `results/study_prod/networks/mu_cosine_adjacency.npz`
-- `results/study_prod/networks/gamma_knn_adjacency.npz` (if selected)
+- `results/sweep_prod/final_k16/networks/mu_cosine_adjacency.npz`
+- `results/sweep_prod/final_k16/networks/gamma_knn_adjacency.npz` (if selected)
 
 ### 3.2 Extract modules
 
 ```bash
 bsvae-networks extract-modules \
-  --model-path results/study_prod \
+  --model-path results/sweep_prod/final_k16 \
   --dataset data/expression.csv \
-  --output-dir results/study_prod/modules \
+  --output-dir results/sweep_prod/final_k16/modules \
   --soft-eigengenes \
   --expr data/expression.csv
 ```
@@ -126,15 +112,15 @@ Expected outputs:
 
 ```bash
 bsvae-networks export-latents \
-  --model-path results/study_prod \
+  --model-path results/sweep_prod/final_k16 \
   --dataset data/expression.csv \
-  --output results/study_prod/latents.npz
+  --output results/sweep_prod/final_k16/latents.npz
 
 bsvae-networks latent-analysis \
-  --model-path results/study_prod \
+  --model-path results/sweep_prod/final_k16 \
   --dataset data/expression.csv \
-  --output-dir results/study_prod/latent_analysis \
-  --kmeans-k 10 \
+  --output-dir results/sweep_prod/final_k16/latent_analysis \
+  --kmeans-k 16 \
   --umap
 ```
 

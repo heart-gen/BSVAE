@@ -37,6 +37,7 @@ pip install -e .
 - `bsvae-train`
 - `bsvae-networks`
 - `bsvae-simulate`
+- `bsvae-sweep-k`
 
 ## Quickstart
 
@@ -59,25 +60,29 @@ bsvae-sweep-k sweep1 \
 The selected model is retrained on the full dataset at:
 `results/sweep1/final_k<K>/`.
 
-### 1. Train
+### 1. Select K and train final model
 
 Input matrix must be `features x samples` with feature IDs in row index and sample IDs in columns.
 
 ```bash
-bsvae-train exp1 \
+bsvae-sweep-k exp1 \
   --dataset data/expression.csv \
-  --epochs 100 \
-  --n-modules 20 \
-  --latent-dim 32
+  --k-grid 8,12,16,24,32 \
+  --sweep-epochs 60 \
+  --stability-reps 5 \
+  --val-frac 0.1
 ```
+
+Use the selected model directory for downstream steps:
+`results/exp1/final_k<K>/` (example below uses `final_k16`).
 
 ### 2. Extract networks
 
 ```bash
 bsvae-networks extract-networks \
-  --model-path results/exp1 \
+  --model-path results/exp1/final_k16 \
   --dataset data/expression.csv \
-  --output-dir results/exp1/networks \
+  --output-dir results/exp1/final_k16/networks \
   --methods mu_cosine gamma_knn
 ```
 
@@ -85,18 +90,18 @@ bsvae-networks extract-networks \
 
 ```bash
 bsvae-networks extract-modules \
-  --model-path results/exp1 \
+  --model-path results/exp1/final_k16 \
   --dataset data/expression.csv \
-  --output-dir results/exp1/modules
+  --output-dir results/exp1/final_k16/modules
 ```
 
 ### 4. Export latents
 
 ```bash
 bsvae-networks export-latents \
-  --model-path results/exp1 \
+  --model-path results/exp1/final_k16 \
   --dataset data/expression.csv \
-  --output results/exp1/latents.npz
+  --output results/exp1/final_k16/latents.npz
 ```
 
 ### 5. Simulate and benchmark
@@ -111,8 +116,8 @@ bsvae-simulate generate \
 bsvae-simulate benchmark \
   --dataset data/sim_expr.csv \
   --ground-truth data/sim_truth.csv \
-  --model-path results/exp1 \
-  --output results/exp1/sim_metrics.json
+  --model-path results/exp1/final_k16 \
+  --output results/exp1/final_k16/sim_metrics.json
 ```
 
 Scenario grid for publication-style benchmarking:
@@ -161,7 +166,7 @@ The loader supports:
 from bsvae.utils.modelIO import load_model
 from bsvae.networks.extract_networks import create_dataloader_from_expression, run_extraction
 
-model = load_model("results/exp1", is_gpu=False)
+model = load_model("results/exp1/final_k16", is_gpu=False)
 loader, feature_ids, _ = create_dataloader_from_expression("data/expression.csv", batch_size=128)
 results = run_extraction(model, loader, feature_ids=feature_ids, methods=["mu_cosine"], top_k=50)
 print(results[0].method, results[0].adjacency.shape)
