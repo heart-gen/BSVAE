@@ -25,15 +25,15 @@ bsvae-train pilot_run \
 
 `--n-modules` (K) sets the expected number of modules.
 If you do not know K, run a small sweep and compare stability/interpretability.
+Recommended approach uses `bsvae-sweep-k` with stability replicates.
 
 ```bash
-for k in 6 8 12 16; do
-  bsvae-train pilot_run_k${k} \
-    --dataset data/expression.csv \
-    --epochs 30 \
-    --n-modules ${k} \
-    --latent-dim 16
-done
+bsvae-sweep-k sweep_pilot \
+  --dataset data/expression.csv \
+  --k-grid 6,8,12,16 \
+  --sweep-epochs 30 \
+  --stability-reps 3 \
+  --val-frac 0.1
 ```
 
 ## 3. Extract a network

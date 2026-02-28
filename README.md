@@ -42,6 +42,23 @@ pip install -e .
 
 For a full walkthrough (minimal run, production run, post-training analysis, simulation benchmark, troubleshooting, and migration), see `docs/tutorial.md`.
 
+### Tune K (Recommended)
+
+`--n-modules` (K) sets the expected number of modules. Recommended approach is
+`bsvae-sweep-k` with stability replicates:
+
+```bash
+bsvae-sweep-k sweep1 \
+  --dataset data/expression.csv \
+  --k-grid 8,12,16,24,32 \
+  --sweep-epochs 60 \
+  --stability-reps 5 \
+  --val-frac 0.1
+```
+
+The selected model is retrained on the full dataset at:
+`results/sweep1/final_k<K>/`.
+
 ### 1. Train
 
 Input matrix must be `features x samples` with feature IDs in row index and sample IDs in columns.

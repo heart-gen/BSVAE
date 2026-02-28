@@ -23,27 +23,28 @@ bsvae-train study1 \
 ### Tune number of modules (K)
 
 `--n-modules` (K) sets the expected number of GMM components/modules.
-This should be tuned per dataset.
-
-Quick sweep:
+This should be tuned per dataset. Recommended approach is `bsvae-sweep-k`
+with stability mode to avoid overfitting K.
 
 ```bash
-for k in 8 12 16 24 32; do
-  bsvae-train study1_k${k} \
-    --dataset data/expression.csv \
-    --epochs 60 \
-    --n-modules ${k} \
-    --latent-dim 32
-done
+bsvae-sweep-k sweep1 \
+  --dataset data/expression.csv \
+  --k-grid 8,12,16,24,32 \
+  --sweep-epochs 60 \
+  --stability-reps 5 \
+  --val-frac 0.1
 ```
+
+The selected model is retrained on the full dataset at:
+`results/sweep1/final_k<K>/`.
 
 Optional downstream check (cluster `mu`):
 
 ```bash
 bsvae-networks latent-analysis \
-  --model-path results/study1_k16 \
+  --model-path results/sweep1/final_k16 \
   --dataset data/expression.csv \
-  --output-dir results/study1_k16/latent_analysis \
+  --output-dir results/sweep1/final_k16/latent_analysis \
   --kmeans-k 16 \
   --umap
 ```

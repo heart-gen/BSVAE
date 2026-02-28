@@ -52,32 +52,31 @@ bsvae-train study_prod \
 `--n-modules` (K) sets the expected number of latent modules/clusters in the GMM prior.
 This is a key hyperparameter and should be tuned for each dataset.
 
-Practical guidance:
+Recommended approach: use `bsvae-sweep-k` with stability mode to avoid overfitting K.
+It holds out a feature split and, when `--stability-reps > 1`, selects K by mean
+pairwise ARI across replicate runs.
 
-- Start with a rough biological expectation (e.g., known cell states or pathways).
-- Sweep a small grid (e.g., `8, 12, 16, 24, 32`) and compare stability/interpretability.
-- If you have ground truth, use ARI/NMI from `bsvae-simulate benchmark` or your own metrics.
-
-Example sweep (shell):
+Example sweep (recommended):
 
 ```bash
-for k in 8 12 16 24 32; do
-  bsvae-train study_prod_k${k} \
-    --dataset data/expression.csv \
-    --epochs 100 \
-    --batch-size 256 \
-    --n-modules ${k} \
-    --latent-dim 32
-done
+bsvae-sweep-k sweep_prod \
+  --dataset data/expression.csv \
+  --k-grid 8,12,16,24,32 \
+  --sweep-epochs 60 \
+  --stability-reps 5 \
+  --val-frac 0.1
 ```
 
-Example downstream check (latent clustering on `mu`):
+The selected model is retrained on the full dataset at:
+`results/sweep_prod/final_k<K>/`.
+
+Optional downstream check (latent clustering on `mu`):
 
 ```bash
 bsvae-networks latent-analysis \
-  --model-path results/study_prod_k16 \
+  --model-path results/sweep_prod/final_k16 \
   --dataset data/expression.csv \
-  --output-dir results/study_prod_k16/latent_analysis \
+  --output-dir results/sweep_prod/final_k16/latent_analysis \
   --kmeans-k 16 \
   --umap
 ```
