@@ -55,6 +55,12 @@ class Trainer:
         If None, a default WarmupLoss is constructed.
     gene_groups : dict or None
         For hierarchical loss (gene_id → list of feature dataset indices).
+    collapse_threshold : float
+        Relative usage floor; a component is considered dead if its
+        epoch-averaged soft usage falls below threshold/K. Default: 0.5.
+    collapse_noise_scale : float
+        Perturbation magnitude for dead-component revival expressed as a
+        multiple of the best component's σ. Default: 0.5.
     """
 
     def __init__(
@@ -72,6 +78,8 @@ class Trainer:
         mu_buffer_size: int = 50_000,
         warmup_loss_f: Optional[WarmupLoss] = None,
         gene_groups: Optional[Dict] = None,
+        collapse_threshold: float = 0.5,
+        collapse_noise_scale: float = 0.5,
     ):
         self.device = device
         self.model = model.to(device)
@@ -86,6 +94,8 @@ class Trainer:
         self.is_progress_bar = is_progress_bar
         self.logger = logger
         self._gmm_prior_trainable = True
+        self.collapse_threshold = collapse_threshold
+        self.collapse_noise_scale = collapse_noise_scale
 
         self.warmup_loss_f = warmup_loss_f or WarmupLoss(
             beta=gmm_loss_f.beta,
@@ -131,8 +141,8 @@ class Trainer:
             gmm_weight = self._gmm_weight(epoch)
 
             # K-means warm-start at the transition point
-            if epoch == self.warmup_epochs and self._mu_buffer:
-                self._kmeans_init()
+            if epoch == self.warmup_epochs:
+                self._kmeans_init(data_loader)
 
             # Optionally freeze GMM prior params for early GMM epochs
             self._maybe_freeze_gmm_prior(epoch)
@@ -148,6 +158,9 @@ class Trainer:
             )
             self.losses_logger.log(epoch, storer)
 
+            if not in_warmup:
+                self._maybe_reinit_collapsed_components(epoch, storer)
+
             if checkpoint_every and (epoch + 1) % checkpoint_every == 0:
                 torch.save(
                     self.model.state_dict(),
@@ -161,6 +174,46 @@ class Trainer:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _maybe_reinit_collapsed_components(self, epoch: int, storer: dict) -> None:
+        """Gradient-free revival of dead GMM components (splitting).
+
+        For each component whose epoch-averaged soft usage falls below
+        ``collapse_threshold / K``, reinitialise its centroid by copying
+        the most-used centroid and adding a small random perturbation.
+        All writes are performed inside ``torch.no_grad()``.
+        """
+        gmm = self.model.gmm_prior
+        K = gmm.K
+
+        # Epoch-averaged soft usage per component
+        usage = []
+        for k in range(K):
+            vals = storer.get(f"usage_soft_{k}", [])
+            usage.append(sum(vals) / len(vals) if vals else 0.0)
+
+        threshold = self.collapse_threshold / K
+        dead = [k for k, u in enumerate(usage) if u < threshold]
+        if not dead:
+            return
+
+        best = int(max(range(K), key=lambda k: usage[k]))
+
+        with torch.no_grad():
+            sigma2_best = gmm.sigma2_k[best].item()
+            noise_std = (sigma2_best ** 0.5) * self.collapse_noise_scale
+            D = gmm.D
+
+            for k in dead:
+                noise = torch.randn(D, device=gmm.mu_k.device) * noise_std
+                gmm.mu_k.data[k] = gmm.mu_k.data[best] + noise
+                gmm.log_sigma2_k.data[k] = gmm.log_sigma2_k.data[best]
+                gmm.log_pi_unnorm.data[k] = gmm.log_pi_unnorm.data[best]
+                gmm.rho_ema[k] = 1.0 / K
+                self.logger.info(
+                    "Epoch %d | component %d dead (usage=%.4f); revived near component %d",
+                    epoch + 1, k, usage[k], best,
+                )
 
     def _gmm_weight(self, epoch: int) -> float:
         """Transition ramp: 0 during warmup, linear 0→1 during transition, 1 after."""
@@ -184,17 +237,42 @@ class Trainer:
             p.requires_grad_(should_train)
         self._gmm_prior_trainable = should_train
 
-    def _kmeans_init(self):
-        """Run K-means on the accumulated μ buffer to warm-start the GMM prior."""
-        self.logger.info(
-            "Running K-means init on %d μ samples...", self._mu_buffer_count
+    def _kmeans_init(self, data_loader):
+        """Warm-start GMM prior via K-means on fresh encoder means.
+
+        Runs a full forward pass over the entire dataset with the current
+        (end-of-warmup) encoder to obtain up-to-date μ representations,
+        then calls ``gmm_prior.kmeans_init_``.  Using fresh means rather
+        than the accumulated buffer avoids poisoning the K-means with
+        stale representations from early warmup epochs.
+
+        A temporary DataLoader without drop_last / shuffle is created so
+        that every feature is seen exactly once, regardless of the training
+        loader's batch-drop policy.
+        """
+        import torch.utils.data as tud
+        # Full-coverage, no-shuffle loader over the same dataset
+        init_loader = tud.DataLoader(
+            data_loader.dataset,
+            batch_size=data_loader.batch_size or 256,
+            shuffle=False,
+            drop_last=False,
         )
-        mu_all = torch.cat(self._mu_buffer, dim=0)
-        if mu_all.shape[0] > self.mu_buffer_size:
-            idx = torch.randperm(mu_all.shape[0])[: self.mu_buffer_size]
-            mu_all = mu_all[idx]
+        self.logger.info("Computing fresh encoder means for K-means init...")
+        self.model.eval()
+        mu_parts = []
+        with torch.no_grad():
+            for batch in init_loader:
+                x = batch[0] if isinstance(batch, (list, tuple)) else batch
+                x = x.to(self.device)
+                mu, _ = self.model.encoder(x)
+                mu_parts.append(mu.cpu())
+        self.model.train()
+
+        mu_all = torch.cat(mu_parts, dim=0)
+        self.logger.info("Running K-means init on %d fresh μ samples...", mu_all.shape[0])
         self.model.gmm_prior.kmeans_init_(mu_all)
-        # Free the buffer memory
+        # Free the stale buffer
         self._mu_buffer = []
         self._mu_buffer_count = 0
         self.logger.info("GMM prior initialised; switching to Phase 2.")

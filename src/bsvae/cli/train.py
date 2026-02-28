@@ -68,6 +68,10 @@ def parse_args(cli_args=None):
                    help="GMM loss ramp-in length (default: 10).")
     p.add_argument("--freeze-gmm-epochs", type=int, default=0,
                    help="Freeze GMM prior params for first N GMM epochs (default: 0).")
+    p.add_argument("--collapse-threshold", type=float, default=0.5,
+                   help="Relative usage floor; component revived if usage < threshold/K (default: 0.5).")
+    p.add_argument("--collapse-noise-scale", type=float, default=0.5,
+                   help="Noise scale for dead-component revival (sigma multiples, default: 0.5).")
 
     # --- Model architecture ---
     p.add_argument("--n-modules", "-K", type=int, default=20,
@@ -199,6 +203,8 @@ def main(args):
         transition_epochs=args.transition_epochs,
         freeze_gmm_epochs=args.freeze_gmm_epochs,
         gene_groups=gene_groups,
+        collapse_threshold=args.collapse_threshold,
+        collapse_noise_scale=args.collapse_noise_scale,
     )
     trainer(train_loader, epochs=args.epochs, checkpoint_every=args.checkpoint_every)
 

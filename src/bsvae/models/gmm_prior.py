@@ -267,12 +267,12 @@ class GaussianMixturePrior(nn.Module):
         mu_samples : torch.Tensor, shape (N, D)
             Accumulated encoder means from Phase 1 training.
         """
-        from sklearn.cluster import MiniBatchKMeans
+        from sklearn.cluster import KMeans
 
         K = self.K
         X = mu_samples.cpu().numpy()
 
-        km = MiniBatchKMeans(n_clusters=K, random_state=0, n_init=3)
+        km = KMeans(n_clusters=K, random_state=0, n_init=10)
         labels = km.fit_predict(X)
         centers = torch.tensor(km.cluster_centers_, dtype=torch.float32)
 
