@@ -13,6 +13,7 @@ BSVAE is a PyTorch package centered on `GMMModuleVAE`, a Gaussian-mixture variat
 - Extracts feature-feature networks from trained models (`bsvae-networks`)
 - Extracts module assignments and optional eigengenes (`bsvae-networks`)
 - Exports latents (`mu`, `logvar`, `gamma`) as `.npz`
+- Runs latent analysis (UMAP/t-SNE, clustering, covariate correlation) (`bsvae-networks latent-analysis`)
 - Simulates synthetic datasets and benchmarks module recovery (`bsvae-simulate`)
 
 ## Installation

@@ -21,6 +21,21 @@ bsvae-train pilot_run \
   --latent-dim 16
 ```
 
+### 2.1 Tune number of modules (K)
+
+`--n-modules` (K) sets the expected number of modules.
+If you do not know K, run a small sweep and compare stability/interpretability.
+
+```bash
+for k in 6 8 12 16; do
+  bsvae-train pilot_run_k${k} \
+    --dataset data/expression.csv \
+    --epochs 30 \
+    --n-modules ${k} \
+    --latent-dim 16
+done
+```
+
 ## 3. Extract a network
 
 ```bash

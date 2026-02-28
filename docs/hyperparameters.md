@@ -26,6 +26,9 @@ Those files are retained only as compatibility placeholders and are not parsed b
 - `--checkpoint-every` (default `10`)
 - `--warmup-epochs` (default `20`)
 - `--transition-epochs` (default `10`)
+- `--freeze-gmm-epochs` (default `0`)
+- `--collapse-threshold` (default `0.5`)
+- `--collapse-noise-scale` (default `0.5`)
 
 ## Loss terms
 
@@ -37,6 +40,8 @@ Those files are retained only as compatibility placeholders and are not parsed b
 - `--sep-strength` (default `0.1`)
 - `--sep-alpha` (default `2.0`)
 - `--bal-strength` (default `0.01`)
+- `--bal-ema-blend` (default `0.5`)
+- `--pi-entropy-strength` (default `0.0`)
 - `--hier-strength` (default `0.0`)
 - `--tx2gene` (required when hierarchical loss is enabled)
 

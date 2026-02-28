@@ -20,6 +20,34 @@ bsvae-train study1 \
   --latent-dim 32
 ```
 
+### Tune number of modules (K)
+
+`--n-modules` (K) sets the expected number of GMM components/modules.
+This should be tuned per dataset.
+
+Quick sweep:
+
+```bash
+for k in 8 12 16 24 32; do
+  bsvae-train study1_k${k} \
+    --dataset data/expression.csv \
+    --epochs 60 \
+    --n-modules ${k} \
+    --latent-dim 32
+done
+```
+
+Optional downstream check (cluster `mu`):
+
+```bash
+bsvae-networks latent-analysis \
+  --model-path results/study1_k16 \
+  --dataset data/expression.csv \
+  --output-dir results/study1_k16/latent_analysis \
+  --kmeans-k 16 \
+  --umap
+```
+
 ## Post-training outputs
 
 `results/study1/` contains:

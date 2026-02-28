@@ -47,6 +47,41 @@ bsvae-train study_prod \
   --free-bits 0.5
 ```
 
+### 2.1 Tuning the number of modules (K)
+
+`--n-modules` (K) sets the expected number of latent modules/clusters in the GMM prior.
+This is a key hyperparameter and should be tuned for each dataset.
+
+Practical guidance:
+
+- Start with a rough biological expectation (e.g., known cell states or pathways).
+- Sweep a small grid (e.g., `8, 12, 16, 24, 32`) and compare stability/interpretability.
+- If you have ground truth, use ARI/NMI from `bsvae-simulate benchmark` or your own metrics.
+
+Example sweep (shell):
+
+```bash
+for k in 8 12 16 24 32; do
+  bsvae-train study_prod_k${k} \
+    --dataset data/expression.csv \
+    --epochs 100 \
+    --batch-size 256 \
+    --n-modules ${k} \
+    --latent-dim 32
+done
+```
+
+Example downstream check (latent clustering on `mu`):
+
+```bash
+bsvae-networks latent-analysis \
+  --model-path results/study_prod_k16 \
+  --dataset data/expression.csv \
+  --output-dir results/study_prod_k16/latent_analysis \
+  --kmeans-k 16 \
+  --umap
+```
+
 Recommended checks during/after run:
 
 - loss is finite in logs
