@@ -1,0 +1,17 @@
+{
+  "family": "nb_latent_modules",
+  "n_features": 300,
+  "n_modules": 10,
+  "module_size_distribution": "long_tail",
+  "hub_fraction": 0.05,
+  "hub_multiplier": 2.0,
+  "baseline_log_mean": 2.638,
+  "baseline_log_sd": 1.601,
+  "libsize_log_sd": 0.364,
+  "dispersion": "high",
+  "signal_scale": 1.922,
+  "overlap_rate": 0.0,
+  "nonlinear_mode": "off",
+  "dropout_mode": "off",
+  "truth_edge_top_k": 25
+}
