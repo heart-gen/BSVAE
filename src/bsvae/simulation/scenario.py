@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import copy
-import itertools
 import json
-from dataclasses import dataclass
+import itertools
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 import numpy as np
