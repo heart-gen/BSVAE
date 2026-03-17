@@ -30,6 +30,68 @@ import torch.nn.functional as F
 # Standalone helpers (kept for backward compatibility / unit tests)
 # ---------------------------------------------------------------------------
 
+def pairwise_corr_loss(x: torch.Tensor, recon_x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Pairwise Pearson correlation preservation loss (reconstruction space).
+
+    Computes the B×B Pearson correlation matrices of the input batch and the
+    reconstructed batch, then returns their MSE.  Gradient flows through the
+    decoder back to the encoder.
+
+    Parameters
+    ----------
+    x       : (B, N) — input profiles (z-scored if normalize_input=True)
+    recon_x : (B, N) — reconstructed profiles (same space as x)
+    eps     : float  — denominator floor for L2-normalisation
+
+    Returns
+    -------
+    loss : scalar tensor — MSE between the two B×B correlation matrices
+    """
+    x_c = x - x.mean(dim=1, keepdim=True)
+    r_c = recon_x - recon_x.mean(dim=1, keepdim=True)
+    x_n = F.normalize(x_c, p=2, dim=1, eps=eps)   # (B, N)
+    r_n = F.normalize(r_c, p=2, dim=1, eps=eps)    # (B, N)
+    C_x = x_n @ x_n.T   # (B, B)
+    C_r = r_n @ r_n.T   # (B, B)
+    return F.mse_loss(C_r, C_x.detach())
+
+
+def latent_corr_loss(x: torch.Tensor, mu: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Latent-space correlation alignment loss.
+
+    Aligns pairwise cosine similarities in encoder μ-space with Pearson
+    correlations in input space.  Gradient flows directly through μ to the
+    encoder weights, making it a more direct signal than the reconstruction-
+    space version.
+
+    For features i, j that co-vary in expression (r_{ij} ≈ 0.8), this loss
+    pushes their latent means μ_i, μ_j to be similarly oriented — exactly
+    the structure needed for module recovery.
+
+    Parameters
+    ----------
+    x   : (B, N) — input profiles (z-scored if normalize_input=True)
+    mu  : (B, D) — encoder means
+    eps : float  — L2-normalisation floor
+
+    Returns
+    -------
+    loss : scalar tensor — MSE between B×B input correlation and μ cosine-similarity matrices
+    """
+    # Input Pearson correlations (target, no gradient needed)
+    x_c = x - x.mean(dim=1, keepdim=True)
+    x_n = F.normalize(x_c, p=2, dim=1, eps=eps)
+    C_x = x_n @ x_n.T                             # (B, B) — detached target
+
+    # Latent cosine similarities (learned)
+    mu_n = F.normalize(mu, p=2, dim=1, eps=eps)
+    S_mu = mu_n @ mu_n.T                           # (B, B)
+
+    return F.mse_loss(S_mu, C_x.detach())
+
+
 def gaussian_nll(x, recon_x, log_var=None, reduction="mean"):
     """Gaussian negative log-likelihood per feature."""
     if log_var is None:
@@ -251,6 +313,26 @@ class GMMVAELoss(nn.Module):
         Blend factor for EMA vs batch usage in balance loss. Default: 0.5.
     hier_strength : float
         λ_hier — weight for hierarchical loss. Default: 0.0.
+    normalize_input : bool
+        If True, z-score x before computing the reconstruction loss so the
+        target space matches GMMModuleVAE(normalize_input=True) output.
+        Must be set consistently with the model flag. Default: False.
+    masked_recon : bool
+        If True, compute reconstruction loss only on originally non-zero
+        entries of x (mask = x > 0). Reduces zero-inflation dominance in
+        sparse count data. Applied to raw x before any normalization.
+        Default: False.
+    corr_strength : float
+        λ_corr — weight for reconstruction-space pairwise correlation loss.
+        Penalises MSE between the B×B Pearson correlation matrices of inputs
+        and reconstructions. Gradient flows through the decoder to the encoder.
+        Recommended range: 0.05–0.2 for NB count data. Default: 0.0 (disabled).
+    latent_corr_strength : float
+        λ_lcorr — weight for latent-space correlation alignment loss.
+        Aligns cosine similarities of encoder μ with Pearson correlations in
+        input space.  Gradient flows directly to the encoder, bypassing the
+        decoder.  More direct than corr_strength; recommended range: 0.1–1.0
+        for NB count data with normalize_input=True. Default: 0.0 (disabled).
     """
 
     def __init__(
@@ -267,6 +349,10 @@ class GMMVAELoss(nn.Module):
         pi_entropy_strength: float = 0.0,
         bal_ema_blend: float = 0.5,
         hier_strength: float = 0.0,
+        normalize_input: bool = False,
+        masked_recon: bool = False,
+        corr_strength: float = 0.0,
+        latent_corr_strength: float = 0.0,
     ):
         super().__init__()
         self.beta = beta
@@ -281,6 +367,10 @@ class GMMVAELoss(nn.Module):
         self.pi_entropy_strength = pi_entropy_strength
         self.bal_ema_blend = bal_ema_blend
         self.hier_strength = hier_strength
+        self.normalize_input = normalize_input
+        self.masked_recon = masked_recon
+        self.corr_strength = corr_strength
+        self.latent_corr_strength = latent_corr_strength
 
     def get_beta_for_epoch(self, epoch: int) -> float:
         """Compute effective β from annealing schedule (ported from BaseLoss)."""
@@ -330,7 +420,19 @@ class GMMVAELoss(nn.Module):
         loss : scalar tensor
         """
         # --- Reconstruction ---
-        recon_loss = F.mse_loss(recon_x, x, reduction="mean")
+        # Mask based on raw x (before any normalization) for masked_recon.
+        mask = (x > 0).float() if self.masked_recon else None
+        # Normalize target to match model's output space if normalize_input=True.
+        x_target = x
+        if self.normalize_input:
+            mu_x = x.mean(dim=-1, keepdim=True)
+            sigma_x = x.std(dim=-1, keepdim=True).clamp(min=1e-6)
+            x_target = (x - mu_x) / sigma_x
+        if mask is not None:
+            sq_err = (recon_x - x_target) ** 2
+            recon_loss = (sq_err * mask).sum() / mask.sum().clamp(min=1.0)
+        else:
+            recon_loss = F.mse_loss(recon_x, x_target, reduction="mean")
 
         # --- KL (VaDE) ---
         prior = model.gmm_prior
@@ -359,6 +461,16 @@ class GMMVAELoss(nn.Module):
         pi_entropy = -(prior.pi * prior.log_pi).sum()
         pi_entropy_loss = (math.log(float(prior.K)) - pi_entropy)
 
+        # --- Reconstruction-space correlation preservation ---
+        corr_loss = x.new_zeros(1).squeeze()
+        if self.corr_strength > 0.0:
+            corr_loss = pairwise_corr_loss(x_target, recon_x)
+
+        # --- Latent-space correlation alignment ---
+        latent_corr = x.new_zeros(1).squeeze()
+        if self.latent_corr_strength > 0.0:
+            latent_corr = latent_corr_loss(x_target, mu)
+
         # --- Hierarchical ---
         hier_loss = x.new_zeros(1).squeeze()
         if self.hier_strength > 0.0 and gene_groups:
@@ -372,6 +484,8 @@ class GMMVAELoss(nn.Module):
             # Keep balance and pi-entropy active during transition (no gmm_weight scaling)
             + self.bal_strength * bal_loss
             + self.pi_entropy_strength * pi_entropy_loss
+            + self.corr_strength * corr_loss
+            + self.latent_corr_strength * latent_corr
             + self.hier_strength * hier_loss
         )
 
@@ -383,6 +497,8 @@ class GMMVAELoss(nn.Module):
             storer.setdefault("bal_loss", []).append(bal_loss.item())
             storer.setdefault("pi_entropy", []).append(pi_entropy.item())
             storer.setdefault("pi_entropy_loss", []).append(pi_entropy_loss.item())
+            storer.setdefault("corr_loss", []).append(corr_loss.item())
+            storer.setdefault("latent_corr_loss", []).append(latent_corr.item())
             storer.setdefault("hier_loss", []).append(hier_loss.item())
             storer.setdefault("gmm_weight", []).append(gmm_weight)
             storer.setdefault("loss", []).append(loss.item())

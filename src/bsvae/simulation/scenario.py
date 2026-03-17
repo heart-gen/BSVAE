@@ -173,7 +173,21 @@ def _simulate_counts(
         chosen = rng.choice(members, size=min(n_h, len(members)), replace=False)
         hub_by_module[k] = set(int(i) for i in chosen)
 
-    z_lin = rng.normal(0.0, 1.0, size=(n_samples, n_modules))
+    # Correlated latent factors: group modules into meta-modules; within each
+    # meta-module, factors share a common component (factor_corr = rho).
+    # Biologically motivated: transcription factor programs co-activate groups
+    # of co-expression modules (e.g., immune activation → multiple immune modules).
+    factor_corr = float(generator_cfg.get("factor_corr", 0.0))
+    if factor_corr > 0.0:
+        n_meta = max(2, n_modules // 4)
+        meta_assign = rng.integers(0, n_meta, size=n_modules)      # (K,) — module→meta-group
+        z_meta  = rng.normal(0.0, 1.0, size=(n_samples, n_meta))   # shared component
+        z_indep = rng.normal(0.0, 1.0, size=(n_samples, n_modules)) # private component
+        z_lin = (np.sqrt(1.0 - factor_corr) * z_indep
+                 + np.sqrt(factor_corr) * z_meta[:, meta_assign])
+    else:
+        z_lin = rng.normal(0.0, 1.0, size=(n_samples, n_modules))
+
     if nonlinear_mode == "on":
         z_nl = np.zeros_like(z_lin)
         z_nl[:, 0::2] = np.tanh(z_lin[:, 0::2])
@@ -188,7 +202,9 @@ def _simulate_counts(
             scale = signal_scale
             if g in hub_by_module[k]:
                 scale *= hub_mult
-            W[g, k] = rng.normal(0.0, scale)
+            # Use abs so all module members co-vary in the same direction,
+            # ensuring positive within-module correlation (co-expression).
+            W[g, k] = abs(rng.normal(0.0, scale))
     W += rng.normal(0.0, 0.02, size=W.shape)
 
     alpha = rng.normal(
@@ -222,14 +238,50 @@ def _simulate_counts(
     eta = eta + condition[:, None] * beta_cond[None, :]
     eta = eta + batch_eff[batch][:, None]
 
+    # Cell-type composition confounding: bulk RNA-seq samples are mixtures of
+    # cell types whose proportions vary between samples, creating strong
+    # co-expression signals unrelated to biological modules.
+    # Model: additive in log-count space (linear mixture approximation).
+    celltype_confound = generator_cfg.get("celltype_confound", "none")
+    if celltype_confound != "none":
+        n_ct         = int(generator_cfg.get("n_celltypes", 3))
+        ct_effect_sd = 0.4 if celltype_confound == "moderate" else 0.8
+        ct_conc      = 2.0 if celltype_confound == "moderate" else 1.0  # lower = more variable
+        n_ct_markers = max(10, int(0.15 * n_features))  # ~15% of genes per cell type
+
+        # Sample cell-type proportions: (n_samples, n_ct)
+        ct_fractions = rng.dirichlet(np.ones(n_ct) * ct_conc, size=n_samples)
+
+        # Cell-type marker signatures in log-count space: (n_ct, n_features)
+        # Each cell type independently selects marker genes — some overlap is allowed.
+        ct_signatures = np.zeros((n_ct, n_features), dtype=np.float32)
+        for c in range(n_ct):
+            markers = rng.choice(n_features, size=n_ct_markers, replace=False)
+            ct_signatures[c, markers] = rng.normal(0.0, ct_effect_sd, size=n_ct_markers)
+
+        # Additive effect in log-count space: (n_samples, n_features)
+        eta = eta + (ct_fractions @ ct_signatures)
+    else:
+        ct_fractions  = None
+        ct_signatures = None
+
     mu = np.exp(np.clip(eta, -10, 10)) * libsize[:, None]
 
     dispersion_mode = generator_cfg.get("dispersion", "medium")
-    if dispersion_mode == "low":
+    if dispersion_mode == "heterogeneous":
+        # Gene-level mean-dispersion relationship calibrated for bulk RNA-seq:
+        # higher-expressed genes are less overdispersed (closer to Poisson).
+        # log(theta) ≈ -0.5 + 0.3 * alpha_g + N(0, 0.3)
+        # alpha ~ GTEx WB mean 2.6 → theta ~ 1.3  (matches "high" mode centre)
+        # alpha ~ 0 → theta ~ 0.6  (low-expression: overdispersed)
+        # alpha ~ 5 → theta ~ 2.7  (high-expression: less overdispersed)
+        log_theta = -0.5 + 0.3 * alpha + rng.normal(0.0, 0.3, size=n_features)
+        theta = np.exp(log_theta).clip(0.3, 20.0)
+    elif dispersion_mode == "low":
         theta = np.full(n_features, 20.0)
     elif dispersion_mode == "high":
         theta = np.full(n_features, 1.5)
-    else:
+    else:  # "medium"
         theta = np.full(n_features, 5.0)
 
     p = theta[None, :] / (theta[None, :] + mu)
@@ -338,6 +390,9 @@ def _simulate_counts(
         "dropout_mode": dropout_mode,
         "dropout_target": dropout_target,
         "module_sizes": module_sizes.tolist(),
+        "factor_corr": float(generator_cfg.get("factor_corr", 0.0)),
+        "celltype_confound": generator_cfg.get("celltype_confound", "none"),
+        "dispersion_mode": generator_cfg.get("dispersion", "medium"),
     }
 
     return ScenarioResult(

@@ -85,6 +85,9 @@ def parse_args(cli_args=None):
     p.add_argument("--use-batch-norm", action="store_true", dest="use_batch_norm", default=True)
     p.add_argument("--sigma-min", type=float, default=0.3,
                    help="GMM component σ floor (default: 0.3).")
+    p.add_argument("--normalize-input", action="store_true", default=False,
+                   help="Z-score each feature profile across samples before encoding. "
+                        "Recommended for count-derived data (log2-CPM, etc.).")
 
     # --- Loss hyperparameters ---
     p.add_argument("--beta", type=float, default=1.0, help="KL weight (default: 1.0).")
@@ -102,10 +105,21 @@ def parse_args(cli_args=None):
                    help="λ_bal: γ-usage balance loss weight (default: 0.01).")
     p.add_argument("--bal-ema-blend", type=float, default=0.5,
                    help="Balance loss blend α between EMA and batch (default: 0.5).")
+    p.add_argument("--masked-recon", action="store_true", default=False,
+                   help="Compute reconstruction loss only on non-zero input entries. "
+                        "Recommended for zero-inflated count data.")
     p.add_argument("--pi-entropy-strength", type=float, default=0.0,
                    help="λ_pi: KL(uniform || π) penalty weight (default: 0.0).")
     p.add_argument("--hier-strength", type=float, default=0.0,
                    help="λ_hier: hierarchical isoform loss weight (default: 0.0=disabled).")
+    p.add_argument("--corr-strength", type=float, default=0.0,
+                   help="λ_corr: reconstruction-space pairwise correlation loss weight (default: 0.0=disabled). "
+                        "Penalises MSE between the batch-level Pearson correlation matrices of inputs "
+                        "and reconstructions. Recommended: 0.05–0.2 for NB count data with normalize-input.")
+    p.add_argument("--latent-corr-strength", type=float, default=0.0,
+                   help="λ_lcorr: latent-space correlation alignment loss weight (default: 0.0=disabled). "
+                        "Aligns cosine similarities of encoder μ with input Pearson correlations. "
+                        "More direct than --corr-strength; recommended: 0.1–1.0 for NB count data.")
     p.add_argument("--tx2gene", type=str, default=None,
                    help="TSV with (transcript_id, gene_id) for hierarchical loss.")
 
@@ -160,6 +174,7 @@ def main(args):
         dropout=args.dropout,
         use_batch_norm=args.use_batch_norm,
         sigma_min=args.sigma_min,
+        normalize_input=args.normalize_input,
     ).to(device)
     logger.info(
         "Model: %d features, %d latent dims, %d modules | params=%d",
@@ -179,6 +194,10 @@ def main(args):
         pi_entropy_strength=args.pi_entropy_strength,
         bal_ema_blend=args.bal_ema_blend,
         hier_strength=args.hier_strength,
+        normalize_input=args.normalize_input,
+        masked_recon=args.masked_recon,
+        corr_strength=args.corr_strength,
+        latent_corr_strength=args.latent_corr_strength,
     )
     warmup_loss = WarmupLoss(
         beta=args.beta,

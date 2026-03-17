@@ -54,6 +54,11 @@ class GMMModuleVAE(BaseVAE):
         GMM component σ floor. Default: 0.3.
     ema_alpha : float
         EMA decay for γ-usage balance. Default: 0.99.
+    normalize_input : bool
+        If True, z-score each feature profile (across samples) before encoding.
+        The decoder then reconstructs in the z-scored space. Recommended for
+        count-derived data (e.g. log2-CPM) where features have heterogeneous
+        means. Default: False.
     """
 
     def __init__(
@@ -67,9 +72,11 @@ class GMMModuleVAE(BaseVAE):
         init_sd: float = 0.02,
         sigma_min: float = 0.3,
         ema_alpha: float = 0.99,
+        normalize_input: bool = False,
     ):
         super().__init__(n_features, n_latent)
         self.n_modules = n_modules
+        self.normalize_input = normalize_input
 
         self.encoder = FeatureEncoder(
             n_features=n_features,
@@ -112,22 +119,31 @@ class GMMModuleVAE(BaseVAE):
         gamma : torch.Tensor, shape (B, K)
             Soft GMM assignments γ_{fk}.
         """
-        mu, logvar = self.encoder(x)
+        x_enc = self._maybe_normalize(x)
+        mu, logvar = self.encoder(x_enc)
         z = self.reparameterize(mu, logvar)
         recon_x = self.decoder(z)
         gamma = self.gmm_prior.posterior_weights(mu, logvar)
         return recon_x, mu, logvar, z, gamma
 
+    def _maybe_normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """Z-score each row across the sample dimension if normalize_input=True."""
+        if not self.normalize_input:
+            return x
+        mu = x.mean(dim=-1, keepdim=True)
+        sigma = x.std(dim=-1, keepdim=True).clamp(min=1e-6)
+        return (x - mu) / sigma
+
     def encode(self, x: torch.Tensor):
         """Return (mu, logvar) without sampling."""
-        return self.encoder(x)
+        return self.encoder(self._maybe_normalize(x))
 
     def get_gamma(self, x: torch.Tensor) -> torch.Tensor:
         """Return soft GMM assignments for a batch, shape (B, K)."""
-        mu, logvar = self.encoder(x)
+        mu, logvar = self.encoder(self._maybe_normalize(x))
         return self.gmm_prior.posterior_weights(mu, logvar)
 
     def get_hard_assignments(self, x: torch.Tensor) -> torch.Tensor:
         """Return hard module assignments (argmax γ), shape (B,)."""
-        mu, logvar = self.encoder(x)
+        mu, logvar = self.encoder(self._maybe_normalize(x))
         return self.gmm_prior.hard_assignments(mu, logvar)
