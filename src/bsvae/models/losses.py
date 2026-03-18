@@ -137,8 +137,10 @@ def kl_normal_loss_with_free_bits(mu, logvar, free_bits=0.0, reduction="mean"):
     if reduction == "mean":
         return kl_total, kl_per_dim
     elif reduction == "sum":
-        return kl_total * mu.shape[0], kl_per_dim
-    return kl, kl_per_dim
+        # True per-sample sum: clamp per-dim then sum over batch and dims
+        kl_sum = torch.clamp(kl, min=free_bits).sum() if free_bits > 0 else kl.sum()
+        return kl_sum, kl_per_dim
+    raise ValueError(f"Unknown reduction '{reduction}'; expected 'mean' or 'sum'.")
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +249,9 @@ def hierarchical_loss(
     -------
     loss : scalar tensor
     """
+    if feature_idx_in_batch is not None:
+        feature_idx_in_batch = feature_idx_in_batch.to(mu.device)
+
     losses = []
     for gene_id, feat_indices in gene_groups.items():
         if feature_idx_in_batch is not None:
@@ -263,6 +268,12 @@ def hierarchical_loss(
         else:
             if len(feat_indices) < 2:
                 continue
+            B = mu.shape[0]
+            if any(idx >= B or idx < 0 for idx in feat_indices):
+                raise IndexError(
+                    f"hierarchical_loss: feat_indices {feat_indices} out of range for "
+                    f"batch size {B}. Pass feature_idx_in_batch to use dataset-level indices."
+                )
             mu_iso = mu[feat_indices]   # (n, D)
 
         # Mean pairwise L2 distance

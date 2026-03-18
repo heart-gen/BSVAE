@@ -122,6 +122,13 @@ def parse_args(cli_args=None):
                         "More direct than --corr-strength; recommended: 0.1–1.0 for NB count data.")
     p.add_argument("--tx2gene", type=str, default=None,
                    help="TSV with (transcript_id, gene_id) for hierarchical loss.")
+    p.add_argument("--isoform-stratified", action="store_true", default=False,
+                   help="Use IsoformStratifiedSampler so isoforms of the same gene "
+                        "co-occur in batches, making --hier-strength effective. "
+                        "Requires --tx2gene.")
+    p.add_argument("--p-multi", type=float, default=0.5,
+                   help="Probability of drawing a full batch from multi-isoform features "
+                        "(default: 0.5). Only active with --isoform-stratified.")
 
     # --- Evaluation ---
     p.add_argument("--no-eval", action="store_true", default=False,
@@ -159,11 +166,52 @@ def main(args):
 
     # --- Hierarchy ---
     gene_groups = {}
-    if args.hier_strength > 0 and args.tx2gene:
+    if args.tx2gene and (args.hier_strength > 0 or args.isoform_stratified):
         from bsvae.utils.hierarchy import load_tx2gene, group_isoforms_by_gene
         tx2gene = load_tx2gene(path=args.tx2gene, feature_ids=feature_ids)
         gene_groups = group_isoforms_by_gene(tx2gene, feature_ids)
         logger.info("Hierarchical groups: %d multi-isoform genes", len(gene_groups))
+
+    # Validate gene_groups indices are in-bounds
+    if gene_groups:
+        n_features_total = len(feature_ids)
+        for gene_id, idxs in gene_groups.items():
+            bad = [i for i in idxs if i < 0 or i >= n_features_total]
+            if bad:
+                raise ValueError(
+                    f"gene_groups['{gene_id}'] contains out-of-bounds indices {bad} "
+                    f"(dataset has {n_features_total} features)"
+                )
+
+    # Replace DataLoader with IsoformStratifiedSampler if requested
+    if args.isoform_stratified and gene_groups:
+        import torch.utils.data as tud
+        from bsvae.utils.hierarchy import IsoformStratifiedSampler
+        multi_indices = sorted({idx for idxs in gene_groups.values() for idx in idxs})
+        sampler = IsoformStratifiedSampler(
+            n_features=len(feature_ids),
+            multi_isoform_indices=multi_indices,
+            batch_size=args.batch_size,
+            p_multi=args.p_multi,
+            seed=args.seed,
+        )
+        train_loader = tud.DataLoader(
+            train_loader.dataset,
+            batch_size=args.batch_size,
+            sampler=sampler,
+            drop_last=True,
+            pin_memory=train_loader.pin_memory,
+            num_workers=train_loader.num_workers,
+        )
+        logger.info(
+            "IsoformStratifiedSampler: %d multi-isoform features, p_multi=%.2f",
+            len(multi_indices), args.p_multi,
+        )
+    elif args.isoform_stratified and not gene_groups:
+        logger.warning(
+            "--isoform-stratified requested but no multi-isoform gene groups found; "
+            "using standard random sampler."
+        )
 
     # --- Model ---
     model = GMMModuleVAE(

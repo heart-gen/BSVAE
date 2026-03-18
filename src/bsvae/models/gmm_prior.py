@@ -272,6 +272,11 @@ class GaussianMixturePrior(nn.Module):
         K = self.K
         X = mu_samples.cpu().numpy()
 
+        if len(X) < K:
+            raise ValueError(
+                f"kmeans_init_: need at least K={K} samples but got {len(X)}. "
+                "Increase the dataset size or reduce n_modules."
+            )
         km = KMeans(n_clusters=K, random_state=0, n_init=10)
         labels = km.fit_predict(X)
         centers = torch.tensor(km.cluster_centers_, dtype=torch.float32)

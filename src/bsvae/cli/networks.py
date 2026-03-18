@@ -64,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     mp.add_argument("--use-leiden", action="store_true",
                     help="Also run Leiden clustering as fallback comparison.")
     mp.add_argument("--leiden-resolution", type=float, default=1.0)
+    mp.add_argument("--tx2gene", type=str, default=None,
+                    help="TSV (transcript_id, gene_id) for isoform-to-gene aggregation.")
+    mp.add_argument("--aggregate-to-gene", action="store_true", default=False,
+                    help="Aggregate isoform-level γ to gene level by averaging across "
+                         "isoforms per gene. Saves gamma_gene.npz and "
+                         "hard_assignments_gene.npz. Requires --tx2gene.")
 
     # ------------------------------------------------------------------
     # export-latents
@@ -120,6 +126,35 @@ def handle_extract_networks(args, logger: logging.Logger) -> None:
     logger.info("Network extraction complete → %s", args.output_dir)
 
 
+def _aggregate_gamma_to_gene(
+    gamma: "np.ndarray",
+    feature_ids: List[str],
+    tx2gene_path: str,
+) -> "tuple[np.ndarray, list[str]]":
+    """Average isoform-level γ (F_tx, K) to gene level, renormalise rows to sum 1."""
+    import numpy as np
+    from collections import defaultdict
+    from bsvae.utils.hierarchy import load_tx2gene
+
+    tx2gene = load_tx2gene(path=tx2gene_path, feature_ids=feature_ids)
+    # Map every feature to its gene_id; fall back to itself for unmapped features
+    fid_to_gene = {fid: tx2gene.get(fid, fid) for fid in feature_ids}
+
+    gene_to_idxs: dict = defaultdict(list)
+    for i, fid in enumerate(feature_ids):
+        gene_to_idxs[fid_to_gene[fid]].append(i)
+
+    gene_ids = list(gene_to_idxs.keys())
+    gamma_gene = np.zeros((len(gene_ids), gamma.shape[1]), dtype=np.float32)
+    for j, gid in enumerate(gene_ids):
+        gamma_gene[j] = gamma[gene_to_idxs[gid]].mean(axis=0)
+
+    row_sums = gamma_gene.sum(axis=1, keepdims=True)
+    row_sums = np.where(row_sums > 0, row_sums, 1.0)
+    gamma_gene /= row_sums
+    return gamma_gene, gene_ids
+
+
 def handle_extract_modules(args, logger: logging.Logger) -> None:
     import numpy as np
     from bsvae.utils.modelIO import load_model
@@ -143,6 +178,30 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
         "Extracted %d-module GMM assignments for %d features",
         model.n_modules, len(feature_ids),
     )
+
+    if args.aggregate_to_gene:
+        if not args.tx2gene:
+            logger.warning("--aggregate-to-gene requires --tx2gene; skipping.")
+        else:
+            gamma_gene, gene_ids = _aggregate_gamma_to_gene(
+                result["gamma"], result["feature_ids"], args.tx2gene
+            )
+            hard_gene = gamma_gene.argmax(axis=1).astype(np.int32)
+            out = Path(args.output_dir)
+            np.savez_compressed(
+                out / "gamma_gene.npz",
+                gamma=gamma_gene,
+                feature_ids=np.array(gene_ids, dtype=object),
+            )
+            np.savez_compressed(
+                out / "hard_assignments_gene.npz",
+                hard_assignments=hard_gene,
+                feature_ids=np.array(gene_ids, dtype=object),
+            )
+            logger.info(
+                "Gene-level aggregation: %d transcripts → %d genes",
+                len(result["feature_ids"]), len(gene_ids),
+            )
 
     if args.soft_eigengenes and args.expr:
         import pandas as pd

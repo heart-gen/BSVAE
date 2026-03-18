@@ -1014,6 +1014,8 @@ def compute_module_eigengenes_from_soft(
     eigengenes : pd.DataFrame
         Samples × modules.
     """
+    from sklearn.decomposition import PCA
+
     K = gamma.shape[1]
     sample_ids = list(expr.columns)
     eigengenes = {}
