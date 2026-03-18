@@ -19,8 +19,11 @@ def _make_loader(n_samples=30, n_items=40, batch_size=8):
     feat_ids = [f"feat_{i}" for i in range(n_items)]
 
     class SimpleDataset(torch.utils.data.Dataset):
+        feature_ids = feat_ids  # required by Trainer._get_feature_id_to_idx
+
         def __len__(self):
             return len(feat_ids)
+
         def __getitem__(self, idx):
             return profiles[idx], feat_ids[idx]
 
@@ -135,6 +138,32 @@ def test_save_load_model_state_preserved():
 
         assert torch.allclose(mu_orig, mu_loaded, atol=1e-5)
         assert torch.allclose(gamma_orig, gamma_loaded, atol=1e-5)
+
+
+def test_trainer_with_hier_loss():
+    """Trainer with gene_groups + hier_strength > 0 runs through GMM phase."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        n_samples = 30
+        model = _make_model(n_samples=n_samples)
+        loader = _make_loader(n_samples=n_samples, n_items=40)
+        optimizer = optim.Adam(model.parameters(), lr=1e-3)
+        gmm_loss = GMMVAELoss(beta=0.1, hier_strength=0.5)
+
+        # feat_0,feat_1 are isoforms of geneA; feat_2,feat_3 of geneB
+        gene_groups = {"geneA": [0, 1], "geneB": [2, 3]}
+        trainer = Trainer(
+            model=model,
+            optimizer=optimizer,
+            gmm_loss_f=gmm_loss,
+            save_dir=tmpdir,
+            is_progress_bar=False,
+            warmup_epochs=2,
+            transition_epochs=1,
+            gene_groups=gene_groups,
+        )
+        trainer(loader, epochs=4)
+        # Training completed: model should be back in eval mode
+        assert not trainer.model.training
 
 
 def test_evaluator():

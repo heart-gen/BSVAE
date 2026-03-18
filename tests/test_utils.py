@@ -197,3 +197,36 @@ def test_isoform_stratified_sampler_uniform():
     assert len(indices) == 16
     # All should be in range 0..49 (drawn from full pool)
     assert all(0 <= idx < 50 for idx in indices)
+
+
+def test_isoform_stratified_sampler_empty_multi():
+    """Empty multi_isoform_indices falls back to uniform sampling."""
+    sampler = IsoformStratifiedSampler(
+        n_features=20,
+        multi_isoform_indices=[],
+        batch_size=4,
+        p_multi=0.9,   # would use multi if non-empty
+        num_samples=12,
+    )
+    indices = list(iter(sampler))
+    assert len(indices) == 12
+    assert all(0 <= idx < 20 for idx in indices)
+
+
+def test_isoform_stratified_sampler_epoch_reproducibility():
+    """Same seed + same epoch → same sequence; different epochs → different sequences."""
+    sampler = IsoformStratifiedSampler(
+        n_features=50,
+        multi_isoform_indices=list(range(10)),
+        batch_size=8,
+        num_samples=16,
+        seed=42,
+    )
+    epoch0_run1 = list(iter(sampler))   # epoch 0
+    epoch1_run1 = list(iter(sampler))   # epoch 1
+    assert epoch0_run1 != epoch1_run1   # different epochs → different draws
+
+    # Reset epoch counter: epoch 0 should reproduce exactly
+    sampler._epoch = 0
+    epoch0_run2 = list(iter(sampler))
+    assert epoch0_run1 == epoch0_run2
