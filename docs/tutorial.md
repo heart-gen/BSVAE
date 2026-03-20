@@ -1,18 +1,25 @@
 # Tutorial
 
-This tutorial is a complete workflow for BSVAE using the current CLI.
+This tutorial walks through the current CLI workflow from data loading to post-training analysis and simulation benchmarking.
 
-## 1. Minimal Run
+## 1. Confirm The Data Layout
 
-Goal: confirm install, data format, and training loop.
+BSVAE trains on feature profiles, not sample profiles. The main matrix must be `features x samples`.
 
-Input matrix requirements:
+- rows are feature IDs
+- columns are sample IDs
+- CSV and TSV files use the first column as the row index
 
-- shape: `features x samples`
-- row index: feature IDs
-- columns: sample IDs
+Supported formats:
 
-Run:
+- `.csv` / `.csv.gz`
+- `.tsv` / `.tsv.gz`
+- `.h5` / `.hdf5`
+- `.h5ad` with optional `anndata`
+
+## 2. Run A Minimal Training Job
+
+Use a short run first to confirm the install and data format.
 
 ```bash
 bsvae-train tutorial_min \
@@ -29,20 +36,9 @@ Sanity checks:
 - `results/tutorial_min/specs.json` exists
 - `results/tutorial_min/train_losses.csv` exists
 
-## 2. Production Run
+## 3. Select The Number Of Modules
 
-Goal: select K robustly, then train the final production model.
-
-### 2.1 Tuning the number of modules (K)
-
-`--n-modules` (K) sets the expected number of latent modules/clusters in the GMM prior.
-This is a key hyperparameter and should be tuned for each dataset.
-
-Recommended approach: use `bsvae-sweep-k` with stability mode to avoid overfitting K.
-It holds out a feature split and, when `--stability-reps > 1`, selects K by mean
-pairwise ARI across replicate runs.
-
-Example sweep (recommended):
+`--n-modules` controls the number of Gaussian-mixture components in the prior. For real analyses, the recommended path is `bsvae-sweep-k`.
 
 ```bash
 bsvae-sweep-k sweep_prod \
@@ -53,29 +49,43 @@ bsvae-sweep-k sweep_prod \
   --val-frac 0.1
 ```
 
-The selected model is retrained on the full dataset at:
-`results/sweep_prod/final_k<K>/`.
+Key outputs:
 
-Optional downstream check (latent clustering on `mu`):
+- `results/sweep_prod/sweep_k/sweep_results.csv`
+- `results/sweep_prod/sweep_k/sweep_summary.json`
+- per-K replicate directories under `results/sweep_prod/sweep_k/k<K>/rep_<rep>/`
+- final retrained model under `results/sweep_prod/final_k<K>/`
+
+Selection behavior:
+
+- with `--stability-reps 1`, the best `K` is chosen by validation loss
+- with `--stability-reps > 1`, the best `K` is chosen by mean pairwise ARI on held-out features
+
+## 4. Train A Final Model Directly
+
+If you already know `K`, train directly with `bsvae-train`.
 
 ```bash
-bsvae-networks latent-analysis \
-  --model-path results/sweep_prod/final_k16 \
+bsvae-train study1 \
   --dataset data/expression.csv \
-  --output-dir results/sweep_prod/final_k16/latent_analysis \
-  --kmeans-k 16 \
-  --umap
+  --epochs 120 \
+  --n-modules 24 \
+  --latent-dim 32
 ```
 
-Recommended checks during/after run:
+Useful flags to review for production runs:
 
-- loss is finite in logs
-- checkpoints appear as `model-<epoch>.pt`
-- final artifacts exist in `results/sweep_prod/final_k<K>/`
+- `--normalize-input`
+- `--warmup-epochs`
+- `--transition-epochs`
+- `--free-bits`
+- `--sep-strength`
+- `--bal-strength`
+- `--checkpoint-every`
 
-## 3. Post-Training Analysis
+## 5. Extract Feature Networks
 
-### 3.1 Extract networks
+`bsvae-networks extract-networks` builds sparse feature-feature graphs from trained latents.
 
 ```bash
 bsvae-networks extract-networks \
@@ -86,36 +96,61 @@ bsvae-networks extract-networks \
   --top-k 50
 ```
 
-Expected outputs:
+Methods:
 
-- `results/sweep_prod/final_k16/networks/mu_cosine_adjacency.npz`
-- `results/sweep_prod/final_k16/networks/gamma_knn_adjacency.npz` (if selected)
+- `mu_cosine`: top-k cosine neighbors in latent mean space
+- `gamma_knn`: FAISS-based kNN graph in soft-assignment space
 
-### 3.2 Extract modules
+Outputs are sparse adjacency files such as:
+
+- `mu_cosine_adjacency.npz`
+- `gamma_knn_adjacency.npz`
+
+## 6. Extract Modules
+
+`extract-modules` saves soft and hard GMM assignments. Add `--expr` and `--soft-eigengenes` to compute eigengenes.
 
 ```bash
 bsvae-networks extract-modules \
   --model-path results/sweep_prod/final_k16 \
   --dataset data/expression.csv \
   --output-dir results/sweep_prod/final_k16/modules \
-  --soft-eigengenes \
-  --expr data/expression.csv
+  --expr data/expression.csv \
+  --soft-eigengenes
 ```
 
-Expected outputs:
+Primary outputs:
 
 - `gamma.npz`
 - `hard_assignments.npz`
-- `soft_eigengenes.csv` (when requested)
+- `soft_eigengenes.csv` when requested
 
-### 3.3 Export and analyze latents
+Optional comparison outputs:
+
+- `leiden_modules.csv` with `--use-leiden`
+- `gamma_gene.npz` and `hard_assignments_gene.npz` with `--aggregate-to-gene --tx2gene`
+
+## 7. Export Latents
+
+`export-latents` writes a compressed NumPy archive.
 
 ```bash
 bsvae-networks export-latents \
   --model-path results/sweep_prod/final_k16 \
   --dataset data/expression.csv \
-  --output results/sweep_prod/final_k16/latents.npz
+  --output results/sweep_prod/final_k16/latents
+```
 
+Saved arrays:
+
+- `mu`
+- `logvar`
+- `gamma`
+- `feature_ids`
+
+## 8. Analyze The Latent Space
+
+```bash
 bsvae-networks latent-analysis \
   --model-path results/sweep_prod/final_k16 \
   --dataset data/expression.csv \
@@ -124,7 +159,33 @@ bsvae-networks latent-analysis \
   --umap
 ```
 
-## 4. Simulation Benchmark
+Typical outputs:
+
+- `latent_mu.csv`
+- `latent_logvar.csv`
+- `latent_clusters.csv` when clustering is requested
+- `latent_embeddings.csv` when `--umap` or `--tsne` is used
+- `latent_covariate_correlations.csv` when `--covariates` is provided
+
+## 9. Generate Synthetic Data And Benchmark Recovery
+
+Generate one dataset:
+
+```bash
+bsvae-simulate generate \
+  --output data/sim_expr.csv \
+  --save-ground-truth data/sim_truth.csv
+```
+
+Benchmark a trained model against the ground truth:
+
+```bash
+bsvae-simulate benchmark \
+  --dataset data/sim_expr.csv \
+  --ground-truth data/sim_truth.csv \
+  --model-path results/sweep_prod/final_k16 \
+  --output results/sweep_prod/final_k16/sim_metrics.json
+```
 
 Generate a publication-style scenario grid:
 
@@ -140,69 +201,23 @@ bsvae-simulate generate-grid \
 bsvae-simulate validate-grid --grid-dir results/sim_pub_v1
 ```
 
-Run one scenario replicate through BSVAE:
+Each replicate directory includes method-ready files such as:
 
-```bash
-bsvae-train sim_run \
-  --dataset results/sim_pub_v1/scenarios/S001__confounding-none__n_samples-100__nonlinear_mode-off__overlap_rate-0.0__signal_scale-0.4/rep_000/expr/features_x_samples.tsv.gz \
-  --n-modules 20 \
-  --epochs 50
-```
+- `expr/features_x_samples.tsv.gz`
+- `expr/samples_x_features.tsv.gz`
+- `truth/modules_hard.csv`
+- `method_inputs.json`
 
-Benchmark hard-module recovery:
+## 10. Common Problems
 
-```bash
-bsvae-simulate benchmark \
-  --dataset results/sim_pub_v1/scenarios/S001__confounding-none__n_samples-100__nonlinear_mode-off__overlap_rate-0.0__signal_scale-0.4/rep_000/expr/features_x_samples.tsv.gz \
-  --ground-truth results/sim_pub_v1/scenarios/S001__confounding-none__n_samples-100__nonlinear_mode-off__overlap_rate-0.0__signal_scale-0.4/rep_000/truth/modules_hard.csv \
-  --model-path results/sim_run \
-  --output results/sim_run/sim_metrics.json
-```
+- Data orientation is wrong: transpose sample-by-feature matrices before training.
+- CUDA memory is tight: reduce `--batch-size` or use `--no-cuda`.
+- `gamma_knn` fails to import: install `faiss-cpu`.
+- Hierarchical options fail: make sure `--tx2gene` matches the matrix row IDs.
+- No eigengene file appears: `--soft-eigengenes` only writes output when `--expr` is supplied.
 
-For WGCNA, use `expr/samples_x_features.tsv.gz`.
-For GNVAE, use `expr/features_x_samples.tsv.gz` (or `gnvae/fold_*/X_train.tsv.gz`).
-`method_inputs.json` provides canonical paths for all three methods.
+## 11. Legacy Configuration Note
 
-## 5. Troubleshooting
+The active CLI does not use `hyperparam.ini`. The files in `src/bsvae/hyperparam.ini` and `docs/hyperparam.ini` are retained for compatibility context only.
 
-Common issues and fixes:
-
-- Missing `--dataset`: always pass a matrix path to `bsvae-train`.
-- OOM / memory pressure: reduce `--batch-size`, try `--no-cuda`.
-- `gamma_knn` import error: install `faiss-cpu`.
-- Hierarchical loss errors: ensure `--tx2gene` IDs match matrix row IDs.
-- Missing eigengene output: `--soft-eigengenes` requires `--expr`.
-- Data orientation mismatch: ensure row entities are features, not samples.
-
-Quick debug run:
-
-```bash
-bsvae-train debug_run \
-  --dataset data/expression.csv \
-  --epochs 2 \
-  --batch-size 16 \
-  --no-cuda \
-  --log-level debug
-```
-
-## 6. Migration From Legacy Configs
-
-BSVAE no longer uses `hyperparam.ini` in the active CLI path.
-
-Deprecated files:
-
-- `src/bsvae/hyperparam.ini`
-- `docs/hyperparam.ini`
-
-Migration pattern:
-
-1. Take values from old INI sections.
-2. Convert them to explicit CLI flags in your run scripts.
-3. Keep a single shell command per experiment for reproducibility.
-
-Example conversion:
-
-- old INI: `latent_dim=32`, `batch_size=128`, `beta=1.0`
-- new CLI: `--latent-dim 32 --batch-size 128 --beta 1.0`
-
-For long pipelines, keep parameterized shell scripts or workflow files (Snakemake/Nextflow) instead of INI presets.
+For reproducible runs, prefer shell scripts or workflow files with explicit CLI flags.

@@ -1,17 +1,16 @@
 # Quick Start
 
-For a complete workflow, see the [Tutorial](tutorial.md).
+For a longer guided workflow, see the [Tutorial](tutorial.md). For flag-by-flag reference, see the [CLI Reference](cli.md).
 
-## 1. Prepare data
+## 1. Prepare Data
 
-Input must be a matrix with shape `features x samples`.
+Input must be an expression matrix in `features x samples` orientation.
 
-Example CSV layout:
+- rows are features
+- columns are samples
+- the first column is the feature ID index for CSV or TSV files
 
-- Row index: feature IDs (genes, transcripts, proteins, etc.)
-- Columns: sample IDs
-
-## 2. Train a model
+## 2. Train A Small Model
 
 ```bash
 bsvae-train pilot_run \
@@ -21,11 +20,15 @@ bsvae-train pilot_run \
   --latent-dim 16
 ```
 
-### 2.1 Tune number of modules (K)
+Expected outputs in `results/pilot_run/`:
 
-`--n-modules` (K) sets the expected number of modules.
-If you do not know K, run a small sweep and compare stability/interpretability.
-Recommended approach uses `bsvae-sweep-k` with stability replicates.
+- `model.pt`
+- `specs.json`
+- `train_losses.csv`
+
+## 3. Recommended: Tune The Number Of Modules
+
+`--n-modules` sets the number of Gaussian-mixture components. For most real datasets, use `bsvae-sweep-k` before a production run.
 
 ```bash
 bsvae-sweep-k sweep_pilot \
@@ -36,34 +39,60 @@ bsvae-sweep-k sweep_pilot \
   --val-frac 0.1
 ```
 
-## 3. Extract a network
+This writes sweep artifacts under `results/sweep_pilot/sweep_k/` and retrains the selected model under `results/sweep_pilot/final_k<K>/`.
+
+## 4. Extract Networks
 
 ```bash
 bsvae-networks extract-networks \
-  --model-path results/pilot_run \
+  --model-path results/sweep_pilot/final_k12 \
   --dataset data/expression.csv \
-  --output-dir results/pilot_run/networks
+  --output-dir results/sweep_pilot/final_k12/networks \
+  --methods mu_cosine
 ```
 
-## 4. Extract modules
+## 5. Extract Modules
+
+`extract-modules` always needs the training dataset, and it needs `--expr` when you want eigengenes.
 
 ```bash
 bsvae-networks extract-modules \
-  --model-path results/pilot_run \
+  --model-path results/sweep_pilot/final_k12 \
   --dataset data/expression.csv \
-  --output-dir results/pilot_run/modules
+  --output-dir results/sweep_pilot/final_k12/modules \
+  --expr data/expression.csv \
+  --soft-eigengenes
 ```
 
-## 5. Export latents
+Expected outputs:
+
+- `gamma.npz`
+- `hard_assignments.npz`
+- `soft_eigengenes.csv` when requested
+
+## 6. Export Latents
 
 ```bash
 bsvae-networks export-latents \
-  --model-path results/pilot_run \
+  --model-path results/sweep_pilot/final_k12 \
   --dataset data/expression.csv \
-  --output results/pilot_run/latents.npz
+  --output results/sweep_pilot/final_k12/latents
 ```
 
-## 6. Build a simulation grid
+This writes `latents.npz` with `mu`, `logvar`, `gamma`, and `feature_ids`.
+
+## 7. Run Latent Analysis
+
+```bash
+bsvae-networks latent-analysis \
+  --model-path results/sweep_pilot/final_k12 \
+  --dataset data/expression.csv \
+  --output-dir results/sweep_pilot/final_k12/latent_analysis \
+  --kmeans-k 12 \
+  --umap
+```
+
+## 8. Build A Simulation Grid
 
 ```bash
 bsvae-simulate init-config --output sim.yaml
@@ -80,9 +109,3 @@ Validate outputs:
 ```bash
 bsvae-simulate validate-grid --grid-dir results/sim_pub_v1
 ```
-
-Per scenario replicate, use:
-
-- BSVAE/GNVAE: `expr/features_x_samples.tsv.gz`
-- WGCNA: `expr/samples_x_features.tsv.gz`
-- Canonical method paths: `method_inputs.json`

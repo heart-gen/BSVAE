@@ -1,36 +1,39 @@
 # BSVAE Documentation
 
-BSVAE provides a GMM-based variational autoencoder workflow for omics module discovery.
+BSVAE is a CLI-first workflow for feature-level module discovery in omics data. It combines a Gaussian-mixture variational autoencoder with tools for model selection, network extraction, module assignment, latent analysis, and synthetic benchmarking.
 
-## Core Components
-
-- `bsvae-train`: train and optionally evaluate `GMMModuleVAE`
-- `bsvae-networks`: network extraction, module extraction, latent export/analysis
-- `bsvae-simulate`: synthetic data generation, scenario-grid simulation, and benchmarking
-
-## Current CLI Entry Points
+## Main Commands
 
 | Command | Purpose |
 | --- | --- |
-| `bsvae-train` | Train a GMMModuleVAE model |
-| `bsvae-networks` | Post-training networks/modules/latents |
-| `bsvae-simulate` | Single-dataset simulation, scenario-grid generation, ARI/NMI benchmarking |
+| `bsvae-train` | Train a `GMMModuleVAE` on a `features x samples` matrix |
+| `bsvae-sweep-k` | Select the number of modules with held-out validation and optional stability replicates |
+| `bsvae-networks` | Extract networks, modules, latents, and latent-analysis outputs from a trained model |
+| `bsvae-simulate` | Generate synthetic datasets, build scenario grids, and benchmark recovery |
 
-## Quick Start
+## Data Orientation
 
-```bash
-pip install bsvae
-bsvae-train my_run --dataset data/expression.csv
-```
+Most commands expect an expression matrix in `features x samples` orientation:
 
-## Docs Map
+- rows are feature IDs
+- columns are sample IDs
+- CSV and TSV files use the first column as the feature index
+
+Supported inputs:
+
+- `.csv` / `.csv.gz`
+- `.tsv` / `.tsv.gz`
+- `.h5` / `.hdf5`
+- `.h5ad` with optional `anndata`
+
+## Start Here
 
 - [Installation](installation.md)
 - [Quick Start](quickstart.md)
 - [Tutorial](tutorial.md)
 - [CLI Reference](cli.md)
+- [Network And Latent Workflows](networks.md)
 - [Usage Guide](usage.md)
-- [Network Workflows](networks.md)
 - [Hyperparameters](hyperparameters.md)
 - [HPC](hpc.md)
 - [FAQ](faq.md)
@@ -46,7 +49,6 @@ quickstart
 tutorial
 cli
 networks
-bsvae_networks
 usage
 hyperparameters
 hpc

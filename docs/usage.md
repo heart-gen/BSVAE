@@ -1,16 +1,18 @@
 # Usage Guide
 
-For a complete workflow, see the [Tutorial](tutorial.md).
+This page describes the current end-to-end workflow for typical CLI users.
 
-## End-to-end workflow
+## Recommended Workflow
 
-1. Train model
-2. Extract networks
-3. Extract modules
-4. Export/analyze latents
-5. Simulate benchmark scenarios
+1. Prepare a `features x samples` matrix.
+2. Run `bsvae-sweep-k` to choose the number of modules.
+3. Use the retrained `final_k<K>` model for downstream analysis.
+4. Extract networks, module assignments, and latent outputs.
+5. Use `bsvae-simulate` when you need synthetic benchmarking.
 
-## Train
+## Training
+
+Direct training:
 
 ```bash
 bsvae-train study1 \
@@ -20,11 +22,7 @@ bsvae-train study1 \
   --latent-dim 32
 ```
 
-### Tune number of modules (K)
-
-`--n-modules` (K) sets the expected number of GMM components/modules.
-This should be tuned per dataset. Recommended approach is `bsvae-sweep-k`
-with stability mode to avoid overfitting K.
+Recommended model-selection flow:
 
 ```bash
 bsvae-sweep-k sweep1 \
@@ -35,10 +33,72 @@ bsvae-sweep-k sweep1 \
   --val-frac 0.1
 ```
 
-The selected model is retrained on the full dataset at:
-`results/sweep1/final_k<K>/`.
+This creates:
 
-Optional downstream check (cluster `mu`):
+- sweep metrics in `results/sweep1/sweep_k/`
+- a final retrained model in `results/sweep1/final_k<K>/`
+
+## Post-Training Outputs
+
+Training directories contain:
+
+- `model.pt`
+- `specs.json`
+- `train_losses.csv`
+- `model-<epoch>.pt` when checkpointing is enabled
+
+Sweep directories additionally contain:
+
+- `sweep_results.csv`
+- `sweep_summary.json`
+- per-K replicate subdirectories
+
+## Network Extraction
+
+```bash
+bsvae-networks extract-networks \
+  --model-path results/sweep1/final_k16 \
+  --dataset data/expression.csv \
+  --output-dir results/sweep1/final_k16/networks \
+  --methods mu_cosine gamma_knn
+```
+
+Use `mu_cosine` when you want a graph based on latent-mean similarity. Use `gamma_knn` when you want a graph based on GMM soft assignments and have `faiss-cpu` available.
+
+## Module Extraction
+
+```bash
+bsvae-networks extract-modules \
+  --model-path results/sweep1/final_k16 \
+  --dataset data/expression.csv \
+  --output-dir results/sweep1/final_k16/modules \
+  --expr data/expression.csv \
+  --soft-eigengenes
+```
+
+Outputs:
+
+- `gamma.npz`
+- `hard_assignments.npz`
+- `soft_eigengenes.csv` when requested
+
+Optional extras:
+
+- `--use-leiden` to write `leiden_modules.csv`
+- `--aggregate-to-gene --tx2gene` to write gene-level assignment files
+
+## Latent Export And Analysis
+
+Export:
+
+```bash
+bsvae-networks export-latents \
+  --model-path results/sweep1/final_k16 \
+  --dataset data/expression.csv \
+  --output results/sweep1/final_k16/latents
+```
+
+Analyze:
 
 ```bash
 bsvae-networks latent-analysis \
@@ -49,62 +109,21 @@ bsvae-networks latent-analysis \
   --umap
 ```
 
-## Post-training outputs
+## Simulation Workflow
 
-`results/study1/` contains:
-
-- `model.pt`
-- `specs.json`
-- `train_losses.csv`
-- checkpoint files `model-<epoch>.pt` (if enabled)
-
-## Network extraction
+Generate one synthetic dataset:
 
 ```bash
-bsvae-networks extract-networks \
-  --model-path results/study1 \
-  --dataset data/expression.csv \
-  --output-dir results/study1/networks \
-  --methods mu_cosine
+bsvae-simulate generate \
+  --output data/sim_expr.csv \
+  --save-ground-truth data/sim_truth.csv
 ```
 
-## Module extraction
-
-```bash
-bsvae-networks extract-modules \
-  --model-path results/study1 \
-  --dataset data/expression.csv \
-  --output-dir results/study1/modules \
-  --soft-eigengenes \
-  --expr data/expression.csv
-```
-
-## Latent export and analysis
-
-```bash
-bsvae-networks export-latents \
-  --model-path results/study1 \
-  --dataset data/expression.csv \
-  --output results/study1/latents.npz
-
-bsvae-networks latent-analysis \
-  --model-path results/study1 \
-  --dataset data/expression.csv \
-  --output-dir results/study1/latent_analysis \
-  --kmeans-k 8 --umap
-```
-
-## Scenario-grid simulation benchmark
-
-Create starter config:
+Create a scenario grid:
 
 ```bash
 bsvae-simulate init-config --output sim.yaml
-```
 
-Generate full grid:
-
-```bash
 bsvae-simulate generate-grid \
   --config sim.yaml \
   --outdir results/sim_pub_v1 \
@@ -112,26 +131,10 @@ bsvae-simulate generate-grid \
   --base-seed 13
 ```
 
-Validate grid structure:
+Validate the grid:
 
 ```bash
 bsvae-simulate validate-grid --grid-dir results/sim_pub_v1
 ```
 
-Generate one scenario only:
-
-```bash
-bsvae-simulate generate-scenario \
-  --config sim.yaml \
-  --scenario-id S001__confounding-none__n_samples-100__nonlinear_mode-off__overlap_rate-0.0__signal_scale-0.4 \
-  --rep 0 \
-  --outdir results/sim_pub_v1
-```
-
-Method-ready files in each run directory:
-
-- BSVAE input: `expr/features_x_samples.tsv.gz`
-- WGCNA input: `expr/samples_x_features.tsv.gz`
-- GNVAE input: `expr/features_x_samples.tsv.gz` or `gnvae/fold_*/X_train.tsv.gz`
-- Ground truth labels: `truth/modules_hard.csv`
-- Canonical path map: `method_inputs.json`
+Each replicate contains method-ready files for BSVAE and comparator pipelines.

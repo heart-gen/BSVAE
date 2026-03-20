@@ -1,5 +1,7 @@
 # Model API
 
+These notes cover the main stable model-facing objects that matter for users extending the package in Python.
+
 ## `GMMModuleVAE`
 
 Defined in `src/bsvae/models/gmvae.py`.
@@ -12,42 +14,37 @@ GMMModuleVAE(
     hidden_dims: list[int] | None = None,
     dropout: float = 0.1,
     use_batch_norm: bool = True,
-    init_sd: float = 0.02,
     sigma_min: float = 0.3,
-    ema_alpha: float = 0.99,
+    normalize_input: bool = False,
 )
 ```
 
-### Forward signature
+The model is trained on feature profiles, so `n_features` here refers to the profile length, which is the number of samples in the expression matrix.
 
-```python
-recon_x, mu, logvar, z, gamma = model(x)
-```
-
-- `x`: `(batch, n_features)`
-- `recon_x`: reconstruction
-- `mu`, `logvar`: encoder posterior params
-- `z`: reparameterized latent sample
-- `gamma`: soft GMM assignments
-
-### Convenience methods
+### Common Methods
 
 - `encode(x) -> (mu, logvar)`
+- `forward(x) -> recon_x, mu, logvar, z, gamma`
 - `get_gamma(x) -> gamma`
 - `get_hard_assignments(x) -> argmax(gamma)`
 
-## Related model classes
+### Tensor Shapes
 
-- `FeatureEncoder` (`src/bsvae/models/encoder.py`)
-- `FeatureDecoder` (`src/bsvae/models/decoder.py`)
-- `GaussianMixturePrior` (`src/bsvae/models/gmm_prior.py`)
+- `x`: `(batch, n_samples)`
+- `mu`, `logvar`, `z`: `(batch, n_latent)`
+- `gamma`: `(batch, n_modules)`
+
+## Related Components
+
+- `FeatureEncoder` in `src/bsvae/models/encoder.py`
+- `FeatureDecoder` in `src/bsvae/models/decoder.py`
+- `GaussianMixturePrior` in `src/bsvae/models/gmm_prior.py`
 
 ## Losses
 
-`src/bsvae/models/losses.py` exposes:
+`src/bsvae/models/losses.py` exposes the main training losses:
 
 - `GMMVAELoss`
 - `WarmupLoss`
-- helpers such as `kl_vade`, `hierarchical_loss`, `gaussian_nll`
 
-`GMMVAELoss` combines reconstruction, KL (VaDE-style), separation, balance, and optional hierarchical terms.
+`GMMVAELoss` combines reconstruction with GMM-aware KL and optional auxiliary losses such as separation, balance, hierarchical consistency, and correlation-preservation terms.

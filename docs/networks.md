@@ -1,8 +1,15 @@
-# Network and Latent Workflows
+# Network And Latent Workflows
 
-`bsvae-networks` provides post-training utilities for `GMMModuleVAE` checkpoints.
+This is the canonical reference for `bsvae-networks`.
 
-## Network extraction
+## Prerequisites
+
+- a trained model directory containing `model.pt` and `specs.json`
+- the same expression matrix orientation used for training: `features x samples`
+
+## Extract Networks
+
+`extract-networks` builds sparse feature-feature adjacency matrices from learned latents.
 
 ```bash
 bsvae-networks extract-networks \
@@ -13,14 +20,19 @@ bsvae-networks extract-networks \
   --top-k 50
 ```
 
-### Supported methods
+Methods:
 
-- `mu_cosine`: top-k cosine neighbors in latent mean (`mu`) space
-- `gamma_knn`: FAISS HNSW kNN in soft-assignment (`gamma`) space
+- `mu_cosine`: cosine similarity among latent means, sparsified to top-k neighbors
+- `gamma_knn`: FAISS-based kNN graph built from normalized GMM soft assignments
 
-Outputs are sparse NPZ adjacency files named `<method>_adjacency.npz`.
+Outputs:
 
-## Module extraction
+- `mu_cosine_adjacency.npz`
+- `gamma_knn_adjacency.npz`
+
+## Extract Modules
+
+`extract-modules` writes soft and hard assignments from the fitted GMM.
 
 ```bash
 bsvae-networks extract-modules \
@@ -33,39 +45,61 @@ Primary outputs:
 
 - `gamma.npz`
 - `hard_assignments.npz`
-- optional `soft_eigengenes.csv` with `--soft-eigengenes --expr`
-- optional `leiden_modules.csv` with `--use-leiden`
 
-## Latent export
+Add eigengenes:
+
+```bash
+bsvae-networks extract-modules \
+  --model-path results/run \
+  --dataset data/expression.csv \
+  --output-dir results/run/modules \
+  --expr data/expression.csv \
+  --soft-eigengenes
+```
+
+Extra outputs:
+
+- `soft_eigengenes.csv`
+- `leiden_modules.csv` with `--use-leiden`
+- `gamma_gene.npz` and `hard_assignments_gene.npz` with `--aggregate-to-gene --tx2gene`
+
+## Export Latents
 
 ```bash
 bsvae-networks export-latents \
   --model-path results/run \
   --dataset data/expression.csv \
-  --output results/run/latents.npz
+  --output results/run/latents
 ```
 
-NPZ includes:
+This writes `<output>.npz` containing:
 
-- `mu`: latent means
-- `logvar`: latent log variances
-- `gamma`: soft module assignments
+- `mu`
+- `logvar`
+- `gamma`
 - `feature_ids`
 
-## Latent analysis
+## Latent Analysis
 
 ```bash
 bsvae-networks latent-analysis \
   --model-path results/run \
   --dataset data/expression.csv \
   --output-dir results/run/latent_analysis \
-  --kmeans-k 10 --umap
+  --kmeans-k 10 \
+  --umap
 ```
 
-Saved files may include:
+Possible outputs:
 
 - `latent_mu.csv`
 - `latent_logvar.csv`
 - `latent_clusters.csv`
 - `latent_embeddings.csv`
 - `latent_covariate_correlations.csv`
+
+## Performance Notes
+
+- `mu_cosine` scales with the number of features and can be expensive on large matrices.
+- `gamma_knn` requires `faiss-cpu`.
+- For memory-constrained runs, reduce `--batch-size` and consider `--no-cuda`.
