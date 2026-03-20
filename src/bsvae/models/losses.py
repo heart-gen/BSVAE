@@ -257,21 +257,23 @@ def hierarchical_loss(
         losses = []
 
         def _collect_gene_positions(dataset_idx_to_gene: Dict[int, str]) -> None:
-            # Deduplicate repeated samples of the same dataset feature so the
-            # hierarchical term only compares distinct isoforms per gene.
-            gene_to_batch_pos: Dict[str, Dict[int, int]] = {}
+            # Collapse repeated samples of the same dataset feature by averaging
+            # their encoder means, so the hierarchical term is order-invariant
+            # and only compares distinct isoforms per gene.
+            gene_to_batch_pos: Dict[str, Dict[int, List[int]]] = {}
             feat_idx_list = feature_idx_in_batch.tolist()
             for batch_pos, dataset_idx in enumerate(feat_idx_list):
                 dataset_idx = int(dataset_idx)
                 gid = dataset_idx_to_gene.get(dataset_idx)
                 if gid is not None:
-                    gene_to_batch_pos.setdefault(gid, {}).setdefault(dataset_idx, batch_pos)
+                    gene_to_batch_pos.setdefault(gid, {}).setdefault(dataset_idx, []).append(batch_pos)
 
             for positions_by_idx in gene_to_batch_pos.values():
-                positions = list(positions_by_idx.values())
-                if len(positions) < 2:
+                if len(positions_by_idx) < 2:
                     continue
-                mu_iso = mu[positions]  # (n, D)
+                mu_iso = torch.stack(
+                    [mu[batch_positions].mean(dim=0) for batch_positions in positions_by_idx.values()]
+                )
                 n = mu_iso.shape[0]
                 diffs = mu_iso.unsqueeze(0) - mu_iso.unsqueeze(1)  # (n, n, D)
                 dists = diffs.norm(dim=-1)                          # (n, n)

@@ -113,9 +113,9 @@ def test_hierarchical_loss_deduplicates_repeated_feature_indices_fast_path():
         idx_to_gene=idx_to_gene,
     )
 
-    # Distinct isoforms for geneA are dataset features 10 and 12 only.
-    # Expected L2 between mu[0] and mu[2] = 5.
-    assert loss.item() == pytest.approx(5.0, abs=1e-6)
+    # Dataset feature 10 is represented by the average of its duplicate rows,
+    # so the effective L2 to feature 12 is ||[1.5, 2.0] - [0, 0]|| = 2.5.
+    assert loss.item() == pytest.approx(2.5, abs=1e-6)
 
 
 def test_hierarchical_loss_deduplicates_repeated_feature_indices_fallback():
@@ -128,9 +128,9 @@ def test_hierarchical_loss_deduplicates_repeated_feature_indices_fallback():
 
     loss = hierarchical_loss(mu, gene_groups, feature_idx_in_batch=feature_idx)
 
-    # Distinct isoforms for geneA are dataset features 10 and 12 only.
-    # Expected L2 between mu[0] and mu[2] = 5.
-    assert loss.item() == pytest.approx(5.0, abs=1e-6)
+    # Dataset feature 10 is represented by the average of its duplicate rows,
+    # so the effective L2 to feature 12 is ||[1.5, 2.0] - [0, 0]|| = 2.5.
+    assert loss.item() == pytest.approx(2.5, abs=1e-6)
 
 
 @pytest.mark.parametrize("idx_to_gene", [None, {10: "geneA"}])
@@ -149,6 +149,31 @@ def test_hierarchical_loss_repeated_single_isoform_is_skipped(idx_to_gene):
 
     assert loss.item() == pytest.approx(0.0, abs=1e-6)
 
+
+@pytest.mark.parametrize("idx_to_gene", [None, {10: "geneA", 12: "geneA"}])
+def test_hierarchical_loss_duplicate_collapse_is_order_invariant(idx_to_gene):
+    """Permuting duplicated isoforms should not change hierarchical loss."""
+    mu_a = torch.tensor([[2.0, 0.0], [0.0, 0.0], [0.0, 4.0]])
+    mu_b = torch.tensor([[0.0, 4.0], [2.0, 0.0], [0.0, 0.0]])
+    feature_idx_a = torch.tensor([10, 10, 12])
+    feature_idx_b = torch.tensor([12, 10, 10])
+    gene_groups = {"geneA": [10, 12]}
+
+    loss_a = hierarchical_loss(
+        mu_a,
+        gene_groups,
+        feature_idx_in_batch=feature_idx_a,
+        idx_to_gene=idx_to_gene,
+    )
+    loss_b = hierarchical_loss(
+        mu_b,
+        gene_groups,
+        feature_idx_in_batch=feature_idx_b,
+        idx_to_gene=idx_to_gene,
+    )
+
+    assert loss_a.item() == pytest.approx(loss_b.item(), abs=1e-6)
+    assert loss_a.item() == pytest.approx((17.0 ** 0.5), abs=1e-6)
 
 def test_hierarchical_loss_empty_groups_returns_zero():
     """Empty gene_groups → zero loss (no pairs to compare)."""
