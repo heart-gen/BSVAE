@@ -97,6 +97,42 @@ def test_hierarchical_loss_with_feature_idx_mapping():
     assert loss.item() > 0.0
 
 
+def test_hierarchical_loss_deduplicates_repeated_feature_indices_fast_path():
+    """Repeated dataset indices should not create synthetic isoform pairs (fast path)."""
+    D = 2
+    mu = torch.zeros(3, D)
+    mu[0] = torch.tensor([3.0, 4.0])  # dataset feature 10 (duplicated in batch)
+    feature_idx = torch.tensor([10, 10, 12])
+    gene_groups = {"geneA": [10, 12]}
+    idx_to_gene = {10: "geneA", 12: "geneA"}
+
+    loss = hierarchical_loss(
+        mu,
+        gene_groups,
+        feature_idx_in_batch=feature_idx,
+        idx_to_gene=idx_to_gene,
+    )
+
+    # Distinct isoforms for geneA are dataset features 10 and 12 only.
+    # Expected L2 between mu[0] and mu[2] = 5.
+    assert loss.item() == pytest.approx(5.0, abs=1e-6)
+
+
+def test_hierarchical_loss_deduplicates_repeated_feature_indices_fallback():
+    """Repeated dataset indices should not create synthetic isoform pairs (fallback path)."""
+    D = 2
+    mu = torch.zeros(3, D)
+    mu[0] = torch.tensor([3.0, 4.0])  # dataset feature 10 (duplicated in batch)
+    feature_idx = torch.tensor([10, 10, 12])
+    gene_groups = {"geneA": [10, 12]}
+
+    loss = hierarchical_loss(mu, gene_groups, feature_idx_in_batch=feature_idx)
+
+    # Distinct isoforms for geneA are dataset features 10 and 12 only.
+    # Expected L2 between mu[0] and mu[2] = 5.
+    assert loss.item() == pytest.approx(5.0, abs=1e-6)
+
+
 def test_hierarchical_loss_empty_groups_returns_zero():
     """Empty gene_groups → zero loss (no pairs to compare)."""
     mu = torch.randn(4, 8)
