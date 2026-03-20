@@ -109,6 +109,13 @@ class Trainer:
         self._mu_buffer_count = 0
         self._feature_id_to_idx: Optional[Dict[str, int]] = None
 
+        # Precomputed reverse mapping: dataset_idx (int) → gene_id (str)
+        # Used by hierarchical_loss for O(B) fast path instead of O(G × n_iso) GPU ops
+        self._idx_to_gene: Dict[int, str] = {}
+        for gid, idxs in self.gene_groups.items():
+            for idx in idxs:
+                self._idx_to_gene[idx] = gid
+
         self.losses_logger = LossesLogger(
             os.path.join(save_dir, TRAIN_LOSSES_LOGFILE),
             log_level=logger.level,
@@ -337,6 +344,7 @@ class Trainer:
                 gene_groups=self.gene_groups or None,
                 feature_idx=feature_idx,
                 gmm_weight=gmm_weight,
+                idx_to_gene=self._idx_to_gene or None,
             )
 
         self.optimizer.zero_grad()
