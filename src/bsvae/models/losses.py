@@ -256,15 +256,18 @@ def hierarchical_loss(
     if feature_idx_in_batch is not None:
         if idx_to_gene is not None:
             # Fast path: O(B) Python dict lookups — no GPU tensor ops per gene
-            gene_to_batch_pos: Dict[str, List[int]] = {}
+            gene_to_feature_to_pos: Dict[str, Dict[int, int]] = {}
             feat_idx_list = feature_idx_in_batch.tolist()
             for batch_pos, dataset_idx in enumerate(feat_idx_list):
                 gid = idx_to_gene.get(int(dataset_idx))
                 if gid is not None:
-                    gene_to_batch_pos.setdefault(gid, []).append(batch_pos)
+                    gene_to_feature_to_pos.setdefault(gid, {}).setdefault(
+                        int(dataset_idx), batch_pos
+                    )
 
             losses = []
-            for gid, positions in gene_to_batch_pos.items():
+            for gid, feature_to_pos in gene_to_feature_to_pos.items():
+                positions = list(feature_to_pos.values())
                 if len(positions) < 2:
                     continue
                 mu_iso = mu[positions]  # (n, D)
@@ -280,15 +283,18 @@ def hierarchical_loss(
                 for idx in idxs:
                     _idx_to_gene[idx] = gid
 
-            gene_to_batch_pos = {}
+            gene_to_feature_to_pos: Dict[str, Dict[int, int]] = {}
             feat_idx_list = feature_idx_in_batch.tolist()
             for batch_pos, dataset_idx in enumerate(feat_idx_list):
                 gid = _idx_to_gene.get(int(dataset_idx))
                 if gid is not None:
-                    gene_to_batch_pos.setdefault(gid, []).append(batch_pos)
+                    gene_to_feature_to_pos.setdefault(gid, {}).setdefault(
+                        int(dataset_idx), batch_pos
+                    )
 
             losses = []
-            for gid, positions in gene_to_batch_pos.items():
+            for gid, feature_to_pos in gene_to_feature_to_pos.items():
+                positions = list(feature_to_pos.values())
                 if len(positions) < 2:
                     continue
                 mu_iso = mu[positions]  # (n, D)
