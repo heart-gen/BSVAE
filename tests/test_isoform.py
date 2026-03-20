@@ -133,6 +133,23 @@ def test_hierarchical_loss_deduplicates_repeated_feature_indices_fallback():
     assert loss.item() == pytest.approx(5.0, abs=1e-6)
 
 
+@pytest.mark.parametrize("idx_to_gene", [None, {10: "geneA"}])
+def test_hierarchical_loss_repeated_single_isoform_is_skipped(idx_to_gene):
+    """Repeated copies of one isoform should not trigger hierarchical loss."""
+    mu = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    feature_idx = torch.tensor([10, 10])
+    gene_groups = {"geneA": [10, 12]}
+
+    loss = hierarchical_loss(
+        mu,
+        gene_groups,
+        feature_idx_in_batch=feature_idx,
+        idx_to_gene=idx_to_gene,
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1e-6)
+
+
 def test_hierarchical_loss_empty_groups_returns_zero():
     """Empty gene_groups → zero loss (no pairs to compare)."""
     mu = torch.randn(4, 8)
