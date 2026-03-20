@@ -234,6 +234,7 @@ def hierarchical_loss(
     mu: torch.Tensor,
     gene_groups: Dict[str, List[int]],
     feature_idx_in_batch: Optional[torch.Tensor] = None,
+    idx_to_gene: Optional[Dict[int, str]] = None,
 ) -> torch.Tensor:
     """
     Mean pairwise L2 in μ-space for isoforms of the same gene.
@@ -244,28 +245,61 @@ def hierarchical_loss(
     gene_groups : dict mapping gene_id → list of dataset-level feature indices
     feature_idx_in_batch : (B,) int tensor mapping batch positions to dataset indices.
         If None, assumes the batch contains exactly the features in gene_groups.
+    idx_to_gene : optional precomputed reverse mapping dataset_idx → gene_id.
+        When provided alongside feature_idx_in_batch, enables an O(B) fast path
+        (128 Python dict lookups) instead of O(G × n_iso) GPU tensor equality ops.
 
     Returns
     -------
     loss : scalar tensor
     """
     if feature_idx_in_batch is not None:
-        feature_idx_in_batch = feature_idx_in_batch.to(mu.device)
+        if idx_to_gene is not None:
+            # Fast path: O(B) Python dict lookups — no GPU tensor ops per gene
+            gene_to_batch_pos: Dict[str, List[int]] = {}
+            feat_idx_list = feature_idx_in_batch.tolist()
+            for batch_pos, dataset_idx in enumerate(feat_idx_list):
+                gid = idx_to_gene.get(int(dataset_idx))
+                if gid is not None:
+                    gene_to_batch_pos.setdefault(gid, []).append(batch_pos)
 
-    losses = []
-    for gene_id, feat_indices in gene_groups.items():
-        if feature_idx_in_batch is not None:
-            # Find which batch positions correspond to these feature indices
-            batch_pos = [
-                (feature_idx_in_batch == idx).nonzero(as_tuple=True)[0]
-                for idx in feat_indices
-            ]
-            # Filter to positions actually present in the batch
-            present = [p for p in batch_pos if p.numel() > 0]
-            if len(present) < 2:
-                continue
-            mu_iso = torch.cat([mu[p[0:1]] for p in present], dim=0)  # (n, D)
+            losses = []
+            for gid, positions in gene_to_batch_pos.items():
+                if len(positions) < 2:
+                    continue
+                mu_iso = mu[positions]  # (n, D)
+                n = mu_iso.shape[0]
+                diffs = mu_iso.unsqueeze(0) - mu_iso.unsqueeze(1)  # (n, n, D)
+                dists = diffs.norm(dim=-1)                          # (n, n)
+                mask = torch.triu(torch.ones(n, n, device=mu.device), diagonal=1)
+                losses.append((dists * mask).sum() / mask.sum())
         else:
+            # Fallback: build reverse index on the fly (O(G × n_iso) Python, no GPU ops)
+            _idx_to_gene: Dict[int, str] = {}
+            for gid, idxs in gene_groups.items():
+                for idx in idxs:
+                    _idx_to_gene[idx] = gid
+
+            gene_to_batch_pos = {}
+            feat_idx_list = feature_idx_in_batch.tolist()
+            for batch_pos, dataset_idx in enumerate(feat_idx_list):
+                gid = _idx_to_gene.get(int(dataset_idx))
+                if gid is not None:
+                    gene_to_batch_pos.setdefault(gid, []).append(batch_pos)
+
+            losses = []
+            for gid, positions in gene_to_batch_pos.items():
+                if len(positions) < 2:
+                    continue
+                mu_iso = mu[positions]  # (n, D)
+                n = mu_iso.shape[0]
+                diffs = mu_iso.unsqueeze(0) - mu_iso.unsqueeze(1)  # (n, n, D)
+                dists = diffs.norm(dim=-1)                          # (n, n)
+                mask = torch.triu(torch.ones(n, n, device=mu.device), diagonal=1)
+                losses.append((dists * mask).sum() / mask.sum())
+    else:
+        losses = []
+        for gene_id, feat_indices in gene_groups.items():
             if len(feat_indices) < 2:
                 continue
             B = mu.shape[0]
@@ -275,13 +309,11 @@ def hierarchical_loss(
                     f"batch size {B}. Pass feature_idx_in_batch to use dataset-level indices."
                 )
             mu_iso = mu[feat_indices]   # (n, D)
-
-        # Mean pairwise L2 distance
-        n = mu_iso.shape[0]
-        diffs = mu_iso.unsqueeze(0) - mu_iso.unsqueeze(1)  # (n, n, D)
-        dists = diffs.norm(dim=-1)                          # (n, n)
-        mask = torch.triu(torch.ones(n, n, device=mu.device), diagonal=1)
-        losses.append((dists * mask).sum() / mask.sum())
+            n = mu_iso.shape[0]
+            diffs = mu_iso.unsqueeze(0) - mu_iso.unsqueeze(1)  # (n, n, D)
+            dists = diffs.norm(dim=-1)                          # (n, n)
+            mask = torch.triu(torch.ones(n, n, device=mu.device), diagonal=1)
+            losses.append((dists * mask).sum() / mask.sum())
 
     if not losses:
         return mu.new_zeros(1).squeeze()
@@ -408,6 +440,7 @@ class GMMVAELoss(nn.Module):
         gene_groups: Optional[Dict] = None,
         feature_idx: Optional[torch.Tensor] = None,
         gmm_weight: float = 1.0,
+        idx_to_gene: Optional[Dict[int, str]] = None,
     ) -> torch.Tensor:
         """
         Compute GMMModuleVAE total loss.
@@ -425,6 +458,8 @@ class GMMVAELoss(nn.Module):
         gene_groups : optional dict for hierarchical loss
         feature_idx : optional (B,) int tensor for hierarchical loss
         gmm_weight : float — ramp weight for GMM terms (0→1 during transition)
+        idx_to_gene : optional precomputed reverse mapping dataset_idx → gene_id
+            for O(B) fast path in hierarchical_loss
 
         Returns
         -------
@@ -485,7 +520,7 @@ class GMMVAELoss(nn.Module):
         # --- Hierarchical ---
         hier_loss = x.new_zeros(1).squeeze()
         if self.hier_strength > 0.0 and gene_groups:
-            hier_loss = hierarchical_loss(mu, gene_groups, feature_idx)
+            hier_loss = hierarchical_loss(mu, gene_groups, feature_idx, idx_to_gene=idx_to_gene)
 
         # --- Total ---
         loss = (
