@@ -146,19 +146,25 @@ def method_a_cosine(
 
     for start in range(0, F, chunk_size):
         end = min(start + chunk_size, F)
+        C = end - start
         chunk = mu_norm[start:end]            # (C, D)
         sim = chunk @ mu_norm.T               # (C, F)
 
-        # Top-K per row in the chunk
-        for local_i, row_sim in enumerate(sim):
+        # Exclude self-similarity
+        for local_i in range(C):
+            sim[local_i, start + local_i] = -np.inf
+
+        # Vectorised top-K per row across the whole chunk
+        top_idx = np.argpartition(sim, -k, axis=1)[:, -k:]  # (C, k)
+        top_vals = np.take_along_axis(sim, top_idx, axis=1)  # (C, k)
+
+        for local_i in range(C):
             global_i = start + local_i
-            row_sim[global_i] = -np.inf       # exclude self
-            top_idx = np.argpartition(row_sim, -k)[-k:]
-            for j in top_idx:
-                s = row_sim[j]
+            for rank in range(k):
+                s = top_vals[local_i, rank]
                 if s > 0:
                     rows.append(global_i)
-                    cols.append(j)
+                    cols.append(int(top_idx[local_i, rank]))
                     vals.append(float(s))
 
     A = sp.csr_matrix(

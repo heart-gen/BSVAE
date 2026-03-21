@@ -60,9 +60,6 @@ def save_model(
         If None, inferred from model attributes.
     filename : str
     """
-    device = next(model.parameters()).device
-    model.cpu()
-
     if metadata is None:
         metadata = _metadata_from_model(model)
     else:
@@ -75,10 +72,12 @@ def save_model(
         metadata.setdefault("dropout", model.encoder.dropout)
         metadata.setdefault("use_batch_norm", model.encoder.use_batch_norm)
         metadata.setdefault("sigma_min", model.gmm_prior.sigma_min)
+        metadata.setdefault("normalize_input", model.normalize_input)
 
     save_metadata(metadata, directory)
+    # Save state_dict directly without moving model — avoids state corruption
+    # if torch.save raises (e.g. disk full)
     torch.save(model.state_dict(), os.path.join(directory, filename))
-    model.to(device)
 
 
 def load_model(
@@ -132,6 +131,7 @@ def _metadata_from_model(model: GMMModuleVAE) -> dict:
         dropout=model.encoder.dropout,
         use_batch_norm=model.encoder.use_batch_norm,
         sigma_min=model.gmm_prior.sigma_min,
+        normalize_input=model.normalize_input,
     )
 
 
@@ -153,6 +153,7 @@ def _get_model(metadata: dict, device: torch.device, path_to_model: str) -> GMMM
         dropout=metadata.get("dropout", 0.1),
         use_batch_norm=use_batch_norm,
         sigma_min=metadata.get("sigma_min", 0.3),
+        normalize_input=metadata.get("normalize_input", False),
     ).to(device)
 
     if state_dict is None:

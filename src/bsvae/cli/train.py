@@ -91,8 +91,10 @@ def parse_args(cli_args=None):
 
     # --- Loss hyperparameters ---
     p.add_argument("--beta", type=float, default=1.0, help="KL weight (default: 1.0).")
-    p.add_argument("--free-bits", type=float, default=0.5,
-                   help="Per-dim KL lower bound in nats (default: 0.5).")
+    p.add_argument("--free-bits", type=float, default=0.0,
+                   help="Per-dim KL lower bound in nats (default: 0.0). "
+                        "Non-zero values hurt GMM cluster recovery by flooring γ to uniform; "
+                        "leave at 0.0 for normal use.")
     p.add_argument("--kl-warmup-epochs", type=int, default=0,
                    help="Epochs for β linear ramp within Phase 2 (default: 0).")
     p.add_argument("--kl-anneal-mode", choices=["linear", "cyclical"], default="linear")
@@ -101,8 +103,10 @@ def parse_args(cli_args=None):
                    help="λ_sep: σ-scaled separation loss weight (default: 0.1).")
     p.add_argument("--sep-alpha", type=float, default=2.0,
                    help="α: margin multiplier for separation loss (default: 2.0).")
-    p.add_argument("--bal-strength", type=float, default=0.01,
-                   help="λ_bal: γ-usage balance loss weight (default: 0.01).")
+    p.add_argument("--bal-strength", type=float, default=0.1,
+                   help="λ_bal: γ-usage balance loss weight (default: 0.1). "
+                        "Higher values force uniform usage; lower values allow natural "
+                        "module-size variation but risk dead components.")
     p.add_argument("--bal-ema-blend", type=float, default=0.5,
                    help="Balance loss blend α between EMA and batch (default: 0.5).")
     p.add_argument("--masked-recon", action="store_true", default=False,

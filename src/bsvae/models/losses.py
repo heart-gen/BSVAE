@@ -174,7 +174,12 @@ def kl_vade(
     mu_k : (K, D) — GMM centroids
     sigma2_k : (K,) — GMM component variances (with σ floor already applied)
     log_pi : (K,) — log mixing proportions
-    free_bits : float — per-dimension KL lower bound (nats)
+    free_bits : float — per (component, dimension) KL lower bound (nats).
+        Applied after averaging over the batch: the batch-mean KL for each
+        (k, d) pair is clamped to at least ``free_bits``, then this floor is
+        broadcast back to individual samples.  This is stricter than standard
+        per-dimension free-bits (K×D floors vs D floors) because each GMM
+        component gets its own per-dimension floor.
 
     Returns
     -------
@@ -201,7 +206,8 @@ def kl_vade(
         - 1.0
     )                                                         # (B, K, D)
 
-    # Apply free-bits: average over batch first, clamp, then restore
+    # Apply free-bits per (component, dim): average over batch, clamp,
+    # then use the clamped value as a floor for individual samples.
     if free_bits > 0:
         # kl_dim_mean: (K, D) — mean over batch per (component, dim)
         kl_dim_mean = kl_dim.mean(dim=0)                     # (K, D)
@@ -337,13 +343,21 @@ class GMMVAELoss(nn.Module):
     kl_n_cycles : int
         Number of cycles (informational). Default: 4.
     free_bits : float
-        Per-dimension KL lower bound (nats). Default: 0.5.
+        Per-dimension KL lower bound (nats). Default: 0.0 (disabled).
+        Non-zero values can prevent individual KL dimensions from collapsing
+        to zero, but empirically hurt GMM cluster recovery by creating a floor
+        that keeps γ uniform. Leave at 0.0 for normal use.
     sep_strength : float
         λ_sep — weight for separation loss. Default: 0.1.
     sep_alpha : float
         α — margin multiplier for σ-scaled separation. Default: 2.0.
     bal_strength : float
-        λ_bal — weight for γ-usage balance loss. Default: 0.01.
+        λ_bal — weight for γ-usage balance loss. Default: 0.1.
+        Higher values force uniform component usage, which hurts recovery
+        of imbalanced module sizes (common in real biological data).
+        Lower values risk dead components; the collapse-revival mechanism
+        handles this, but very small values (< 0.01) may cause cascading
+        collapse.
     pi_entropy_strength : float
         λ_pi — weight for KL(uniform || π) penalty. Default: 0.0 (disabled).
     bal_ema_blend : float
@@ -379,10 +393,10 @@ class GMMVAELoss(nn.Module):
         kl_anneal_mode: str = "linear",
         kl_cycle_length: int = 50,
         kl_n_cycles: int = 4,
-        free_bits: float = 0.5,
+        free_bits: float = 0.0,
         sep_strength: float = 0.1,
         sep_alpha: float = 2.0,
-        bal_strength: float = 0.01,
+        bal_strength: float = 0.1,
         pi_entropy_strength: float = 0.0,
         bal_ema_blend: float = 0.5,
         hier_strength: float = 0.0,
@@ -463,8 +477,11 @@ class GMMVAELoss(nn.Module):
         # Mask based on raw x (before any normalization) for masked_recon.
         mask = (x > 0).float() if self.masked_recon else None
         # Normalize target to match model's output space if normalize_input=True.
+        # Prefer the model's flag as the single source of truth; fall back to
+        # the loss's own flag for backward compatibility.
+        should_normalize = getattr(model, "normalize_input", self.normalize_input)
         x_target = x
-        if self.normalize_input:
+        if should_normalize:
             mu_x = x.mean(dim=-1, keepdim=True)
             sigma_x = x.std(dim=-1, keepdim=True).clamp(min=1e-6)
             x_target = (x - mu_x) / sigma_x
@@ -564,7 +581,8 @@ class WarmupLoss(nn.Module):
         kl_warmup_epochs: int = 20,
         kl_anneal_mode: str = "linear",
         kl_cycle_length: int = 50,
-        free_bits: float = 0.5,
+        free_bits: float = 0.0,
+        normalize_input: bool = False,
     ):
         super().__init__()
         self.beta = beta
@@ -572,6 +590,7 @@ class WarmupLoss(nn.Module):
         self.kl_anneal_mode = kl_anneal_mode
         self.kl_cycle_length = kl_cycle_length
         self.free_bits = free_bits
+        self.normalize_input = normalize_input
 
     def get_beta_for_epoch(self, epoch: int) -> float:
         if self.kl_anneal_mode == "cyclical":
@@ -592,7 +611,12 @@ class WarmupLoss(nn.Module):
         storer: Optional[Dict[str, list]] = None,
         epoch: int = 0,
     ) -> torch.Tensor:
-        recon_loss = F.mse_loss(recon_x, x, reduction="mean")
+        x_target = x
+        if self.normalize_input:
+            mu_x = x.mean(dim=-1, keepdim=True)
+            sigma_x = x.std(dim=-1, keepdim=True).clamp(min=1e-6)
+            x_target = (x - mu_x) / sigma_x
+        recon_loss = F.mse_loss(recon_x, x_target, reduction="mean")
         kl_loss, _ = kl_normal_loss_with_free_bits(
             mu, logvar, free_bits=self.free_bits, reduction="mean"
         )
