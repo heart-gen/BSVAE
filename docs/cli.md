@@ -34,13 +34,13 @@ Common options:
 - `--sigma-min` default `0.3`
 - `--normalize-input`
 - `--beta` default `1.0`
-- `--free-bits` default `0.5`
+- `--free-bits` default `0.0`
 - `--kl-warmup-epochs` default `0`
 - `--kl-anneal-mode` `linear` or `cyclical`
 - `--kl-cycle-length` default `50`
 - `--sep-strength` default `0.1`
 - `--sep-alpha` default `2.0`
-- `--bal-strength` default `0.01`
+- `--bal-strength` default `0.1`
 - `--bal-ema-blend` default `0.5`
 - `--pi-entropy-strength` default `0.0`
 - `--hier-strength` default `0.0`

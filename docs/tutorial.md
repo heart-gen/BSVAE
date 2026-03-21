@@ -212,7 +212,7 @@ Each replicate directory includes method-ready files such as:
 
 - Data orientation is wrong: transpose sample-by-feature matrices before training.
 - CUDA memory is tight: reduce `--batch-size` or use `--no-cuda`.
-- `gamma_knn` fails to import: install `faiss-cpu`.
+- `gamma_knn` fails: verify `faiss-cpu` is installed (required dependency, but may be missing in some custom envs).
 - Hierarchical options fail: make sure `--tx2gene` matches the matrix row IDs.
 - No eigengene file appears: `--soft-eigengenes` only writes output when `--expr` is supplied.
 
