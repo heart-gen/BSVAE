@@ -542,8 +542,6 @@ def optimize_resolution_modularity(
             edges_arr, weight_arr = _normalize_edge_list(edges, weights)
             if weight_arr is not None:
                 weight_arr = np.maximum(weight_arr, 0.0)
-                if np.any(weight_arr < 0):
-                    raise ValueError("Negative weights detected after adjacency transform.")
             graph = build_graph_from_edge_list(edges_arr, weight_arr, genes)
             genes = list(graph.vs["name"])
         elif transformed_adjacency is not None:
@@ -712,11 +710,6 @@ def leiden_modules(
             edges_arr, weight_arr = _normalize_edge_list(edges, weights)
             if weight_arr is not None:
                 weight_arr = np.maximum(weight_arr, 0.0)
-                if np.any(weight_arr < 0):
-                    raise ValueError(
-                        "Negative weights detected after adjacency transform. "
-                        "This should not occur for wgcna-signed mode."
-                    )
             graph = build_graph_from_edge_list(edges_arr, weight_arr, genes)
             genes = list(graph.vs["name"])
         else:
@@ -1036,7 +1029,8 @@ def compute_module_eigengenes_from_soft(
             eigengenes[f"module_{k}"] = np.zeros(len(sample_ids))
             continue
 
-        w_common = np.array([w_k[fids_k.index(f)] for f in common])
+        fid_to_widx = {f: i for i, f in enumerate(fids_k)}
+        w_common = np.array([w_k[fid_to_widx[f]] for f in common])
         sub_expr = expr.loc[common].values.T  # (S, n_feat)
 
         # Weight features by γ_k

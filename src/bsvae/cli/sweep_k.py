@@ -320,7 +320,7 @@ def parse_args(cli_args=None):
     p.add_argument("--kl-cycle-length", type=int, default=50)
     p.add_argument("--sep-strength", type=float, default=0.1)
     p.add_argument("--sep-alpha", type=float, default=2.0)
-    p.add_argument("--bal-strength", type=float, default=0.01)
+    p.add_argument("--bal-strength", type=float, default=0.1)
     p.add_argument("--bal-ema-blend", type=float, default=0.5)
     p.add_argument("--pi-entropy-strength", type=float, default=0.0)
     p.add_argument("--hier-strength", type=float, default=0.0)

@@ -103,6 +103,7 @@ class Trainer:
             kl_anneal_mode=gmm_loss_f.kl_anneal_mode,
             kl_cycle_length=gmm_loss_f.kl_cycle_length,
             free_bits=gmm_loss_f.free_bits,
+            normalize_input=gmm_loss_f.normalize_input,
         )
 
         self._mu_buffer: List[torch.Tensor] = []
@@ -215,7 +216,7 @@ class Trainer:
                 noise = torch.randn(D, device=gmm.mu_k.device) * noise_std
                 gmm.mu_k.data[k] = gmm.mu_k.data[best] + noise
                 gmm.log_sigma2_k.data[k] = gmm.log_sigma2_k.data[best]
-                gmm.log_pi_unnorm.data[k] = gmm.log_pi_unnorm.data[best]
+                gmm.log_pi_unnorm.data[k] = 0.0  # uniform prior — safer than copying best
                 gmm.rho_ema[k] = 1.0 / K
                 self.logger.info(
                     "Epoch %d | component %d dead (usage=%.4f); revived near component %d",
@@ -272,7 +273,7 @@ class Trainer:
             for batch in init_loader:
                 x = batch[0] if isinstance(batch, (list, tuple)) else batch
                 x = x.to(self.device)
-                mu, _ = self.model.encoder(x)
+                mu, _ = self.model.encode(x)
                 mu_parts.append(mu.cpu())
         self.model.train()
 
@@ -466,7 +467,7 @@ class LossesLogger:
             except FileNotFoundError:
                 pass
 
-        self.logger = logging.getLogger("losses_logger")
+        self.logger = logging.getLogger(f"losses_logger.{id(self)}")
         self.logger.handlers.clear()
         self.logger.setLevel(log_level)
         self.logger.propagate = False

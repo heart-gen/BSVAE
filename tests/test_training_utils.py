@@ -178,3 +178,94 @@ def test_evaluator():
         mean_loss = evaluator(loader)
         assert isinstance(mean_loss, float)
         assert mean_loss >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# normalize_input=True round-trip tests
+# ---------------------------------------------------------------------------
+
+def _make_model_normalized(n_samples=30, n_latent=6, n_modules=4):
+    return GMMModuleVAE(
+        n_features=n_samples,
+        n_latent=n_latent,
+        n_modules=n_modules,
+        hidden_dims=[16],
+        use_batch_norm=False,
+        normalize_input=True,
+    )
+
+
+def test_save_load_normalize_input_flag():
+    """normalize_input=True must survive save/load round-trip."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = _make_model_normalized(n_samples=20, n_latent=4, n_modules=3)
+        assert model.normalize_input is True
+
+        save_model(model, tmpdir)
+        metadata = load_metadata(tmpdir)
+        assert metadata["normalize_input"] is True
+
+        loaded = load_model(tmpdir, is_gpu=False)
+        assert loaded.normalize_input is True
+
+
+def test_save_load_normalize_input_state_preserved():
+    """Loaded model with normalize_input=True produces same output."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = _make_model_normalized(n_samples=20, n_latent=4, n_modules=3)
+        model.eval()
+        x = torch.randn(2, 20)
+        with torch.no_grad():
+            _, mu_orig, _, _, gamma_orig = model(x)
+
+        save_model(model, tmpdir)
+        loaded = load_model(tmpdir, is_gpu=False)
+        loaded.eval()
+        with torch.no_grad():
+            _, mu_loaded, _, _, gamma_loaded = loaded(x)
+
+        assert torch.allclose(mu_orig, mu_loaded, atol=1e-5)
+        assert torch.allclose(gamma_orig, gamma_loaded, atol=1e-5)
+
+
+def test_warmup_loss_normalize_input():
+    """WarmupLoss with normalize_input=True should match normalized target."""
+    B, N = 4, 20
+    x = torch.randn(B, N) + 5.0  # non-zero mean to make normalization matter
+    mu_x = x.mean(dim=-1, keepdim=True)
+    sigma_x = x.std(dim=-1, keepdim=True).clamp(min=1e-6)
+    x_normed = (x - mu_x) / sigma_x
+
+    # Perfect reconstruction of the normalized target should yield zero loss
+    loss_f = WarmupLoss(beta=0.0, normalize_input=True)
+    loss = loss_f(x, x_normed, torch.zeros(B, 4), torch.zeros(B, 4))
+    assert loss.item() < 1e-5
+
+    # With normalize_input=False and the same inputs the loss should be large
+    loss_f_raw = WarmupLoss(beta=0.0, normalize_input=False)
+    loss_raw = loss_f_raw(x, x_normed, torch.zeros(B, 4), torch.zeros(B, 4))
+    assert loss_raw.item() > 1.0  # raw x vs normalized recon = big error
+
+
+def test_trainer_normalize_input_full_cycle():
+    """Full training cycle with normalize_input=True completes without error."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = _make_model_normalized()
+        loader = _make_loader()
+        optimizer = optim.Adam(model.parameters(), lr=1e-3)
+        gmm_loss = GMMVAELoss(beta=0.1, normalize_input=True)
+
+        trainer = Trainer(
+            model=model,
+            optimizer=optimizer,
+            gmm_loss_f=gmm_loss,
+            save_dir=tmpdir,
+            is_progress_bar=False,
+            warmup_epochs=2,
+            transition_epochs=1,
+        )
+        # Verify the auto-constructed WarmupLoss inherited normalize_input
+        assert trainer.warmup_loss_f.normalize_input is True
+
+        trainer(loader, epochs=4)
+        assert not trainer.model.training
