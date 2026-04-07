@@ -209,28 +209,38 @@ class GaussianMixturePrior(nn.Module):
         eps: float = 1e-8,
         update_ema: bool = True,
         blend_alpha: float = 0.5,
+        bal_type: str = "uniform",
     ) -> torch.Tensor:
         """
-        γ-usage balance loss: KL(uniform || ρ + ε).
+        γ-usage balance loss.
 
-        L_bal = (1/K) Σ_k log(1 / (K · (ρ_ema_k + ε)))
+        bal_type="uniform" (default): KL(uniform || ρ + ε).
+            L_bal = (1/K) Σ_k log(1 / (K · (ρ_ema_k + ε)))
+            Prevents component collapse AND pushes toward equal-size modules.
+            Appropriate when modules are expected to be similar in size.
+
+        bal_type="entropy": -H(ρ) = Σ_k ρ_k log(ρ_k).
+            Minimising this maximises entropy, preventing collapse without
+            forcing equal sizes.  Recommended for variable-size modules
+            (biological data, NB sims with Dirichlet size distribution).
+
+        bal_type="none": always returns 0 (disables balance loss).
 
         Parameters
         ----------
         gamma : torch.Tensor, shape (B, K)
-            Soft assignments for the current batch.
         eps : float
-            Stability term. Default: 1e-8.
         update_ema : bool
-            Whether to update the EMA buffer (should be False at eval time).
         blend_alpha : float
-            Blend EMA and batch usage: ρ = α·ρ_ema + (1-α)·ρ_batch.
-            Default: 0.5.
+        bal_type : str, one of {"uniform", "entropy", "none"}
 
         Returns
         -------
         loss : torch.Tensor, scalar
         """
+        if bal_type == "none":
+            return gamma.new_zeros(1).squeeze()
+
         rho_batch = gamma.mean(dim=0)  # (K,)
 
         if update_ema and self.training:
@@ -244,10 +254,16 @@ class GaussianMixturePrior(nn.Module):
         alpha = float(blend_alpha)
         rho = alpha * self.rho_ema + (1.0 - alpha) * rho_batch
         rho = rho + eps
-        # KL(uniform || rho): (1/K) Σ_k log(1 / (K * rho_k))
-        #   = (1/K) Σ_k [-log(K) - log(rho_k)]
-        K = float(self.K)
-        loss = -(torch.log(rho) + math.log(K)).mean()
+
+        if bal_type == "uniform":
+            # KL(uniform || rho): (1/K) Σ_k log(1 / (K * rho_k))
+            K = float(self.K)
+            loss = -(torch.log(rho) + math.log(K)).mean()
+        elif bal_type == "entropy":
+            # -H(rho) = Σ_k rho_k * log(rho_k)  (minimising = maximising entropy)
+            loss = (rho * torch.log(rho)).sum()
+        else:
+            raise ValueError(f"Unknown bal_type: {bal_type!r}; expected 'uniform', 'entropy', or 'none'.")
         return loss
 
     # ------------------------------------------------------------------
@@ -297,5 +313,13 @@ class GaussianMixturePrior(nn.Module):
 
             self.log_sigma2_k[k] = log_var_k.to(self.log_sigma2_k.device)
 
-        # Reset mixing weights to uniform
-        nn.init.zeros_(self.log_pi_unnorm)
+        # Initialise mixing weights from K-means cluster counts (Laplace-smoothed).
+        # This gives the GMM a data-driven prior on module sizes rather than forcing
+        # equal proportions, which is critical when modules vary in size (sims 3/5/6/7).
+        import numpy as _np
+        counts = _np.bincount(labels, minlength=K).astype(_np.float32) + 1.0
+        log_counts = torch.tensor(_np.log(counts), dtype=torch.float32)
+        self.log_pi_unnorm.copy_(log_counts.to(self.log_pi_unnorm.device))
+        # Also initialise rho_ema so balance loss starts from the empirical proportions.
+        proportions = torch.tensor(counts / counts.sum(), dtype=torch.float32)
+        self.rho_ema.copy_(proportions.to(self.rho_ema.device))

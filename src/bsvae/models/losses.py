@@ -397,6 +397,8 @@ class GMMVAELoss(nn.Module):
         sep_strength: float = 0.1,
         sep_alpha: float = 2.0,
         bal_strength: float = 0.1,
+        bal_type: str = "uniform",
+        bal_scale_gmm: bool = False,
         pi_entropy_strength: float = 0.0,
         bal_ema_blend: float = 0.5,
         hier_strength: float = 0.0,
@@ -415,6 +417,8 @@ class GMMVAELoss(nn.Module):
         self.sep_strength = sep_strength
         self.sep_alpha = sep_alpha
         self.bal_strength = bal_strength
+        self.bal_type = bal_type
+        self.bal_scale_gmm = bal_scale_gmm
         self.pi_entropy_strength = pi_entropy_strength
         self.bal_ema_blend = bal_ema_blend
         self.hier_strength = hier_strength
@@ -512,6 +516,7 @@ class GMMVAELoss(nn.Module):
             gamma,
             update_ema=model.training,
             blend_alpha=self.bal_ema_blend,
+            bal_type=self.bal_type,
         )
 
         # --- Pi entropy (encourage non-collapsed mixing weights) ---
@@ -534,12 +539,14 @@ class GMMVAELoss(nn.Module):
             hier_loss = hierarchical_loss(mu, gene_groups, feature_idx, idx_to_gene=idx_to_gene)
 
         # --- Total ---
+        # bal_scale_gmm=True ramps the balance loss with gmm_weight so it does not
+        # oppose GMM learning at full strength while the KL signal is still building.
+        bal_scale = gmm_weight if self.bal_scale_gmm else 1.0
         loss = (
             recon_loss
             + effective_beta * gmm_weight * kl_loss
             + self.sep_strength * gmm_weight * sep_loss
-            # Keep balance and pi-entropy active during transition (no gmm_weight scaling)
-            + self.bal_strength * bal_loss
+            + self.bal_strength * bal_scale * bal_loss
             + self.pi_entropy_strength * pi_entropy_loss
             + self.corr_strength * corr_loss
             + self.latent_corr_strength * latent_corr

@@ -109,6 +109,16 @@ def parse_args(cli_args=None):
                         "module-size variation but risk dead components.")
     p.add_argument("--bal-ema-blend", type=float, default=0.5,
                    help="Balance loss blend α between EMA and batch (default: 0.5).")
+    p.add_argument("--bal-type", choices=["uniform", "entropy", "none"], default="uniform",
+                   help="Balance loss mode (default: 'uniform'). "
+                        "'uniform': KL(uniform || ρ) — prevents collapse and pushes equal sizes. "
+                        "'entropy': -H(ρ) — prevents collapse without equal-size pressure; "
+                        "recommended for variable-size modules (biological data). "
+                        "'none': disabled.")
+    p.add_argument("--bal-scale-gmm", action="store_true", default=False,
+                   help="Scale balance loss by gmm_weight, ramping it in alongside the KL term. "
+                        "Prevents the balance loss from opposing GMM learning during transition. "
+                        "Recommended with --bal-type entropy for variable-size modules.")
     p.add_argument("--masked-recon", action="store_true", default=False,
                    help="Compute reconstruction loss only on non-zero input entries. "
                         "Recommended for zero-inflated count data.")
@@ -243,6 +253,8 @@ def main(args):
         sep_strength=args.sep_strength,
         sep_alpha=args.sep_alpha,
         bal_strength=args.bal_strength,
+        bal_type=args.bal_type,
+        bal_scale_gmm=args.bal_scale_gmm,
         pi_entropy_strength=args.pi_entropy_strength,
         bal_ema_blend=args.bal_ema_blend,
         hier_strength=args.hier_strength,
