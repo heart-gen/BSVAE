@@ -27,13 +27,13 @@ from bsvae.benchmark.runners import (
     run_wgcna,
     wgcna_available,
 )
-from bsvae.simulation.metrics import evaluate_labels, gene_level_metrics, normalize_labels
+from bsvae.simulation.metrics import evaluate_labels, gene_level_metrics, normalize_labels, switched_isoform_metrics
 from bsvae.simulation.scenario import expand_scenarios, generate_scenario, load_config
 
 logger = logging.getLogger(__name__)
 
 METHODS = ("bsvae", "wgcna")
-KNOWN_METHODS = ("bsvae", "bsvae_consensus", "wgcna", "wgcna_signed", "wgcna_unsigned")
+KNOWN_METHODS = ("bsvae", "bsvae_consensus", "bsvae_residual", "wgcna", "wgcna_signed", "wgcna_unsigned")
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +56,9 @@ def load_truth(run_dir: str | Path) -> Dict:
         out["tx2gene"] = dict(zip(t["transcript_id"].astype(str), t["gene_id"].astype(str)))
         g = pd.read_csv(truth / "modules_gene.csv")
         out["truth_gene"] = dict(zip(g["gene_id"].astype(str), g["module"].astype(int)))
+    sw = truth / "switch_table.tsv.gz"
+    if sw.exists():
+        out["switch_table"] = pd.read_csv(sw, sep="\t")
     return out
 
 
@@ -63,6 +66,11 @@ def evaluate_run(truth: Dict, result: MethodResult) -> Dict[str, float]:
     """Score a MethodResult against loaded truth; NaN metrics when not ok."""
     if result.status != "ok" or result.labels is None:
         return {}
+    if result.method == "bsvae_residual":
+        if "switch_table" not in truth:
+            return {}
+        pred = result.labels.copy(); pred.index = pred.index.astype(str)
+        return switched_isoform_metrics(dict(zip(pred.index, normalize_labels(pred.values))), list(pred.index), truth["switch_table"])
     truth_labels: pd.Series = truth["labels"]
     pred = result.labels.copy()
     pred.index = pred.index.astype(str)
@@ -179,7 +187,23 @@ def run_one(
                 params={"n_runs": cons.n_runs, "run_ari_to_consensus": cons.run_ari,
                         "mean_agreement": float(cons.agreement.mean())},
             )
-    elif method in ("wgcna", "wgcna_unsigned", "wgcna_signed"):
+    elif method == "bsvae_residual":
+        from bsvae.utils.isoform import isoform_residuals
+        if "tx2gene" not in truth:
+            result = MethodResult("bsvae_residual", "skipped", message="scenario has no transcript structure")
+        else:
+            resid, _ = isoform_residuals(expr, truth["tx2gene"])
+            cfg = {k: v for k, v in (bsvae_cfg or {}).items() if not k.startswith("_")}
+            cfg["normalize_input"] = True
+            kwargs = {"over_cluster_factor": over_cluster_factor} if over_cluster_factor is not None else {}
+            sub = run_bsvae(resid, n_modules=n_modules, seed=seed, workdir=out_dir, train_cfg=cfg,
+                            post_cfg=post_cfg, device=device, postprocess=postprocess, **kwargs)
+            labels = pd.Series(-1, index=expr.index.astype(str), name="module")
+            if sub.status == "ok":
+                labels.loc[sub.labels.index.astype(str)] = sub.labels.values
+            result = MethodResult("bsvae_residual", sub.status, labels=labels if sub.status == "ok" else None,
+                                  runtime_s=sub.runtime_s, params=sub.params, message=sub.message)
+
         cfg = dict(WGCNA_DEFAULTS)
         cfg.update(wgcna_cfg or {})
         if method == "wgcna_unsigned":
@@ -286,7 +310,8 @@ def run_grid(
 SUMMARY_METRICS = [
     "ari_all", "nmi_all", "ari_assigned", "nmi_assigned", "mean_best_match_jaccard",
     "module_recovery_50", "frac_pred_grey", "grey_recall", "grey_precision", "K_ratio",
-    "gene_ari", "split_detection_rate", "isoform_gene_agreement", "runtime_s",
+    "gene_ari", "split_detection_rate", "isoform_gene_agreement",
+    "switched_recall", "switched_precision", "switched_ari", "runtime_s",
 ]
 
 

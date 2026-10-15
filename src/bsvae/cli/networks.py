@@ -6,6 +6,7 @@ Subcommands
   extract-networks   Method A (μ cosine) or Method B (FAISS γ-kNN)
   extract-modules    GMM soft/hard assignments + soft-weighted eigengenes
   consensus-modules  Consensus (majority vote) over several extract-modules runs
+  isoform-residuals  Gene-programme-removed transcript matrix for isoform-specific modules
   export-latents     Save μ, logσ², γ as NPZ
   latent-analysis    UMAP, clustering, covariate correlation
 """
@@ -108,6 +109,19 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Features whose consensus label is supported by fewer than this fraction "
                          "of runs are unassigned (default: 0.5).")
     cm.add_argument("--min-module-size", type=int, default=10)
+
+    # ------------------------------------------------------------------
+    # isoform-residuals
+    # ------------------------------------------------------------------
+    ir = subs.add_parser("isoform-residuals",
+                         help="Remove each isoform's gene-level programme; cluster the residuals for "
+                              "isoform-specific modules.")
+    ir.add_argument("--dataset", required=True, help="Transcript matrix (transcripts × samples, log scale).")
+    ir.add_argument("--tx2gene", required=True)
+    ir.add_argument("--output", required=True, help="Residual matrix path (.tsv.gz / .csv).")
+    ir.add_argument("--stats", default=None, help="Optional per-transcript statistics table.")
+    ir.add_argument("--min-isoforms", type=int, default=2)
+    ir.add_argument("--keep-tx-version", action="store_true", default=False)
 
     # ------------------------------------------------------------------
     # export-latents
@@ -336,6 +350,25 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
         logger.info("Leiden fallback modules saved.")
 
 
+def handle_isoform_residuals(args, logger: logging.Logger) -> None:
+    from bsvae.utils.hierarchy import load_tx2gene
+    from bsvae.utils.isoform import isoform_residuals
+
+    expr = _read_table(args.dataset)
+    tx2gene = load_tx2gene(path=args.tx2gene, feature_ids=list(expr.index.astype(str)),
+                           keep_version=args.keep_tx_version, logger=logger)
+    resid, stats = isoform_residuals(expr, tx2gene, min_isoforms=args.min_isoforms,
+                                     keep_version=args.keep_tx_version)
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    sep = "\t" if ".tsv" in [s.lower() for s in out.suffixes] else ","
+    resid.to_csv(out, sep=sep, compression="gzip" if out.suffix == ".gz" else None)
+    logger.info("Residual matrix (%d × %d) written to %s", *resid.shape, out)
+    if args.stats:
+        stats.to_csv(args.stats, sep="\t" if args.stats.endswith((".tsv", ".tsv.gz")) else ",")
+        logger.info("Per-transcript statistics written to %s", args.stats)
+
+
 def handle_consensus_modules(args, logger: logging.Logger) -> None:
     import numpy as np
     import pandas as pd
@@ -483,6 +516,8 @@ def cli(argv=None):
         handle_extract_networks(args, logger)
     elif args.command == "extract-modules":
         handle_extract_modules(args, logger)
+    elif args.command == "isoform-residuals":
+        handle_isoform_residuals(args, logger)
     elif args.command == "consensus-modules":
         handle_consensus_modules(args, logger)
     elif args.command == "export-latents":
