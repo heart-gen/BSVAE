@@ -109,10 +109,36 @@ def test_gmm_prior_hard_assignments():
 
 def test_gmm_prior_sigma_floor():
     prior = GaussianMixturePrior(n_components=3, n_latent=4, sigma_min=0.3)
-    # Force very negative log_sigma2_k
-    prior.log_sigma2_k.data.fill_(-100.0)
+    # Push the raw parameter far below the floor
+    prior.sigma2_raw.data.fill_(-100.0)
     sigma2 = prior.sigma2_k
     assert (sigma2 >= 0.3 ** 2 - 1e-6).all()
+    assert torch.allclose(sigma2, torch.full_like(sigma2, 0.3 ** 2), atol=1e-6)
+
+
+def test_gmm_prior_sigma_floor_keeps_gradient():
+    """Softplus floor: gradient w.r.t. the raw parameter is non-zero at the floor."""
+    prior = GaussianMixturePrior(n_components=3, n_latent=4, sigma_min=0.3)
+    prior.sigma2_raw.data.fill_(-3.0)
+    prior.sigma2_k.sum().backward()
+    assert (prior.sigma2_raw.grad.abs() > 0).all()
+
+
+def test_gmm_prior_set_log_sigma2_roundtrip():
+    prior = GaussianMixturePrior(n_components=2, n_latent=4, sigma_min=0.3)
+    prior.set_log_sigma2_(0, 0.7)
+    prior.set_log_sigma2_(1, -5.0)  # below floor → clamped to floor
+    assert abs(prior.log_sigma2_k[0].item() - 0.7) < 1e-4
+    assert abs(prior.sigma2_k[1].item() - 0.3 ** 2) < 1e-5
+
+
+def test_gmm_prior_loads_legacy_state_dict():
+    prior = GaussianMixturePrior(n_components=2, n_latent=4, sigma_min=0.3)
+    legacy = {k: v for k, v in prior.state_dict().items() if k != "sigma2_raw"}
+    legacy["log_sigma2_k"] = torch.tensor([0.5, -1.0])
+    prior.load_state_dict(legacy)
+    assert abs(prior.log_sigma2_k[0].item() - 0.5) < 1e-4
+    assert abs(prior.log_sigma2_k[1].item() - (-1.0)) < 1e-4
 
 
 def test_gmm_prior_log_pi_normalised():
@@ -313,3 +339,107 @@ def test_kl_normal_loss_with_free_bits():
     kl_total, kl_per_dim = kl_normal_loss_with_free_bits(mu, logvar, free_bits=0.5)
     # KL for unit Gaussian = 0, but free bits clamps to 0.5 per dim
     assert abs(kl_total.item() - 4 * 0.5) < 1e-4  # 4 dims × 0.5 nats
+
+
+# ---------------------------------------------------------------------------
+# Phase-1 review fixes: KL scaling, shared recon target, annealing, hier loss
+# ---------------------------------------------------------------------------
+
+def _loss_inputs(B=6, N=20, D=4, K=3, seed=0):
+    torch.manual_seed(seed)
+    model = GMMModuleVAE(n_features=N, n_latent=D, n_modules=K, hidden_dims=[8], use_batch_norm=False)
+    x = torch.randn(B, N) * 3 + 1
+    recon_x, mu, logvar, z, gamma = model(x)
+    return model, x, recon_x, mu, logvar, gamma
+
+
+def test_kl_per_element_scales_kl_by_profile_length():
+    model, x, recon_x, mu, logvar, gamma = _loss_inputs()
+    N = x.shape[1]
+    legacy = GMMVAELoss(beta=1.0, sep_strength=0.0, bal_strength=0.0, kl_per_element=False)
+    scaled = GMMVAELoss(beta=1.0, sep_strength=0.0, bal_strength=0.0, kl_per_element=True)
+    s_leg, s_new = {}, {}
+    legacy(x, recon_x, mu, logvar, gamma, model, storer=s_leg)
+    scaled(x, recon_x, mu, logvar, gamma, model, storer=s_new)
+    assert abs(s_new["kl_loss"][0] - s_leg["kl_loss"][0] / N) < 1e-6
+    assert abs(s_new["recon_loss"][0] - s_leg["recon_loss"][0]) < 1e-6
+
+
+def test_warmup_loss_follows_model_normalize_flag():
+    model, x, recon_x, mu, logvar, _ = _loss_inputs()
+    model.normalize_input = True
+    warm = WarmupLoss(beta=0.0, normalize_input=False)   # loss flag wrong on purpose
+    s_model, s_raw = {}, {}
+    warm(x, recon_x, mu, logvar, storer=s_model, model=model)
+    warm(x, recon_x, mu, logvar, storer=s_raw)           # no model → raw target
+    x_z = (x - x.mean(-1, keepdim=True)) / x.std(-1, keepdim=True).clamp(min=1e-6)
+    expected = torch.nn.functional.mse_loss(recon_x, x_z).item()
+    assert abs(s_model["recon_loss"][0] - expected) < 1e-5
+    assert abs(s_raw["recon_loss"][0] - torch.nn.functional.mse_loss(recon_x, x).item()) < 1e-5
+
+
+def test_masked_recon_keeps_negative_values():
+    model, x, recon_x, mu, logvar, gamma = _loss_inputs()
+    x = x.clone()
+    x[:, :5] = 0.0
+    x[:, 5:10] = -2.0
+    loss_f = GMMVAELoss(beta=0.0, sep_strength=0.0, bal_strength=0.0, masked_recon=True)
+    s = {}
+    loss_f(x, recon_x, mu, logvar, gamma, model, storer=s)
+    mask = (x != 0).float()
+    expected = (((recon_x - x) ** 2) * mask).sum() / mask.sum()
+    assert abs(s["recon_loss"][0] - expected.item()) < 1e-5
+
+
+def test_get_beta_none_returns_full_beta():
+    lin = GMMVAELoss(beta=0.7, kl_warmup_epochs=100)
+    cyc = GMMVAELoss(beta=0.7, kl_anneal_mode="cyclical", kl_cycle_length=10)
+    assert lin.get_beta_for_epoch(0) == 0.0 and lin.get_beta_for_epoch(None) == 0.7
+    assert cyc.get_beta_for_epoch(0) == 0.0 and cyc.get_beta_for_epoch(None) == 0.7
+    assert WarmupLoss(beta=0.3, kl_warmup_epochs=10).get_beta_for_epoch(None) == 0.3
+
+
+def test_separation_loss_is_mean_over_pairs():
+    torch.manual_seed(0)
+    small = GaussianMixturePrior(n_components=3, n_latent=2)
+    big = GaussianMixturePrior(n_components=12, n_latent=2)
+    with torch.no_grad():
+        small.mu_k.zero_(); big.mu_k.zero_()        # every pair violates by α(σ_i+σ_j)
+        small.sigma2_raw.fill_(0.0); big.sigma2_raw.fill_(0.0)
+    assert torch.isclose(small.separation_loss(), big.separation_loss())
+
+
+def test_encoder_logvar_is_bounded():
+    enc = FeatureEncoder(n_features=5, n_latent=3, hidden_dims=[4], use_batch_norm=False)
+    with torch.no_grad():
+        enc.fc_logvar.weight.fill_(100.0)
+        enc.fc_logvar.bias.fill_(1000.0)
+    _, logvar = enc(torch.randn(2, 5))
+    assert logvar.max() <= 10.0 and logvar.min() >= -10.0
+
+
+def test_hierarchical_loss_margin_and_corr_weight():
+    from bsvae.models.losses import hierarchical_loss
+    mu = torch.zeros(4, 3)
+    mu[1] = 0.5    # 0.5 away from mu[0]
+    mu[3] = 5.0    # far from mu[2]
+    groups = {"gA": [0, 1], "gB": [2, 3]}
+    # Margin larger than the gA distance → gA contributes 0, gB contributes dist - margin.
+    loss = hierarchical_loss(mu, groups, margin=1.0)
+    expected = (5.0 * math.sqrt(3) - 1.0) / 2.0   # mean over the two genes (gA = 0)
+    assert abs(loss.item() - expected) < 1e-4
+    # Correlation weighting: anti-correlated isoforms get zero weight.
+    t = torch.linspace(-1, 1, 10)
+    x = torch.stack([t, t, t, -t])          # gA isoforms correlated, gB anti-correlated
+    loss_w = hierarchical_loss(mu, groups, x=x, margin=0.0, corr_weight=True)
+    assert abs(loss_w.item() - 0.5 * math.sqrt(3)) < 1e-4  # only gA survives
+
+
+def test_latent_corr_loss_is_shift_invariant():
+    from bsvae.models.losses import latent_corr_loss
+    torch.manual_seed(0)
+    x = torch.randn(8, 30)
+    mu = torch.randn(8, 4)
+    a = latent_corr_loss(x, mu)
+    b = latent_corr_loss(x, mu + 10.0)   # shared offset must not change the loss
+    assert torch.isclose(a, b, atol=1e-5)

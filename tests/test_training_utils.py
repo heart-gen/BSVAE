@@ -40,25 +40,170 @@ def _make_model(n_samples=30, n_latent=6, n_modules=4):
     )
 
 
-def test_trainer_warmup_phase():
-    """Phase 1: WarmupLoss should be used; μ buffer should be populated."""
+def test_trainer_rejects_warmup_longer_than_training():
+    """warmup_epochs >= epochs would never initialise the GMM prior."""
     with tempfile.TemporaryDirectory() as tmpdir:
         model = _make_model()
         loader = _make_loader()
         optimizer = optim.Adam(model.parameters(), lr=1e-3)
-        gmm_loss = GMMVAELoss(beta=1.0)
-
         trainer = Trainer(
-            model=model,
-            optimizer=optimizer,
-            gmm_loss_f=gmm_loss,
-            save_dir=tmpdir,
-            is_progress_bar=False,
-            warmup_epochs=3,
-            transition_epochs=2,
+            model=model, optimizer=optimizer, gmm_loss_f=GMMVAELoss(beta=1.0),
+            save_dir=tmpdir, is_progress_bar=False, warmup_epochs=3, transition_epochs=2,
         )
-        trainer(loader, epochs=2)  # stays fully in warmup
-        assert trainer._mu_buffer_count > 0 or len(trainer._mu_buffer) > 0
+        with pytest.raises(ValueError, match="warmup_epochs"):
+            trainer(loader, epochs=2)
+
+
+def test_trainer_syncs_warmup_loss_with_model_normalization():
+    """The warmup loss must reconstruct the same (z-scored) target as the GMM loss."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = _make_model()
+        model.normalize_input = True
+        warm = WarmupLoss(beta=1.0, normalize_input=False)
+        trainer = Trainer(
+            model=model, optimizer=optim.Adam(model.parameters(), lr=1e-3),
+            gmm_loss_f=GMMVAELoss(beta=1.0, masked_recon=True), warmup_loss_f=warm,
+            save_dir=tmpdir, is_progress_bar=False, warmup_epochs=1, transition_epochs=1,
+        )
+        assert trainer.warmup_loss_f.normalize_input is True
+        assert trainer.warmup_loss_f.masked_recon is True
+
+
+def test_trainer_phase_relative_kl_epoch():
+    """GMMVAELoss receives the epoch counted from the start of the GMM phase."""
+    seen = []
+
+    class SpyLoss(GMMVAELoss):
+        def forward(self, *args, **kwargs):
+            seen.append(kwargs.get("epoch"))
+            return super().forward(*args, **kwargs)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = _make_model()
+        loader = _make_loader()
+        trainer = Trainer(
+            model=model, optimizer=optim.Adam(model.parameters(), lr=1e-3),
+            gmm_loss_f=SpyLoss(beta=0.1), save_dir=tmpdir, is_progress_bar=False,
+            warmup_epochs=2, transition_epochs=1,
+        )
+        trainer(loader, epochs=4)
+        assert min(seen) == 0 and max(seen) == 1
+
+
+def _trainer_for_revival(tmpdir, usage_floor=0.002):
+    model = _make_model(n_modules=4)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    trainer = Trainer(
+        model=model, optimizer=optimizer, gmm_loss_f=GMMVAELoss(beta=0.1),
+        save_dir=tmpdir, is_progress_bar=False, warmup_epochs=1, transition_epochs=1,
+        collapse_min_usage=usage_floor,
+    )
+    # Give the prior non-trivial mixing logits (as K-means init would) and
+    # populate Adam state so the reset path is exercised.
+    gmm = model.gmm_prior
+    with torch.no_grad():
+        gmm.log_pi_unnorm.copy_(torch.tensor([6.0, 5.0, 4.0, 3.0]))
+        gmm.rho_ema.copy_(torch.tensor([0.6, 0.3, 0.09, 0.01]))
+    loss = gmm.separation_loss() + gmm.log_pi.sum()
+    loss.backward()
+    optimizer.step()
+    return trainer, model, optimizer
+
+
+def test_revival_splits_best_component_and_resets_adam():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        trainer, model, optimizer = _trainer_for_revival(tmpdir)
+        gmm = model.gmm_prior
+        pi_before = gmm.pi.detach().clone()
+        usage = [0.6, 0.3, 0.09, 0.0005]   # component 3 dead
+        trainer._maybe_reinit_collapsed_components(epoch=5, usage=usage)
+        pi_after = gmm.pi.detach()
+        # Split: revived component shares the best component's weight equally.
+        assert torch.isclose(pi_after[3], pi_after[0])
+        # Relative to an untouched component, the split component's weight halves.
+        ratio_before = pi_before[0] / pi_before[1]
+        ratio_after = pi_after[0] / pi_after[1]
+        assert torch.isclose(ratio_after, ratio_before / 2, rtol=1e-4)
+        assert torch.isclose(gmm.rho_ema[3], gmm.rho_ema[0])
+        # Centroid near the split component, variance copied.
+        assert (gmm.mu_k[3] - gmm.mu_k[0]).norm() < 3 * gmm.sigma2_k[0].sqrt()
+        assert torch.isclose(gmm.sigma2_k[3], gmm.sigma2_k[0])
+        # Adam moments for the touched rows are zeroed.
+        state = optimizer.state[gmm.mu_k]
+        assert state["exp_avg"][3].abs().sum() == 0 and state["exp_avg"][0].abs().sum() == 0
+        assert state["exp_avg"][1].abs().sum() > 0
+
+
+def test_revival_spreads_multiple_dead_components():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        trainer, model, _ = _trainer_for_revival(tmpdir)
+        gmm = model.gmm_prior
+        usage = [0.7, 0.3, 0.0001, 0.0001]
+        trainer._maybe_reinit_collapsed_components(epoch=5, usage=usage)
+        # Dead components 2 and 3 are split from the two live components (0 and 1).
+        assert (gmm.mu_k[2] - gmm.mu_k[0]).norm() < 3 * gmm.sigma2_k[0].sqrt()
+        assert (gmm.mu_k[3] - gmm.mu_k[1]).norm() < 3 * gmm.sigma2_k[1].sqrt()
+
+
+def test_revival_uses_absolute_usage_floor():
+    """A small but live module (above the absolute floor) is not revived."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        trainer, model, _ = _trainer_for_revival(tmpdir, usage_floor=0.002)
+        gmm = model.gmm_prior
+        mu_before = gmm.mu_k.detach().clone()
+        usage = [0.9, 0.05, 0.03, 0.02]   # 2 % usage is < 0.5/K but > 0.002
+        trainer._maybe_reinit_collapsed_components(epoch=5, usage=usage)
+        assert torch.equal(gmm.mu_k.detach(), mu_before)
+
+
+def test_no_revival_on_last_epoch_or_during_transition():
+    calls = []
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = _make_model()
+        loader = _make_loader()
+        trainer = Trainer(
+            model=model, optimizer=optim.Adam(model.parameters(), lr=1e-3),
+            gmm_loss_f=GMMVAELoss(beta=0.1), save_dir=tmpdir, is_progress_bar=False,
+            warmup_epochs=1, transition_epochs=2, collapse_min_usage=1.0,  # everything "dead"
+        )
+        trainer._maybe_reinit_collapsed_components = lambda epoch, usage: calls.append(epoch)
+        trainer(loader, epochs=5)
+        # epochs 0 (warmup), 1-2 (transition, gmm_weight<1) and 4 (last) are excluded.
+        assert calls == [3]
+
+
+def test_collapse_threshold_deprecated_warning(caplog):
+    import logging
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = _make_model()
+        logger = logging.getLogger("test_collapse_dep")
+        with caplog.at_level(logging.WARNING, logger="test_collapse_dep"):
+            Trainer(
+                model=model, optimizer=optim.Adam(model.parameters(), lr=1e-3),
+                gmm_loss_f=GMMVAELoss(beta=0.1), save_dir=tmpdir, is_progress_bar=False,
+                logger=logger, collapse_threshold=0.5,
+            )
+        assert any("deprecated" in r.message for r in caplog.records)
+
+
+def test_losses_csv_written_at_warning_level():
+    import logging
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = _make_model()
+        loader = _make_loader()
+        logger = logging.getLogger("quiet_logger")
+        logger.setLevel(logging.WARNING)
+        trainer = Trainer(
+            model=model, optimizer=optim.Adam(model.parameters(), lr=1e-3),
+            gmm_loss_f=GMMVAELoss(beta=0.1), save_dir=tmpdir, is_progress_bar=False,
+            logger=logger, warmup_epochs=1, transition_epochs=1,
+        )
+        trainer(loader, epochs=2)
+        with open(os.path.join(tmpdir, "train_losses.csv")) as f:
+            lines = f.read().strip().splitlines()
+        assert lines[0] == "Epoch,Loss,Value"
+        assert any(",recon_loss," in l for l in lines[1:])
 
 
 def test_trainer_full_training():
@@ -178,6 +323,22 @@ def test_evaluator():
         mean_loss = evaluator(loader)
         assert isinstance(mean_loss, float)
         assert mean_loss >= 0.0
+        comps = evaluator(loader, return_components=True)
+        assert set(comps) == {"loss", "recon", "kl", "elbo"}
+        assert abs(comps["elbo"] - (comps["recon"] + 0.1 * comps["kl"])) < 1e-6
+
+
+def test_evaluator_uses_full_beta_despite_annealing():
+    """Validation loss must include the KL even when training used a β ramp."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = _make_model()
+        model.eval()
+        loader = _make_loader()
+        loss_f = GMMVAELoss(beta=1.0, kl_warmup_epochs=50)
+        evaluator = Evaluator(model=model, loss_f=loss_f, save_dir=tmpdir, is_progress_bar=False)
+        comps = evaluator(loader, return_components=True)
+        assert comps["kl"] > 0
+        assert comps["elbo"] > comps["recon"]
 
 
 # ---------------------------------------------------------------------------
