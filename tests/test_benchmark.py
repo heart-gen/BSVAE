@@ -176,3 +176,27 @@ def test_wgcna_script_parses():
     proc = subprocess.run(["Rscript", "--vanilla", "-e", f'invisible(parse(file="{WGCNA_SCRIPT}"))'],
                           capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
+
+
+def test_over_cluster_k():
+    from bsvae.benchmark.runners import over_cluster_k
+    assert over_cluster_k(10) == 30
+    assert over_cluster_k(4) == 20          # floor
+    assert over_cluster_k(10, factor=1.0, minimum=1) == 10
+    assert over_cluster_k(4, n_features=240) == 9     # capped at 25 features per component
+    assert over_cluster_k(4, n_features=50) == 4      # never below n_modules
+
+
+def test_run_bsvae_over_clusters_then_merges(tmp_path):
+    expr, gt = _block_expr()
+    res = run_bsvae(
+        expr, n_modules=4, seed=0, workdir=tmp_path,
+        train_cfg={"epochs": 25, "warmup_epochs": 8, "transition_epochs": 4, "hidden_dims": [32, 16],
+                   "no_cuda": True, "batch_size": 32},
+        over_cluster_factor=3.0,
+    )
+    assert res.status == "ok", res.message
+    assert res.params["n_components_trained"] == 9 and res.params["n_modules_expected"] == 4
+    m = evaluate_labels(gt, res.labels.reindex(expr.index).values)
+    assert m["ari_assigned"] > 0.8
+    assert m["n_modules_pred"] <= 6

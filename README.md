@@ -82,7 +82,7 @@ bsvae-sweep-k sweep1 \
 
 This writes sweep outputs under `results/sweep1/sweep_k/` and retrains the selected model under `results/sweep1/final_k<K>/`.
 
-Extract module assignments from the final model:
+Extract module assignments from the final model (post-processing adds a grey class, a minimum module size and eigengene merging, so train with a generous `--n-modules`, about three times the expected module count):
 
 ```bash
 bsvae-networks extract-modules \

@@ -54,9 +54,16 @@ BSVAE_DEFAULTS: Dict = {
 POST_DEFAULTS: Dict = {
     "min_gamma": 0.5,
     "min_module_size": 10,
-    "merge_cut_height": 0.25,
+    "merge_cut_height": 0.4,
     "kme_reassign": False,
 }
+
+# The GMM is deliberately over-clustered: K-means initialisation allocates
+# centroids to the largest modules, so small modules only get their own
+# component when K exceeds the expected module count; the eigengene merge in
+# post-processing then re-joins split pieces of large modules.
+OVER_CLUSTER_FACTOR: float = 3.0
+MIN_OVER_CLUSTER_K: int = 20
 
 WGCNA_DEFAULTS: Dict = {
     "network_type": "signed",
@@ -199,6 +206,26 @@ def _bsvae_namespace(overrides: Dict) -> argparse.Namespace:
     return args
 
 
+FEATURES_PER_COMPONENT: int = 25
+
+
+def over_cluster_k(
+    n_modules: int,
+    factor: float = OVER_CLUSTER_FACTOR,
+    minimum: int = MIN_OVER_CLUSTER_K,
+    n_features: Optional[int] = None,
+) -> int:
+    """
+    Number of GMM components to train for an expected ``n_modules`` modules:
+    ``max(minimum, factor * n_modules)``, capped so that components average at
+    least ``FEATURES_PER_COMPONENT`` features, and never below ``n_modules``.
+    """
+    k = max(int(minimum), int(round(factor * n_modules)))
+    if n_features is not None:
+        k = min(k, max(1, int(n_features) // FEATURES_PER_COMPONENT))
+    return int(max(k, int(n_modules)))
+
+
 def run_bsvae(
     expr: pd.DataFrame,
     *,
@@ -210,10 +237,15 @@ def run_bsvae(
     post_cfg: Optional[Dict] = None,
     device=None,
     postprocess: bool = True,
+    over_cluster_factor: Optional[float] = OVER_CLUSTER_FACTOR,
 ) -> MethodResult:
     """
     Train BSVAE on a features × samples matrix and return post-processed
     module labels (grey = -1), merged γ and eigengenes.
+
+    ``n_modules`` is the expected number of modules; the GMM itself is trained
+    with ``over_cluster_k(n_modules)`` components when ``over_cluster_factor``
+    is set (``None`` or ``postprocess=False`` trains exactly ``n_modules``).
     """
     import torch
     from torch import optim
@@ -230,7 +262,10 @@ def run_bsvae(
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     cfg = dict(train_cfg or {})
-    cfg["n_modules"] = int(n_modules)
+    k_train = int(n_modules)
+    if postprocess and over_cluster_factor:
+        k_train = over_cluster_k(int(n_modules), over_cluster_factor, n_features=expr.shape[0])
+    cfg["n_modules"] = k_train
     cfg["seed"] = int(seed)
     if tx2gene is not None and (cfg.get("hier_strength", 0.0) > 0 or cfg.get("isoform_stratified", False)):
         tx_path = workdir / "tx2gene.tsv"
@@ -238,7 +273,8 @@ def run_bsvae(
         cfg["tx2gene"] = str(tx_path)
     post = dict(POST_DEFAULTS)
     post.update(post_cfg or {})
-    params = {"train": {k: v for k, v in cfg.items()}, "post": post}
+    params = {"train": {k: v for k, v in cfg.items()}, "post": post,
+              "n_modules_expected": int(n_modules), "n_components_trained": k_train}
 
     quiet = logging.getLogger("bsvae.benchmark.bsvae")
     quiet.setLevel(logging.WARNING)
@@ -284,4 +320,5 @@ def run_bsvae(
                         runtime_s=time.perf_counter() - t0, params=params)
 
 
-__all__ = ["MethodResult", "run_bsvae", "run_wgcna", "wgcna_available", "BSVAE_DEFAULTS", "POST_DEFAULTS", "WGCNA_DEFAULTS"]
+__all__ = ["MethodResult", "run_bsvae", "run_wgcna", "wgcna_available", "over_cluster_k",
+           "BSVAE_DEFAULTS", "POST_DEFAULTS", "WGCNA_DEFAULTS", "OVER_CLUSTER_FACTOR"]

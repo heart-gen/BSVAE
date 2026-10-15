@@ -56,8 +56,12 @@ The active training workflow is configured through explicit CLI flags, primarily
 
 - `--min-gamma` default `0.5`: features below this top responsibility are unassigned (grey)
 - `--min-module-size` default `10`
-- `--merge-cut-height` default `0.25`: merge modules whose eigengene correlation exceeds `0.75`
+- `--merge-cut-height` default `0.4`: merge modules whose eigengene correlation exceeds `0.6` (GMM components that split one module have noisier eigengenes than a WGCNA tree cut, so the cut is looser than WGCNA's 0.25)
 - `--kme-reassign` with `--min-kme` `0.3` and `--kme-margin` `0.1`
+
+## Choosing K
+
+`--n-modules` is the number of GMM components, not the final module count. Train with about three times the number of modules you expect (at least 20) and let `extract-modules` merge components whose eigengenes correlate; on the reference simulations this recovered small modules that a K equal to the true count absorbed into large ones, and raised ARI by 0.1–0.2. `bsvae-sweep-k` remains useful for picking the component count by held-out ELBO.
 
 ## Practical Starting Points
 
@@ -76,11 +80,13 @@ Typical baseline:
 ```bash
 bsvae-train study1 \
   --dataset data/expression.csv \
-  --n-modules 20 \
+  --n-modules 48 \
   --latent-dim 32 \
   --normalize-input \
   --beta 2.0
 ```
+
+(`--n-modules 48` for roughly 16 expected modules; post-processing merges the rest.)
 
 Transcript-level data:
 
@@ -88,6 +94,7 @@ Transcript-level data:
 bsvae-train iso1 \
   --dataset data/transcripts.csv \
   --tx2gene data/tx2gene.tsv \
+  --n-modules 48 \
   --normalize-input \
   --beta 2.0 \
   --hier-strength 0.05 --isoform-stratified

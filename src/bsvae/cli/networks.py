@@ -78,9 +78,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Features whose top γ is below this are unassigned/grey (default: 0.5).")
     mp.add_argument("--min-module-size", type=int, default=10,
                     help="Dissolve modules with fewer features (default: 10, as WGCNA).")
-    mp.add_argument("--merge-cut-height", type=float, default=0.25,
+    mp.add_argument("--merge-cut-height", type=float, default=0.4,
                     help="Merge modules whose eigengene dissimilarity (1 - cor) is below this "
-                         "(default: 0.25, as WGCNA). Requires --expr.")
+                         "(default: 0.4; WGCNA uses 0.25 on its tree cut, but GMM components that "
+                         "split one module have noisier eigengenes). Requires --expr.")
     mp.add_argument("--no-merge", action="store_true", default=False,
                     help="Skip eigengene-correlation merging.")
     mp.add_argument("--kme-reassign", action="store_true", default=False,

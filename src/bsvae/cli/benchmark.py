@@ -47,6 +47,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--no-normalize-input", dest="normalize_input", action="store_false", default=None)
     # Post-processing
     r.add_argument("--no-postprocess", action="store_true", default=False)
+    r.add_argument("--over-cluster-factor", type=float, default=None,
+                   help="Train the GMM with this multiple of the expected module count and let "
+                        "eigengene merging consolidate (default: 3; 1 disables over-clustering).")
     r.add_argument("--min-gamma", type=float, default=None)
     r.add_argument("--min-module-size", type=int, default=None)
     r.add_argument("--merge-cut-height", type=float, default=None)
@@ -96,6 +99,7 @@ def handle_run(args, logger):
         bsvae_cfg=bsvae_cfg, wgcna_cfg=wgcna_cfg, post_cfg=post_cfg,
         postprocess=not args.no_postprocess, resume=args.resume,
         scenario_ids=[s.strip() for s in args.scenario_ids.split(",")] if args.scenario_ids else None,
+        over_cluster_factor=args.over_cluster_factor,
     )
     logger.info("Benchmark complete: %d rows → %s/results.tsv", len(df), args.outdir)
 

@@ -63,14 +63,15 @@ Selection behavior:
 
 ## 4. Train A Final Model Directly
 
-If you already know `K`, train directly with `bsvae-train`.
+If you already know roughly how many modules to expect, train directly with `bsvae-train`. Use about three times that number of components (post-processing merges split modules; see "Choosing K" in the hyperparameters page).
 
 ```bash
 bsvae-train study1 \
   --dataset data/expression.csv \
   --epochs 120 \
-  --n-modules 24 \
-  --latent-dim 32
+  --n-modules 48 \
+  --latent-dim 32 \
+  --normalize-input
 ```
 
 Useful flags to review for production runs:

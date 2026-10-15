@@ -33,7 +33,7 @@ GREY = -1
 @dataclass
 class PostprocessResult:
     labels: np.ndarray                      # (F,) int, -1 = grey
-    gamma: np.ndarray                       # (F, M_final) merged soft assignments
+    gamma: np.ndarray                       # (F, M_final) merged soft assignments (rows sum to <= 1)
     eigengenes: Optional[pd.DataFrame]      # samples × modules (int columns)
     kme: Optional[pd.DataFrame]             # features × modules
     merge_log: List[dict]
@@ -201,7 +201,7 @@ def merge_close_modules(
     expr: pd.DataFrame,
     labels: np.ndarray,
     feature_ids: Sequence[str],
-    cut_height: float = 0.25,
+    cut_height: float = 0.4,
     max_iter: int = 50,
 ) -> tuple[np.ndarray, Dict[int, int], List[dict]]:
     """
@@ -303,13 +303,17 @@ def kme_reassign(
 # ---------------------------------------------------------------------------
 
 def _merge_gamma(gamma: np.ndarray, module_map: Dict[int, int], n_final: int) -> np.ndarray:
+    """
+    Sum γ columns that map to the same final module.  Mass on dissolved
+    components is dropped without renormalising, so rows sum to at most 1
+    and the confidence of a feature is not inflated by components that no
+    longer exist.
+    """
     out = np.zeros((gamma.shape[0], n_final), dtype=np.float32)
     for orig, final in module_map.items():
         if final >= 0 and orig < gamma.shape[1]:
             out[:, final] += gamma[:, orig]
-    rs = out.sum(axis=1, keepdims=True)
-    rs[rs <= 0] = 1.0
-    return out / rs
+    return out
 
 
 def postprocess_assignments(
@@ -319,17 +323,23 @@ def postprocess_assignments(
     *,
     min_gamma: float = 0.5,
     min_module_size: int = 10,
-    merge_cut_height: float = 0.25,
+    merge_cut_height: float = 0.4,
     kme_reassign_: bool = False,
     min_kme: float = 0.3,
     kme_margin: float = 0.1,
 ) -> PostprocessResult:
     """
-    Confidence cutoff → minimum module size → (with ``expr``) eigengene
-    merging → (optional) kME reassignment → final eigengenes and kME.
+    argmax → minimum module size → (with ``expr``) eigengene merging →
+    confidence cutoff on the *merged* γ → (optional) kME reassignment →
+    final eigengenes and kME.
 
-    ``expr`` is a features × samples DataFrame; without it only the first two
-    steps run and ``eigengenes``/``kme`` are ``None``.
+    The confidence cutoff is applied after merging so that a feature whose
+    responsibility is spread over several components of one module (which
+    happens when the GMM is over-clustered) is judged by the summed γ of the
+    merged module, not by its best single component.
+
+    ``expr`` is a features × samples DataFrame; without it merging is
+    skipped and ``eigengenes``/``kme`` are ``None``.
     """
     gamma = np.asarray(gamma, dtype=np.float64)
     feature_ids = [str(f) for f in feature_ids]
@@ -340,8 +350,8 @@ def postprocess_assignments(
         min_kme=min_kme, kme_margin=kme_margin,
     )
 
-    labels = assign_with_confidence(gamma, min_gamma=min_gamma)
-    labels = enforce_min_module_size(labels, gamma, min_module_size=min_module_size, min_gamma=min_gamma)
+    labels = gamma.argmax(axis=1).astype(np.int64)
+    labels = enforce_min_module_size(labels, gamma, min_module_size=min_module_size, min_gamma=0.0)
     merge_log: List[dict] = []
 
     if expr is not None:
@@ -352,23 +362,31 @@ def postprocess_assignments(
         labels, module_map, merge_log = merge_close_modules(
             expr, labels, feature_ids, cut_height=merge_cut_height,
         )
-        # Components that never had a label (dissolved earlier) map to grey.
         module_map = {k: module_map.get(k, GREY) for k in range(K)}
     else:
         labels, compact = _relabel_compact(labels)
         module_map = {k: compact.get(k, GREY) for k in range(K)}
 
     n_final = max(module_map.values(), default=-1) + 1
-    gamma_merged = _merge_gamma(gamma, module_map, n_final) if n_final > 0 else np.zeros((len(labels), 0), np.float32)
+    if n_final > 0:
+        gamma_merged = _merge_gamma(gamma, module_map, n_final)
+        # Confidence cutoff on the merged responsibilities.
+        labels = assign_with_confidence(gamma_merged, min_gamma=min_gamma)
+        labels = enforce_min_module_size(labels, gamma_merged, min_module_size=min_module_size, min_gamma=min_gamma)
+        labels, compact = _relabel_compact(labels)
+        module_map = {k: compact.get(v, GREY) if v >= 0 else GREY for k, v in module_map.items()}
+        n_final = max(module_map.values(), default=-1) + 1
+        gamma_merged = _merge_gamma(gamma, module_map, n_final) if n_final > 0 else np.zeros((len(labels), 0), np.float32)
+    else:
+        gamma_merged = np.zeros((len(labels), 0), np.float32)
 
     eigengenes = kme = None
     if expr is not None:
-        if kme_reassign_:
+        if kme_reassign_ and n_final > 0:
             labels = kme_reassign(expr, labels, feature_ids, min_kme=min_kme, kme_margin=kme_margin)
-            if n_final > 0:
-                labels = enforce_min_module_size(
-                    labels, gamma_merged, min_module_size=min_module_size, min_gamma=min_gamma,
-                )
+            labels = enforce_min_module_size(
+                labels, gamma_merged, min_module_size=min_module_size, min_gamma=min_gamma,
+            )
         eigengenes = module_eigengenes(expr, labels, feature_ids)
         kme = compute_kme(expr, eigengenes, feature_ids) if eigengenes.shape[1] else None
 

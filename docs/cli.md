@@ -158,14 +158,18 @@ bsvae-networks extract-modules \
 
 By default the GMM assignments are post-processed the way WGCNA post-processes a tree cut: features whose top responsibility is below `--min-gamma` become unassigned ("grey", label `-1`), modules smaller than `--min-module-size` are dissolved, and modules whose eigengenes correlate above `1 - --merge-cut-height` are merged (merging and kME need `--expr`).
 
+Because merging consolidates split modules, train with a generous `--n-modules` (about three times the number of modules you expect, at least 20): K-means initialisation gives centroids to the largest modules first, so small modules only get a component of their own when K is larger than the module count. The benchmark harness does this automatically (`--over-cluster-factor`, default 3).
+
 Options:
 
 - `--expr` expression matrix for eigengenes, merging and kME
 - `--min-gamma` default `0.5`
 - `--min-module-size` default `10`
-- `--merge-cut-height` default `0.25`
+- `--merge-cut-height` default `0.4`
 - `--no-merge`
-- `--kme-reassign`, `--min-kme` default `0.3`, `--kme-margin` default `0.1`
+- `--kme-reassign`
+- `--min-kme` default `0.3`
+- `--kme-margin` default `0.1`
 - `--no-postprocess` write raw `argmax(γ)` only
 - `--soft-eigengenes`
 - `--use-leiden` (sparse graph; safe at transcript scale)
@@ -312,5 +316,7 @@ bsvae-benchmark check-env
 bsvae-benchmark run --config iso.yaml --outdir results/bench --methods bsvae,wgcna --seeds 0,1,2 --reps 3
 bsvae-benchmark summarize --results results/bench/results.tsv
 ```
+
+BSVAE is trained with `--over-cluster-factor` (default 3) times the true module count and merged back by post-processing; pass `--over-cluster-factor 1` to train with the true K.
 
 `run` writes one row per (scenario, replicate, method, seed) to `results.tsv` as soon as it finishes (resumable with the same command), per-run outputs under `scenarios/<id>/rep_<r>/methods/<method>/seed_<s>/`, and `summary.tsv` (mean ± sd per scenario and method). BSVAE options (`--epochs`, `--latent-dim`, `--hier-strength`, `--isoform-stratified`, ...), post-processing options (`--min-gamma`, `--min-module-size`, `--merge-cut-height`, `--no-postprocess`) and WGCNA options (`--wgcna-network-type`, `--wgcna-soft-power`, `--wgcna-min-module-size`, `--wgcna-merge-cut-height`, `--wgcna-threads`) can be overridden. `scripts/benchmark_sims.py` drives the same harness over seven laptop-sized reference scenarios.

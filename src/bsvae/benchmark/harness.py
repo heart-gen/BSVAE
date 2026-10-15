@@ -126,6 +126,7 @@ def run_one(
     post_cfg: Optional[Dict] = None,
     postprocess: bool = True,
     device=None,
+    over_cluster_factor: Optional[float] = None,
 ) -> tuple[MethodResult, Dict]:
     truth = load_truth(run_dir)
     expr = pd.read_csv(truth["expr_path"], sep="\t", index_col=0)
@@ -141,10 +142,13 @@ def run_one(
         tx2gene = None
         if "tx2gene" in truth:
             tx2gene = pd.DataFrame(list(truth["tx2gene"].items()), columns=["transcript_id", "gene_id"])
+        kwargs = {}
+        if over_cluster_factor is not None:
+            kwargs["over_cluster_factor"] = over_cluster_factor
         result = run_bsvae(
             expr, n_modules=n_modules, seed=seed, workdir=out_dir, tx2gene=tx2gene,
             train_cfg={k: v for k, v in cfg.items() if not k.startswith("_")},
-            post_cfg=post_cfg, device=device, postprocess=postprocess,
+            post_cfg=post_cfg, device=device, postprocess=postprocess, **kwargs,
         )
     elif method == "wgcna":
         cfg = dict(WGCNA_DEFAULTS)
@@ -180,6 +184,7 @@ def run_grid(
     resume: bool = True,
     scenario_ids: Optional[Sequence[str]] = None,
     device=None,
+    over_cluster_factor: Optional[float] = None,
 ) -> pd.DataFrame:
     """Run every (scenario, rep, method, seed) and return the tidy results table."""
     cfg = load_config(config) if not isinstance(config, dict) else config
@@ -218,6 +223,7 @@ def run_grid(
                     result, metrics = run_one(
                         run_dir, method, seed, k_mode=k_mode, bsvae_cfg=bsvae_cfg,
                         wgcna_cfg=wgcna_cfg, post_cfg=post_cfg, postprocess=postprocess, device=device,
+                        over_cluster_factor=over_cluster_factor,
                     )
                     row = {
                         "scenario_id": sid, "rep": rep, "method": method, "seed": seed,
@@ -228,7 +234,8 @@ def run_grid(
                     row.update(factors)
                     row.update(summary)
                     row.update(metrics)
-                    row.update(_flatten_params({k: v for k, v in result.params.items() if k in ("soft_power", "n_modules", "n_grey")}, prefix="m_"))
+                    row.update(_flatten_params({k: v for k, v in result.params.items()
+                                                if k in ("soft_power", "n_modules", "n_grey", "n_components_trained")}, prefix="m_"))
                     _append_row(results_path, row)
                     done.add(key)
     df = pd.read_csv(results_path, sep="\t") if results_path.exists() else pd.DataFrame()

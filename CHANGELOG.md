@@ -20,11 +20,11 @@ New
 * WGCNA-style post-processing of GMM assignments (`bsvae.networks.postprocess`): grey class, minimum module size, eigengene-correlation merging, kME; on by default in `extract-modules` and `bsvae-simulate benchmark`.
 * Grey-aware metrics (ARI/NMI on all or assigned-only features, grey precision/recall, best-match Jaccard, gene-level majority-vote ARI, split-detection rate).
 * Transcript-level simulation family `nb_isoform_modules` (variable isoforms per gene, switching with mixing weight, null genes) and simulator fixes (paired RNG streams, gene-specific batch confounding and nonlinearity, null features, overlap truth, YAML configs).
-* `bsvae-benchmark`: resumable BSVAE-vs-WGCNA harness with a packaged R runner.
+* `bsvae-benchmark`: resumable BSVAE-vs-WGCNA harness with a packaged R runner; BSVAE is over-clustered (3x the expected module count) and merged back by post-processing, which recovers small modules that a K equal to the true count absorbs.
 
 Default changes
 
-* `--bal-type` entropy; KL per element; `--collapse-min-usage` 0.002; sweep `--free-bits` 0.0; extract-modules post-processing on; GTEx-calibrated simulation defaults.
+* `--bal-type` entropy; KL per element; `--collapse-min-usage` 0.002; sweep `--free-bits` 0.0; extract-modules post-processing on with `--merge-cut-height` 0.4; GTEx-calibrated simulation defaults.
 
 
 ### Enhancements

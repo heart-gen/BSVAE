@@ -63,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Score raw argmax(γ) instead of post-processed assignments.")
     bp.add_argument("--min-gamma", type=float, default=0.5)
     bp.add_argument("--min-module-size", type=int, default=10)
-    bp.add_argument("--merge-cut-height", type=float, default=0.25)
+    bp.add_argument("--merge-cut-height", type=float, default=0.4)
     bp.add_argument("--no-merge", action="store_true", default=False)
     bp.add_argument("--output", required=True, help="Output JSON with benchmark metrics.")
     bp.add_argument("--batch-size", type=int, default=128)
