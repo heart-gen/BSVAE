@@ -23,31 +23,41 @@ The active training workflow is configured through explicit CLI flags, primarily
 - `--warmup-epochs` default `20`
 - `--transition-epochs` default `10`
 - `--freeze-gmm-epochs` default `0`
-- `--collapse-threshold` default `0.5`
+- `--collapse-min-usage` default `0.002` (absolute; replaces the relative `--collapse-threshold`, now ignored)
 - `--collapse-noise-scale` default `0.5`
 
 ## Loss Terms
 
-- `--beta` default `1.0`
-- `--free-bits` default `0.0` (bsvae-train), `0.5` (bsvae-sweep-k)
-- `--kl-warmup-epochs` default `0`
+- `--beta` default `1.0`; the KL is scaled per observed value (`--no-kl-per-element` restores the legacy sum over latent dimensions, whose effective β grows with the number of samples)
+- `--free-bits` default `0.0` (both `bsvae-train` and `bsvae-sweep-k`)
+- `--kl-warmup-epochs` default `0` (counted from the start of the GMM phase)
 - `--kl-anneal-mode` `linear` or `cyclical`
 - `--kl-cycle-length` default `50`
 - `--sep-strength` default `0.1`
 - `--sep-alpha` default `2.0`
 - `--bal-strength` default `0.1`
+- `--bal-type` default `entropy` (discourages dead components without forcing equal module sizes)
 - `--bal-ema-blend` default `0.5`
 - `--pi-entropy-strength` default `0.0`
 - `--hier-strength` default `0.0`
+- `--hier-margin` default `1.0`, `--no-hier-corr-weight`
 - `--corr-strength` default `0.0`
 - `--latent-corr-strength` default `0.0`
 - `--masked-recon`
 
 ## Hierarchical And Isoform Options
 
-- `--tx2gene` supplies transcript-to-gene mappings
-- `--isoform-stratified` changes batch construction so related isoforms co-occur
-- `--p-multi` controls the probability of sampling multi-isoform features when stratified sampling is enabled
+- `--tx2gene` supplies transcript-to-gene mappings (header optional; version suffixes stripped unless `--keep-tx-version`)
+- `--isoform-stratified` builds batches gene by gene so all isoforms of a gene co-occur
+- `--p-multi` controls the probability that a batch is filled from complete gene groups
+- the hierarchical loss is a hinge (`--hier-margin`) weighted by the positive expression correlation of each isoform pair, so isoforms that switch modules are not forced together
+
+## Post-processing (extract-modules)
+
+- `--min-gamma` default `0.5`: features below this top responsibility are unassigned (grey)
+- `--min-module-size` default `10`
+- `--merge-cut-height` default `0.25`: merge modules whose eigengene correlation exceeds `0.75`
+- `--kme-reassign` with `--min-kme` `0.3` and `--kme-margin` `0.1`
 
 ## Practical Starting Points
 
@@ -68,9 +78,19 @@ bsvae-train study1 \
   --dataset data/expression.csv \
   --n-modules 20 \
   --latent-dim 32 \
-  --free-bits 0.5 \
-  --sep-strength 0.1 \
-  --bal-strength 0.01
+  --normalize-input \
+  --latent-corr-strength 0.5
+```
+
+Transcript-level data:
+
+```bash
+bsvae-train iso1 \
+  --dataset data/transcripts.csv \
+  --tx2gene data/tx2gene.tsv \
+  --normalize-input \
+  --latent-corr-strength 0.5 \
+  --hier-strength 0.05 --isoform-stratified
 ```
 
 Model-selection workflow:

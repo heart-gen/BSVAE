@@ -1,307 +1,103 @@
 #!/usr/bin/env python
 """
-Benchmark BSVAE on one representative from each simulation type.
+Benchmark BSVAE against WGCNA on representative simulation scenarios.
+
+Thin driver over ``bsvae.benchmark.harness.run_grid``; sizes are chosen so the
+whole suite runs on a laptop in well under an hour.  For the manuscript-scale
+grid use ``bsvae-benchmark run --config <grid.yaml>`` on an HPC node.
 
 Scenarios
 ---------
-1. sim1_balanced     simple block-diagonal, equal-size modules (generate.py, Gaussian)
-2. sim2_nb_balanced  NB count model, balanced module sizes (GTEx-calibrated)
-3. sim3_nb_long_tail NB count model, long-tail sizes (GTEx-calibrated) ← key case
-4. sim4_nb_nonlinear NB long-tail + nonlinear features (GTEx-calibrated)
-5. sim5_nb_confound  NB long-tail + moderate confounding (GTEx-calibrated)
-6. sim6_nb_dropout   NB long-tail + high dropout/stress (GTEx-calibrated)
+sim1_balanced        NB counts, balanced module sizes
+sim2_long_tail       NB counts, long-tail sizes with 10% null features   <- key case
+sim3_nonlinear       long-tail + gene-specific nonlinear links
+sim4_confound        long-tail + gene-specific batch confounding
+sim5_dropout         long-tail + high dropout
+sim6_isoform_hier    transcripts in genes, hard isoform switching (alpha=1)
+sim7_isoform_mix     transcripts in genes, partial switching (alpha=0.5)
 
-NB calibration from GTEx v11 Whole Blood (300 samples, expressed genes CPM≥1):
-  baseline_log_mean=2.638, baseline_log_sd=1.601, libsize_log_sd=0.364,
-  dispersion='high' (theta=1.5), signal_scale=1.922 → within-module r≈0.45
-  Bug fix: W weights use abs(N(0,scale)) so all module members co-vary positively.
-
-Metrics: ARI and NMI from hard γ argmax assignments.
+Usage
+-----
+python scripts/benchmark_sims.py --outdir results/bench_sims [--seeds 0,1,2]
+    [--methods bsvae,wgcna] [--epochs 150] [--no-cuda] [--scenarios sim2_long_tail,sim6_isoform_hier]
 """
 
 from __future__ import annotations
 
+import argparse
+import logging
 import sys
-import tempfile
-import time
-import numpy as np
-import torch
-from torch import optim
-from torch.utils.data import DataLoader, Dataset
-from sklearn.cluster import KMeans
 
-# --------------------------------------------------------------------------- #
-# Imports
-# --------------------------------------------------------------------------- #
-from bsvae.simulation.generate import simulate_omics_data
-from bsvae.simulation.scenario import _simulate_counts, DEFAULT_CONFIG
-from bsvae.simulation.metrics import compute_ari, compute_nmi
-from bsvae.models.gmvae import GMMModuleVAE
-from bsvae.models.losses import GMMVAELoss
-from bsvae.utils.training import Trainer
-from bsvae.networks.module_extraction import extract_gmm_modules
+import pandas as pd
 
-# --------------------------------------------------------------------------- #
-# Shared training hyper-params (small enough to be fast, big enough to matter)
-# --------------------------------------------------------------------------- #
-N_FEAT    = 300
-N_SAMP    = 100
-N_MOD     = 10
-LATENT    = 20
-HIDDEN    = [64, 32]
-EPOCHS    = 150
-WARMUP    = 40
-TRANS     = 10
-FREEZE_GMM = 5       # freeze GMM prior for first N GMM epochs to stabilise after K-means
-LR        = 5e-4
-BATCH     = 32
-SEEDS     = [0, 1, 2, 3, 4]   # multiple seeds — report mean ± std
+from bsvae.benchmark.harness import run_grid, summarize
+from bsvae.simulation.scenario import DEFAULT_CONFIG, ISOFORM_GENERATOR_DEFAULTS
 
-# GTEx v11 Whole Blood-calibrated NB parameters (see scripts/calibrate_nb_from_gtex.py)
-# baseline_log_mean/sd estimated from expressed genes (CPM≥1) in 300 WB samples.
-# signal_scale chosen to achieve within-module Pearson r≈0.45 after fixing the
-# W-sign bug (abs-normal weights so module members co-vary positively).
-GEN_CFG = {
-    **DEFAULT_CONFIG["generator"],
-    "n_features": N_FEAT,
-    "n_modules": N_MOD,
-    "baseline_log_mean": 2.638,
-    "baseline_log_sd":   1.601,
-    "libsize_log_sd":    0.364,
-    "dispersion":        "high",
-    "signal_scale":      1.922,
+N_FEAT, N_SAMP, N_MOD = 1500, 150, 10
+N_GENES = 600
+
+NB = dict(DEFAULT_CONFIG["generator"], n_features=N_FEAT, n_samples=N_SAMP, n_modules=N_MOD,
+          overlap_rate=0.0, confounding="none", nonlinear_mode="off", dropout_mode="off")
+ISO = dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=N_GENES, n_samples=N_SAMP, n_modules=N_MOD)
+
+SCENARIOS = {
+    "sim1_balanced": dict(NB, module_size_distribution="balanced"),
+    "sim2_long_tail": dict(NB, module_size_distribution="long_tail", null_fraction=0.10),
+    "sim3_nonlinear": dict(NB, module_size_distribution="long_tail", null_fraction=0.10, nonlinear_mode="on"),
+    "sim4_confound": dict(NB, module_size_distribution="long_tail", null_fraction=0.10, confounding="moderate"),
+    "sim5_dropout": dict(NB, module_size_distribution="long_tail", null_fraction=0.10,
+                         dropout_mode="high", dropout_target=0.5),
+    "sim6_isoform_hier": dict(ISO, switch_rate=0.15, alpha=1.0),
+    "sim7_isoform_mix": dict(ISO, switch_rate=0.15, alpha=0.5),
 }
 
 
-# --------------------------------------------------------------------------- #
-# Dataset wrapper
-# --------------------------------------------------------------------------- #
-class ArrayDataset(Dataset):
-    """Wraps a (features × samples) float32 array."""
-    def __init__(self, X: np.ndarray):
-        self.X = torch.tensor(X, dtype=torch.float32)
-        self.ids = [f"feat_{i}" for i in range(len(X))]
-
-    def __len__(self):
-        return len(self.X)
-
-    def __getitem__(self, i):
-        return self.X[i], self.ids[i]
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--outdir", default="results/bench_sims")
+    p.add_argument("--scenarios", default=",".join(SCENARIOS), help="Comma list of scenario names.")
+    p.add_argument("--methods", default="bsvae,wgcna")
+    p.add_argument("--seeds", default="0,1,2")
+    p.add_argument("--reps", type=int, default=1, help="Data replicates per scenario.")
+    p.add_argument("--epochs", type=int, default=150)
+    p.add_argument("--no-cuda", action="store_true", default=False)
+    p.add_argument("--no-postprocess", action="store_true", default=False)
+    p.add_argument("--log-level", default="info")
+    return p.parse_args(argv)
 
 
-# --------------------------------------------------------------------------- #
-# Training helper
-# --------------------------------------------------------------------------- #
-def _kmeans_on_mu(model: GMMModuleVAE, eval_loader: DataLoader) -> np.ndarray:
-    """Extract encoder μ for all features and run K-means (like benchmarking repo)."""
-    model.eval()
-    all_mu = []
-    with torch.no_grad():
-        for xb, _ in eval_loader:
-            mu, _ = model.encoder(model._maybe_normalize(xb))
-            all_mu.append(mu.numpy())
-    mu_all = np.concatenate(all_mu, axis=0)
-    return KMeans(n_clusters=N_MOD, n_init=10, random_state=0).fit_predict(mu_all)
+def main(argv=None):
+    args = parse_args(argv)
+    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO),
+                        format="%(asctime)s %(levelname)s: %(message)s")
+    names = [s.strip() for s in args.scenarios.split(",") if s.strip()]
+    unknown = [n for n in names if n not in SCENARIOS]
+    if unknown:
+        sys.exit(f"Unknown scenario(s): {unknown}; choose from {list(SCENARIOS)}")
 
-
-def train_and_score(
-    X: np.ndarray,
-    ground_truth: np.ndarray,
-    seed: int,
-    normalize_input: bool = False,
-    masked_recon: bool = False,
-    corr_strength: float = 0.0,
-    latent_corr_strength: float = 0.0,
-) -> dict:
-    """Train one BSVAE config and return ARI/NMI for both γ-argmax and K-means-on-μ."""
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-
-    dataset = ArrayDataset(X)
-    loader  = DataLoader(dataset, batch_size=BATCH, shuffle=True, drop_last=False)
-    eval_loader = DataLoader(dataset, batch_size=BATCH, shuffle=False, drop_last=False)
-    n_samp  = X.shape[1]
-
-    model = GMMModuleVAE(
-        n_features=n_samp,
-        n_latent=LATENT,
-        n_modules=N_MOD,
-        hidden_dims=HIDDEN,
-        use_batch_norm=True,
-        normalize_input=normalize_input,
-    )
-
-    loss_fn = GMMVAELoss(
-        beta=1.0,
-        free_bits=0.5,
-        sep_strength=0.0,
-        bal_strength=0.1,
-        pi_entropy_strength=0.01,
-        normalize_input=normalize_input,
-        masked_recon=masked_recon,
-        corr_strength=corr_strength,
-        latent_corr_strength=latent_corr_strength,
-    )
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        trainer = Trainer(
-            model=model,
-            optimizer=optim.Adam(model.parameters(), lr=LR),
-            gmm_loss_f=loss_fn,
-            save_dir=tmpdir,
-            is_progress_bar=False,
-            warmup_epochs=WARMUP,
-            transition_epochs=TRANS,
-            freeze_gmm_epochs=FREEZE_GMM,
+    frames = []
+    for name in names:
+        cfg = {"base_seed": 13, "reps": args.reps, "generator": SCENARIOS[name], "grid": {},
+               "stress": [], "outputs": {"emit_wgcna_matrix": False, "emit_gnvae_folds": False}}
+        df = run_grid(
+            cfg, f"{args.outdir}/{name}",
+            methods=[m.strip() for m in args.methods.split(",")],
+            seeds=[int(s) for s in args.seeds.split(",")],
+            bsvae_cfg={"epochs": args.epochs, "no_cuda": args.no_cuda},
+            postprocess=not args.no_postprocess,
         )
-        trainer(loader, epochs=EPOCHS)
-        result = extract_gmm_modules(model, eval_loader, feature_ids=dataset.ids)
-        pred_gamma = result["hard_assignments"]
-        pred_km    = _kmeans_on_mu(model, eval_loader)
+        df.insert(0, "scenario", name)
+        frames.append(df)
 
-    return {
-        "ari":    compute_ari(ground_truth, pred_gamma),
-        "nmi":    compute_nmi(ground_truth, pred_gamma),
-        "ari_km": compute_ari(ground_truth, pred_km),
-        "nmi_km": compute_nmi(ground_truth, pred_km),
-    }
-
-
-# Three configs: baseline, normalize only, normalize + latent correlation loss
-CONFIGS = [
-    ("original",  dict(normalize_input=False, masked_recon=False, corr_strength=0.0, latent_corr_strength=0.0)),
-    ("norm_only", dict(normalize_input=True,  masked_recon=False, corr_strength=0.0, latent_corr_strength=0.0)),
-    ("norm_corr", dict(normalize_input=True,  masked_recon=False, corr_strength=0.0, latent_corr_strength=0.5)),
-]
-
-
-def run_scenario(X, gt, cfg_name, normalize_input=False, masked_recon=False,
-                 corr_strength=0.0, latent_corr_strength=0.0, **_):
-    """Run across all seeds; return (ari_gamma, ari_kmeans) arrays."""
-    aris_g, aris_km, nmis_g = [], [], []
-    for s in SEEDS:
-        r = train_and_score(X, gt, seed=s,
-                            normalize_input=normalize_input,
-                            masked_recon=masked_recon,
-                            corr_strength=corr_strength,
-                            latent_corr_strength=latent_corr_strength)
-        aris_g.append(r["ari"])
-        aris_km.append(r["ari_km"])
-        nmis_g.append(r["nmi"])
-        print(f"      seed={s}  γ-ARI={r['ari']:.3f}  μ-KM-ARI={r['ari_km']:.3f}  NMI={r['nmi']:.3f}", flush=True)
-    return np.array(aris_g), np.array(aris_km), np.array(nmis_g)
-
-
-# --------------------------------------------------------------------------- #
-# Simulation builders
-# --------------------------------------------------------------------------- #
-def sim1_balanced():
-    X, gt, _ = simulate_omics_data(
-        n_features=N_FEAT, n_samples=N_SAMP, n_modules=N_MOD,
-        within_module_correlation=0.8, between_module_correlation=0.0,
-        noise_std=0.2, seed=42,
-    )
-    return X, gt
-
-
-def _nb_sim(**overrides):
-    cfg = {**GEN_CFG, "module_size_distribution": "long_tail",
-           "nonlinear_mode": "off", "dropout_mode": "off",
-           "dropout_target": 0.0, "confounding": "none", **overrides}
-    r = _simulate_counts(
-        n_features=cfg["n_features"],
-        n_samples=N_SAMP,
-        n_modules=cfg["n_modules"],
-        signal_scale=cfg.get("signal_scale", GEN_CFG["signal_scale"]),
-        overlap_rate=cfg.get("overlap_rate", 0.1),
-        confounding=cfg["confounding"],
-        nonlinear_mode=cfg["nonlinear_mode"],
-        dropout_mode=cfg["dropout_mode"],
-        dropout_target=cfg.get("dropout_target", 0.0),
-        seed=42,
-        generator_cfg=cfg,
-    )
-    X   = r.expr_features_x_samples.values.astype(np.float32)
-    gt  = r.modules_hard["module"].values.astype(int)
-    return X, gt
-
-
-def sim2_nb_balanced():
-    return _nb_sim(module_size_distribution="balanced")
-
-def sim3_nb_long_tail():
-    return _nb_sim()
-
-def sim4_nb_nonlinear():
-    return _nb_sim(nonlinear_mode="on")
-
-def sim5_nb_confound():
-    return _nb_sim(confounding="moderate")
-
-def sim6_nb_dropout():
-    return _nb_sim(dropout_mode="high", dropout_target=0.5)
-
-
-# --------------------------------------------------------------------------- #
-# Main
-# --------------------------------------------------------------------------- #
-SCENARIOS = [
-    ("sim1_balanced",     sim1_balanced,   "Equal-size modules, Gaussian noise"),
-    ("sim2_nb_balanced",  sim2_nb_balanced,"NB counts, balanced modules"),
-    ("sim3_nb_long_tail", sim3_nb_long_tail,"NB counts, long-tail modules ★"),
-    ("sim4_nb_nonlinear", sim4_nb_nonlinear,"NB long-tail + nonlinear"),
-    ("sim5_nb_confound",  sim5_nb_confound, "NB long-tail + confounding"),
-    ("sim6_nb_dropout",   sim6_nb_dropout,  "NB long-tail + high dropout"),
-]
-
-def main():
-    print(f"\n{'='*80}", flush=True)
-    print(f"BSVAE Simulation Benchmark  — GTEx-calibrated NB + Gaussian baseline", flush=True)
-    print(f"  {N_FEAT} features × {N_SAMP} samples  K={N_MOD}  "
-          f"{EPOCHS} epochs  warmup={WARMUP}  freeze_gmm={FREEZE_GMM}  n={len(SEEDS)} seeds", flush=True)
-    print(f"{'='*80}\n", flush=True)
-
-    # rows[scenario][cfg_name] = (ari_mean, ari_std, nmi_mean)
-    results = {}
-
-    for sim_name, sim_fn, sim_desc in SCENARIOS:
-        print(f"\n--- {sim_name}  ({sim_desc}) ---", flush=True)
-        X, gt = sim_fn()
-        sizes = np.bincount(gt)
-        print(f"  module sizes: min={sizes.min()} max={sizes.max()} "
-              f"mean={sizes.mean():.1f} std={sizes.std():.1f}", flush=True)
-        results[sim_name] = {}
-
-        for cfg_name, cfg_kwargs in CONFIGS:
-            t0 = time.time()
-            aris_g, aris_km, nmis_g = run_scenario(X, gt, cfg_name, **cfg_kwargs)
-            elapsed = time.time() - t0
-            results[sim_name][cfg_name] = (aris_g.mean(), aris_g.std(),
-                                           aris_km.mean(), aris_km.std(),
-                                           nmis_g.mean())
-            print(f"  {cfg_name:<12}  γ-ARI={aris_g.mean():.3f}±{aris_g.std():.3f}  "
-                  f"μ-KM-ARI={aris_km.mean():.3f}±{aris_km.std():.3f}  "
-                  f"NMI={nmis_g.mean():.3f}  ({elapsed:.0f}s)", flush=True)
-
-    # Summary table — show both γ-argmax and K-means-on-μ ARI side by side
-    ncols = len(CONFIGS)
-    width = 36 + ncols * 36
-    print(f"\n\n{'='*width}", flush=True)
-    print(f"SUMMARY  (mean ARI over {len(SEEDS)} seeds)  |  γ=GMM posterior argmax  |  μKM=K-means on encoder μ", flush=True)
-    print(f"{'='*width}", flush=True)
-    hdr = f"  {'Scenario':<22}  {'SzStd':>5}  " + "  ".join(
-        f"{'γ-'+c:>14}  {'μKM-'+c:>14}" for c, _ in CONFIGS)
-    print(hdr, flush=True)
-    print("  " + "-"*(width - 2), flush=True)
-    for sim_name, sim_fn, _ in SCENARIOS:
-        X, gt = sim_fn()
-        std = np.bincount(gt).std()
-        row = f"  {sim_name:<22}  {std:>5.1f}  "
-        for cfg_name, _ in CONFIGS:
-            ag_m, ag_s, akm_m, akm_s, _ = results[sim_name][cfg_name]
-            row += f"  {ag_m:.3f}±{ag_s:.3f}        {akm_m:.3f}±{akm_s:.3f}  "
-        print(row, flush=True)
-    print(f"{'='*width}\n", flush=True)
+    all_df = pd.concat(frames, ignore_index=True)
+    all_df.to_csv(f"{args.outdir}/results_all.tsv", sep="\t", index=False)
+    summary = summarize(all_df, by=("scenario", "method"))
+    summary.to_csv(f"{args.outdir}/summary_all.tsv", sep="\t", index=False)
+    pd.set_option("display.width", 250)
+    show = [c for c in ["scenario", "method", "n_runs", "ari_all_mean", "ari_assigned_mean",
+                        "frac_pred_grey_mean", "K_ratio_mean", "gene_ari_mean",
+                        "split_detection_rate_mean", "runtime_s_mean"] if c in summary.columns]
+    print(summary[show].round(3).to_string(index=False))
 
 
 if __name__ == "__main__":

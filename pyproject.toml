@@ -59,6 +59,7 @@ bsvae-train = "bsvae.cli.train:cli"
 bsvae-networks = "bsvae.cli.networks:cli"
 bsvae-simulate = "bsvae.cli.simulate:cli"
 bsvae-sweep-k = "bsvae.cli.sweep_k:cli"
+bsvae-benchmark = "bsvae.cli.benchmark:cli"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.4.2,<9.0.0"

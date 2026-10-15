@@ -1,1 +1,2 @@
 recursive-include src/bsvae *.ini *.json
+recursive-include src/bsvae *.R

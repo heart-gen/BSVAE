@@ -33,25 +33,33 @@ Common options:
 - `--use-batch-norm` / `--no-batch-norm`
 - `--sigma-min` default `0.3`
 - `--normalize-input`
-- `--beta` default `1.0`
+- `--beta` default `1.0` (a true per-element ELBO weight; see `--no-kl-per-element`)
+- `--no-kl-per-element` legacy KL scaling (sum over latent dims), whose effective β grows with the number of samples
 - `--free-bits` default `0.0`
-- `--kl-warmup-epochs` default `0`
+- `--kl-warmup-epochs` default `0` (ramp counted from the start of the GMM phase)
 - `--kl-anneal-mode` `linear` or `cyclical`
 - `--kl-cycle-length` default `50`
 - `--sep-strength` default `0.1`
 - `--sep-alpha` default `2.0`
 - `--bal-strength` default `0.1`
+- `--bal-type` default `entropy` (`uniform` pushes equal module sizes, `none` disables)
+- `--bal-scale-gmm`
 - `--bal-ema-blend` default `0.5`
 - `--pi-entropy-strength` default `0.0`
 - `--hier-strength` default `0.0`
+- `--hier-margin` default `1.0` (isoform pairs closer than this in latent space are left alone)
+- `--no-hier-corr-weight` disable weighting isoform pairs by their positive expression correlation
 - `--corr-strength` default `0.0`
 - `--latent-corr-strength` default `0.0`
 - `--masked-recon`
-- `--tx2gene`
-- `--isoform-stratified`
+- `--tx2gene` (header optional; Ensembl version suffixes are stripped on both sides)
+- `--keep-tx-version`
+- `--isoform-stratified` (gene-grouped batches so all isoforms of a gene co-occur)
 - `--p-multi` default `0.5`
-- `--collapse-threshold` default `0.5`
+- `--collapse-min-usage` default `0.002` (absolute usage floor for dead-component revival)
+- `--collapse-threshold` deprecated and ignored
 - `--collapse-noise-scale` default `0.5`
+- `--num-workers` default `0`
 - `--no-eval`
 - `--eval-batch-size`
 - `--no-cuda`
@@ -85,12 +93,13 @@ Key options:
 - `--no-train-final`
 - `--final-epochs`
 
-Training-related flags mirror `bsvae-train` for architecture and optimization.
+All model, loss and schedule flags are shared with `bsvae-train` (same parser groups, same defaults), so the selected `K` is selected with the model you will train.
 
 Selection behavior:
 
-- `--stability-reps 1`: select the best `K` by validation loss
-- `--stability-reps > 1`: select the best `K` by mean pairwise ARI across held-out-feature assignments
+- `--stability-reps 1`: select the best `K` by held-out ELBO (reconstruction + β·KL, without the regularisers, which are not comparable across `K`)
+- `--stability-reps > 1`: select the best `K` by mean pairwise ARI across held-out-feature assignments; ties are broken by held-out ELBO
+- with `--tx2gene`, the held-out split is made by gene so sibling isoforms never straddle the split
 
 Outputs:
 
@@ -147,11 +156,19 @@ bsvae-networks extract-modules \
   --soft-eigengenes
 ```
 
+By default the GMM assignments are post-processed the way WGCNA post-processes a tree cut: features whose top responsibility is below `--min-gamma` become unassigned ("grey", label `-1`), modules smaller than `--min-module-size` are dissolved, and modules whose eigengenes correlate above `1 - --merge-cut-height` are merged (merging and kME need `--expr`).
+
 Options:
 
-- `--expr` expression matrix for eigengene computation
+- `--expr` expression matrix for eigengenes, merging and kME
+- `--min-gamma` default `0.5`
+- `--min-module-size` default `10`
+- `--merge-cut-height` default `0.25`
+- `--no-merge`
+- `--kme-reassign`, `--min-kme` default `0.3`, `--kme-margin` default `0.1`
+- `--no-postprocess` write raw `argmax(γ)` only
 - `--soft-eigengenes`
-- `--use-leiden`
+- `--use-leiden` (sparse graph; safe at transcript scale)
 - `--leiden-resolution` default `1.0`
 - `--tx2gene`
 - `--aggregate-to-gene`
@@ -160,11 +177,12 @@ Options:
 
 Outputs:
 
-- `gamma.npz`
-- `hard_assignments.npz`
+- `gamma.npz`, `hard_assignments.npz` (raw)
+- `modules.csv` (`feature_id, module, module_label`; grey is `-1` / `grey`)
+- `eigengenes.csv`, `kME.csv`, `merge_log.json`, `gamma_merged.npz`
 - `soft_eigengenes.csv` when requested
 - `leiden_modules.csv` when requested
-- `gamma_gene.npz` and `hard_assignments_gene.npz` when gene aggregation is requested
+- `gamma_gene.npz`, `hard_assignments_gene.npz` and `gene_divergent.csv` when gene aggregation is requested
 
 ### `export-latents`
 
@@ -259,12 +277,13 @@ bsvae-simulate benchmark \
   --output results/run/sim_metrics.json
 ```
 
-Outputs JSON metrics including `ari`, `nmi`, and `n_features`.
+Assignments are post-processed first (same flags as `extract-modules`; `--no-postprocess` scores raw `argmax(γ)`). The JSON holds the grey-aware metrics: `ari_all`/`nmi_all` (grey as its own label), `ari_assigned`/`nmi_assigned` (grey dropped on either side), grey precision/recall, best-match Jaccard/F1, module counts and `n_features`.
 
 ### Scenario-grid commands
 
 ```bash
-bsvae-simulate init-config --output sim.yaml
+bsvae-simulate init-config --output sim.yaml            # gene-level nb_latent_modules
+bsvae-simulate init-config --output iso.yaml --isoform  # transcript-level nb_isoform_modules
 bsvae-simulate generate-grid --config sim.yaml --outdir results/sim_pub_v1 --reps 30 --base-seed 13
 bsvae-simulate generate-scenario --config sim.yaml --scenario-id S001__... --rep 0 --outdir results/sim_pub_v1
 bsvae-simulate validate-grid --grid-dir results/sim_pub_v1
@@ -277,6 +296,21 @@ Per-replicate outputs are written under:
 Common files:
 
 - `expr/features_x_samples.tsv.gz`
-- `expr/samples_x_features.tsv.gz`
-- `truth/modules_hard.csv`
+- `expr/samples_x_features.tsv.gz` (when `outputs.emit_wgcna_matrix` is true)
+- `truth/modules_hard.csv` (`module` is `-1` for null features), `truth/modules_overlap.csv`
+- `truth/tx2gene.tsv`, `truth/modules_gene.csv`, `truth/switch_table.tsv.gz` for the isoform family
 - `method_inputs.json`
+
+Configs are JSON by default; YAML is accepted when PyYAML is installed (`pip install bsvae[yaml]`).
+
+## `bsvae-benchmark`
+
+Head-to-head benchmark of BSVAE and WGCNA on a scenario grid. WGCNA runs through `Rscript` with the packaged `wgcna.R` (R with the `WGCNA` package must be installed; otherwise its rows are recorded as skipped).
+
+```bash
+bsvae-benchmark check-env
+bsvae-benchmark run --config iso.yaml --outdir results/bench --methods bsvae,wgcna --seeds 0,1,2 --reps 3
+bsvae-benchmark summarize --results results/bench/results.tsv
+```
+
+`run` writes one row per (scenario, replicate, method, seed) to `results.tsv` as soon as it finishes (resumable with the same command), per-run outputs under `scenarios/<id>/rep_<r>/methods/<method>/seed_<s>/`, and `summary.tsv` (mean ± sd per scenario and method). BSVAE options (`--epochs`, `--latent-dim`, `--hier-strength`, `--isoform-stratified`, ...), post-processing options (`--min-gamma`, `--min-module-size`, `--merge-cut-height`, `--no-postprocess`) and WGCNA options (`--wgcna-network-type`, `--wgcna-soft-power`, `--wgcna-min-module-size`, `--wgcna-merge-cut-height`, `--wgcna-threads`) can be overridden. `scripts/benchmark_sims.py` drives the same harness over seven laptop-sized reference scenarios.
