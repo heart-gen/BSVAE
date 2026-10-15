@@ -48,10 +48,30 @@ def test_load_tx2gene_missing_path_and_ids_raises():
         load_tx2gene(path=None, feature_ids=None)
 
 
-def test_load_tx2gene_non_ensembl_maps_to_itself():
+def test_load_tx2gene_without_path_raises_even_with_ids():
     feat_ids = ["custom_gene_1", "custom_gene_2"]
-    tx2gene = load_tx2gene(feature_ids=feat_ids)
-    assert tx2gene["custom_gene_1"] == "custom_gene_1"
+    with pytest.raises(ValueError):
+        load_tx2gene(feature_ids=feat_ids)
+
+
+def test_omics_dataset_return_index_and_from_frame(tmp_path):
+    from bsvae.utils.datasets import OmicsDataset
+    df = pd.DataFrame(np.random.randn(6, 4), index=[f"f{i}" for i in range(6)],
+                      columns=[f"s{j}" for j in range(4)])
+    ds = OmicsDataset.from_frame(df, return_index=True)
+    profile, idx = ds[3]
+    assert idx == 3 and profile.shape == (4,)
+    assert ds.feature_ids == list(df.index) and ds.sample_ids == list(df.columns)
+    ds2 = OmicsDataset.from_frame(df)
+    assert ds2[3][1] == "f3"
+
+
+def test_omics_dataset_rejects_nan(tmp_path):
+    from bsvae.utils.datasets import OmicsDataset
+    df = pd.DataFrame(np.random.randn(4, 3), index=list("abcd"), columns=list("xyz"))
+    df.iloc[0, 0] = np.nan
+    with pytest.raises(ValueError, match="NaN"):
+        OmicsDataset.from_frame(df)
 
 
 def test_group_isoforms_by_gene_empty():

@@ -18,6 +18,14 @@ from pathlib import Path
 from typing import List, Optional
 
 
+def _read_table(path: str, index_col: int = 0):
+    """Read a CSV/TSV (optionally gzipped) table with the separator inferred from the suffixes."""
+    import pandas as pd
+    suffixes = [s.lower() for s in Path(path).suffixes]
+    sep = "\t" if ".tsv" in suffixes else ","
+    return pd.read_csv(path, index_col=index_col, sep=sep)
+
+
 def setup_logging(level: str = "INFO") -> logging.Logger:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
@@ -90,7 +98,9 @@ def build_parser() -> argparse.ArgumentParser:
     la.add_argument("--output-dir", required=True)
     la.add_argument("--batch-size", type=int, default=128)
     la.add_argument("--no-cuda", action="store_true", default=False)
-    la.add_argument("--covariates", help="TSV/CSV with sample covariates.")
+    la.add_argument("--covariates", help="TSV/CSV with sample covariates (rows = sample IDs).")
+    la.add_argument("--expr", help="Expression matrix (features × samples) used to compute module "
+                                   "eigengenes; required for --covariates correlations.")
     la.add_argument("--kmeans-k", type=int, default=0)
     la.add_argument("--gmm-k", type=int, default=0)
     la.add_argument("--umap", action="store_true")
@@ -204,8 +214,7 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
             )
 
     if args.soft_eigengenes and args.expr:
-        import pandas as pd
-        expr = pd.read_csv(args.expr, index_col=0, sep="\t" if args.expr.endswith(".tsv") else ",")
+        expr = _read_table(args.expr)
         eigengenes = compute_module_eigengenes_from_soft(
             expr, result["gamma"], feature_ids
         )
@@ -215,18 +224,16 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
 
     if args.use_leiden:
         from bsvae.networks.module_extraction import leiden_modules, save_modules
-        from bsvae.networks.extract_networks import (
-            method_a_cosine,
-            extract_mu_gamma,
+        from bsvae.networks.extract_networks import method_a_cosine
+        # Sparse path: never densify the F × F adjacency.
+        adj = method_a_cosine(result["mu"], top_k=50).tocoo()
+        upper = adj.row < adj.col
+        edges = np.column_stack((adj.row[upper], adj.col[upper]))
+        weights = adj.data[upper]
+        modules = leiden_modules(
+            edges=edges, weights=weights, genes=list(feature_ids),
+            resolution=args.leiden_resolution,
         )
-        device = None
-        mu, gamma, _ = extract_mu_gamma(model, dataloader, device=device)
-        adj = method_a_cosine(mu, top_k=50)
-        import pandas as pd
-        adj_df = pd.DataFrame(
-            adj.toarray(), index=feature_ids, columns=feature_ids
-        )
-        modules = leiden_modules(adj_df, resolution=args.leiden_resolution)
         save_modules(modules, Path(args.output_dir) / "leiden_modules.csv")
         logger.info("Leiden fallback modules saved.")
 
@@ -234,29 +241,29 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
 def handle_export_latents(args, logger: logging.Logger) -> None:
     import numpy as np
     from bsvae.utils.modelIO import load_model
-    from bsvae.networks.extract_networks import extract_mu_gamma, create_dataloader_from_expression
+    from bsvae.networks.extract_networks import create_dataloader_from_expression
 
     model = load_model(args.model_path, is_gpu=not args.no_cuda)
     dataloader, feature_ids, _ = create_dataloader_from_expression(
         args.dataset, batch_size=args.batch_size
     )
-    mu, gamma, extracted_ids = extract_mu_gamma(model, dataloader)
-    if not feature_ids:
-        feature_ids = extracted_ids
-
-    # Also get logvar
+    # Single pass: μ, logσ² and γ together.
     import torch
     device = next(model.parameters()).device
     model.eval()
-    logvar_list = []
+    mu_list, logvar_list, gamma_list = [], [], []
     with torch.no_grad():
         for batch in dataloader:
             x = batch[0] if isinstance(batch, (list, tuple)) else batch
             x = x.to(device)
-            _, logvar = model.encode(x)
-            logvar_list.append(logvar.cpu().numpy())
-    import numpy as np
+            mu_b, logvar_b = model.encode(x)
+            gamma_b = model.gmm_prior.posterior_weights(mu_b, logvar_b)
+            mu_list.append(mu_b.cpu().numpy())
+            logvar_list.append(logvar_b.cpu().numpy())
+            gamma_list.append(gamma_b.cpu().numpy())
+    mu = np.concatenate(mu_list, axis=0).astype(np.float32)
     logvar = np.concatenate(logvar_list, axis=0).astype(np.float32)
+    gamma = np.concatenate(gamma_list, axis=0).astype(np.float32)
 
     out = args.output
     if not out.endswith(".npz"):
@@ -272,6 +279,7 @@ def handle_export_latents(args, logger: logging.Logger) -> None:
 
 
 def handle_latent_analysis(args, logger: logging.Logger) -> None:
+    import numpy as np
     from bsvae.utils.modelIO import load_model
     from bsvae.networks.extract_networks import create_dataloader_from_expression
     from bsvae.latent.latent_analysis import (
@@ -307,13 +315,32 @@ def handle_latent_analysis(args, logger: logging.Logger) -> None:
 
     correlation_df = None
     if args.covariates:
-        sep = "\t" if args.covariates.endswith(".tsv") else ","
-        cov_df = pd.read_csv(args.covariates, sep=sep, index_col=0)
-        cov_df = cov_df.reindex(feature_ids)
-        if not cov_df.empty:
-            correlation_df = correlate_with_covariates(
-                pd.DataFrame(mu, index=feature_ids), cov_df
+        # μ is per feature while covariates are per sample, so correlate the
+        # covariates with module eigengenes (samples × modules) instead.
+        if not args.expr:
+            logger.warning(
+                "--covariates requires --expr to compute module eigengenes; skipping correlations."
             )
+        else:
+            from bsvae.networks.extract_networks import extract_mu_gamma
+            from bsvae.networks.module_extraction import compute_module_eigengenes
+            cov_df = _read_table(args.covariates)
+            cov_df.index = cov_df.index.astype(str)
+            expr_df = _read_table(args.expr)
+            expr_df.index = expr_df.index.astype(str)
+            _, gamma, _ = extract_mu_gamma(model, dataloader, disable_progress=True)
+            hard = pd.Series(gamma.argmax(axis=1), index=[str(f) for f in feature_ids], name="module")
+            eigengenes = compute_module_eigengenes(expr_df, hard)
+            eigengenes.index = eigengenes.index.astype(str)
+            cov_aligned = cov_df.reindex(eigengenes.index)
+            n_match = int(cov_aligned.notna().any(axis=1).sum())
+            if n_match < 2:
+                logger.warning(
+                    "No sample IDs shared between covariates and expression columns; skipping."
+                )
+            else:
+                eigengenes.columns = [f"ME{c}" for c in eigengenes.columns]
+                correlation_df = correlate_with_covariates(eigengenes, cov_aligned)
 
     save_latent_results(
         mu=mu, logvar=logvar, row_ids=feature_ids,

@@ -322,11 +322,21 @@ def prepare_leiden_graph(
     return graph, genes
 
 
-def _run_leiden_single(graph, resolution: float, edge_weights):
+LEIDEN_SEED = 13
+
+
+def _modularity(graph, membership, edge_weights) -> float:
+    """Standard (γ=1) modularity, comparable across resolutions."""
+    return float(graph.modularity(membership, weights=edge_weights))
+
+
+def _run_leiden_single(graph, resolution: float, edge_weights, seed: int = LEIDEN_SEED):
     """Run Leiden clustering for a single resolution (helper for parallel execution).
 
     Returns a PartitionResult (serializable) instead of the raw leidenalg partition
-    to avoid pickling issues with PyCapsule objects in parallel execution.
+    to avoid pickling issues with PyCapsule objects in parallel execution.  The
+    quality stored is the standard modularity at γ=1 so that resolutions can be
+    compared on the same scale (the RB quality itself depends on γ).
     """
     import leidenalg
 
@@ -335,11 +345,12 @@ def _run_leiden_single(graph, resolution: float, edge_weights):
         leidenalg.RBConfigurationVertexPartition,
         resolution_parameter=resolution,
         weights=edge_weights,
+        seed=seed,
     )
-    # Extract serializable data before returning to avoid pickle errors
+    membership = list(partition.membership)
     return resolution, PartitionResult(
-        membership=list(partition.membership),
-        quality=partition.quality(),
+        membership=membership,
+        quality=_modularity(graph, membership, edge_weights),
     )
 
 
@@ -397,14 +408,7 @@ def _leiden_partitions_for_resolutions(
         )
 
     for res in iterator:
-        partition = leidenalg.find_partition(
-            graph, leidenalg.RBConfigurationVertexPartition,
-            resolution_parameter=res, weights=edge_weights,
-        )
-        partitions[res] = PartitionResult(
-            membership=list(partition.membership),
-            quality=partition.quality(),
-        )
+        partitions[res] = _run_leiden_single(graph, res, edge_weights)[1]
         if progress and hasattr(iterator, "set_postfix"):
             n_modules = len(set(partitions[res].membership))
             iterator.set_postfix(resolution=f"{res:.2f}", modules=n_modules)
@@ -473,10 +477,12 @@ def optimize_resolution_modularity(
     n_jobs: int = 1,
 ) -> tuple[float, float] | tuple[float, float, pd.Series]:
     """
-    Find optimal Leiden resolution by maximizing modularity.
+    Find optimal Leiden resolution by maximizing standard (γ=1) modularity.
 
     This method selects resolution without using ground truth labels,
-    making it suitable for unbiased benchmarking.
+    making it suitable for unbiased benchmarking.  Partitions are scored
+    with ``igraph.Graph.modularity`` rather than the resolution-dependent
+    RB quality, so values are comparable across the sweep.
 
     Parameters
     ----------

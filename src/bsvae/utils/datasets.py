@@ -88,10 +88,13 @@ def _load_matrix(path: str):
             ) from e
         with h5py.File(path, "r") as f:
             # Try common key names
-            for key in ["data", "matrix", "X", list(f.keys())[0]]:
-                if key in f:
+            data = None
+            for key in ["data", "matrix", "X", *list(f.keys())]:
+                if key in f and key not in ("features", "samples"):
                     data = f[key][:]
                     break
+            if data is None:
+                raise ValueError(f"No expression dataset found in {path}")
             feature_ids = (
                 [s.decode() if isinstance(s, bytes) else s for s in f["features"][:]]
                 if "features" in f else [str(i) for i in range(data.shape[0])]
@@ -128,19 +131,46 @@ class OmicsDataset(Dataset):
     feature_subset : list of str, optional
         If provided, only load this subset of features (by ID).
     logger : logging.Logger, optional
+    return_index : bool
+        If True, ``__getitem__`` returns the integer dataset index instead
+        of the feature ID string (cheaper collation; used for training).
     """
 
     def __init__(
         self,
-        path: str,
+        path: Optional[str] = None,
         feature_subset: Optional[List[str]] = None,
         logger: Optional[logging.Logger] = None,
+        return_index: bool = False,
+        *,
+        data: Optional[np.ndarray] = None,
+        feature_ids: Optional[Sequence[str]] = None,
+        sample_ids: Optional[Sequence[str]] = None,
     ):
         self.path = path
         self.logger = logger or _LOG
+        self.return_index = return_index
 
-        self.logger.info("Loading omics data from %s", path)
-        data, feature_ids, sample_ids = _load_matrix(path)
+        if data is not None:
+            if feature_ids is None or sample_ids is None:
+                raise ValueError("feature_ids and sample_ids are required with in-memory data")
+            data = np.asarray(data, dtype=np.float32)
+            feature_ids = [str(f) for f in feature_ids]
+            sample_ids = [str(s) for s in sample_ids]
+        else:
+            if path is None:
+                raise ValueError("Provide either path or data")
+            self.logger.info("Loading omics data from %s", path)
+            data, feature_ids, sample_ids = _load_matrix(path)
+
+        if len(feature_ids) != len(set(feature_ids)):
+            n_dup = len(feature_ids) - len(set(feature_ids))
+            self.logger.warning(
+                "%d duplicate feature IDs found; downstream ID lookups keep the first occurrence",
+                n_dup,
+            )
+        if not np.isfinite(data).all():
+            raise ValueError("Expression matrix contains NaN or infinite values")
 
         self.sample_ids = sample_ids
         self.n_samples = len(sample_ids)
@@ -171,9 +201,27 @@ class OmicsDataset(Dataset):
         Returns
         -------
         profile : torch.Tensor, shape (n_samples,)
-        feature_id : str
+        feature_id : str (or int index when ``return_index=True``)
         """
+        if self.return_index:
+            return self.data[idx], int(idx)
         return self.data[idx], self.feature_ids[idx]
+
+    @classmethod
+    def from_frame(
+        cls,
+        df,
+        logger: Optional[logging.Logger] = None,
+        return_index: bool = False,
+    ) -> "OmicsDataset":
+        """Build a dataset from a features × samples pandas DataFrame."""
+        return cls(
+            data=df.values.astype(np.float32),
+            feature_ids=[str(f) for f in df.index],
+            sample_ids=[str(c) for c in df.columns],
+            logger=logger,
+            return_index=return_index,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -190,10 +238,15 @@ def get_omics_dataloader(
     feature_subset: Optional[List[str]] = None,
     sampler: Optional[Sampler] = None,
     logger: Optional[logging.Logger] = None,
+    return_index: bool = False,
+    dataset: Optional[OmicsDataset] = None,
 ) -> DataLoader:
-    """Create a DataLoader for OmicsDataset."""
+    """Create a DataLoader for OmicsDataset (or wrap an existing dataset)."""
     pin_memory = pin_memory and torch.cuda.is_available()
-    dataset = OmicsDataset(path, feature_subset=feature_subset, logger=logger)
+    if dataset is None:
+        dataset = OmicsDataset(
+            path, feature_subset=feature_subset, logger=logger, return_index=return_index,
+        )
     return DataLoader(
         dataset,
         batch_size=batch_size,

@@ -157,14 +157,22 @@ def handle_benchmark(args, logger: logging.Logger) -> None:
     result = extract_gmm_modules(model, dataloader, feature_ids=feature_ids)
     pred_labels = result["hard_assignments"]
 
-    # Align by feature_ids
-    gt_feat_ids = gt_df["feature_id"].values if "feature_id" in gt_df.columns else None
-    if gt_feat_ids is not None and len(gt_feat_ids) == len(feature_ids):
-        id_to_gt = dict(zip(gt_feat_ids, gt_labels))
-        gt_aligned = np.array([id_to_gt.get(fid, -1) for fid in feature_ids])
-        mask = gt_aligned >= 0
-        gt_labels = gt_aligned[mask]
-        pred_labels = pred_labels[mask]
+    # Align by feature_id (always); fall back to positional order only when
+    # the truth file carries no IDs and the lengths agree.
+    if "feature_id" in gt_df.columns:
+        id_to_gt = dict(zip(gt_df["feature_id"].astype(str), gt_labels))
+        keep = [i for i, fid in enumerate(feature_ids) if str(fid) in id_to_gt]
+        if len(keep) < 0.9 * len(feature_ids):
+            raise ValueError(
+                f"Only {len(keep)}/{len(feature_ids)} dataset features match the ground-truth "
+                "feature_id column; check that the two files describe the same features."
+            )
+        gt_labels = np.array([id_to_gt[str(feature_ids[i])] for i in keep])
+        pred_labels = pred_labels[keep]
+    elif len(gt_labels) != len(feature_ids):
+        raise ValueError(
+            "Ground truth has no feature_id column and its length differs from the dataset."
+        )
 
     ari = compute_ari(gt_labels, pred_labels)
     nmi = compute_nmi(gt_labels, pred_labels)

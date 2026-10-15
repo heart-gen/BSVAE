@@ -59,7 +59,8 @@ def extract_latents(
     with torch.no_grad():
         for batch, ids in dataloader:
             batch = batch.to(device)
-            mu, logvar = model.encoder(batch)
+            # Use model.encode so input normalisation (normalize_input) is applied.
+            mu, logvar = model.encode(batch) if hasattr(model, "encode") else model.encoder(batch)
             mu_list.append(mu.cpu().numpy())
             logvar_list.append(logvar.cpu().numpy())
             # DataLoader with strings returns a tuple; ensure list of str
