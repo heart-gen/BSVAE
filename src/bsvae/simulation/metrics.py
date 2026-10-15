@@ -11,6 +11,11 @@ benchmark_methods(labels_true, predictions_dict)
     Compute ARI + NMI for multiple methods.
 compute_module_enrichment_score(modules, annotation_sets, feature_ids)
     Fisher's exact test for GO/pathway enrichment per module.
+
+Grey-aware metrics (label -1 / "grey" = unassigned, as in WGCNA)
+----------------------------------------------------------------
+ari_nmi_all, ari_nmi_assigned, grey_metrics, best_match_metrics, k_metrics,
+evaluate_labels, gene_level_metrics.
 """
 
 from __future__ import annotations
@@ -152,3 +157,208 @@ def compute_module_enrichment_score(
             }
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Grey-aware metrics
+# ---------------------------------------------------------------------------
+
+GREY = -1
+_GREY_NAMES = {"grey", "gray", "-1", "unassigned", "none", "nan"}
+
+
+def normalize_labels(labels) -> np.ndarray:
+    """
+    Convert arbitrary labels (ints, WGCNA colour strings, "grey") to an int
+    array where unassigned is ``GREY`` (-1) and other labels are 0..M-1.
+    """
+    arr = np.asarray(labels)
+    if arr.dtype.kind in "iu":
+        out = arr.astype(np.int64)
+        out[out < 0] = GREY
+        return out
+    if arr.dtype.kind == "f":
+        out = np.where(np.isnan(arr), GREY, arr).astype(np.int64)
+        out[out < 0] = GREY
+        return out
+    strs = np.array([str(x).strip() for x in arr])
+    is_grey = np.array([x.lower() in _GREY_NAMES for x in strs])
+    uniq = sorted(set(strs[~is_grey]))
+    code = {u: i for i, u in enumerate(uniq)}
+    out = np.array([GREY if g else code[x] for x, g in zip(strs, is_grey)], dtype=np.int64)
+    return out
+
+
+def ari_nmi_all(labels_true, labels_pred) -> Dict[str, float]:
+    """ARI/NMI over every feature, grey treated as a label of its own."""
+    t = normalize_labels(labels_true)
+    p = normalize_labels(labels_pred)
+    return {"ari_all": compute_ari(t, p), "nmi_all": compute_nmi(t, p)}
+
+
+def ari_nmi_assigned(labels_true, labels_pred) -> Dict[str, float]:
+    """ARI/NMI restricted to features assigned (non-grey) in both truth and prediction."""
+    t = normalize_labels(labels_true)
+    p = normalize_labels(labels_pred)
+    keep = (t != GREY) & (p != GREY)
+    n_dropped = int((~keep).sum())
+    if keep.sum() < 2:
+        return {"ari_assigned": float("nan"), "nmi_assigned": float("nan"), "n_dropped": n_dropped}
+    return {
+        "ari_assigned": compute_ari(t[keep], p[keep]),
+        "nmi_assigned": compute_nmi(t[keep], p[keep]),
+        "n_dropped": n_dropped,
+    }
+
+
+def grey_metrics(labels_true, labels_pred) -> Dict[str, float]:
+    """Precision/recall of the unassigned class against null (grey) truth."""
+    t = normalize_labels(labels_true) == GREY
+    p = normalize_labels(labels_pred) == GREY
+    tp = int((t & p).sum())
+    return {
+        "frac_true_grey": float(t.mean()) if len(t) else float("nan"),
+        "frac_pred_grey": float(p.mean()) if len(p) else float("nan"),
+        "grey_precision": tp / p.sum() if p.sum() else float("nan"),
+        "grey_recall": tp / t.sum() if t.sum() else float("nan"),
+        "n_pred_grey": int(p.sum()),
+    }
+
+
+def best_match_metrics(labels_true, labels_pred) -> Dict[str, float]:
+    """
+    Per-true-module best-match Jaccard / precision / recall / F1 (grey excluded),
+    plus the fraction of true modules recovered at Jaccard ≥ 0.5 and ≥ 0.25.
+    """
+    t = normalize_labels(labels_true)
+    p = normalize_labels(labels_pred)
+    true_sets: Dict[int, set] = {}
+    pred_sets: Dict[int, set] = {}
+    for i, (a, b) in enumerate(zip(t, p)):
+        if a != GREY:
+            true_sets.setdefault(int(a), set()).add(i)
+        if b != GREY:
+            pred_sets.setdefault(int(b), set()).add(i)
+    if not true_sets:
+        return {k: float("nan") for k in (
+            "mean_best_match_jaccard", "mean_best_match_f1", "mean_best_match_precision",
+            "mean_best_match_recall", "module_recovery_50", "module_recovery_25")}
+    jac, prec, rec, f1s = [], [], [], []
+    for ts in true_sets.values():
+        bj = bp = br = bf = 0.0
+        for ps in pred_sets.values():
+            inter = len(ts & ps)
+            if inter == 0:
+                continue
+            j = inter / len(ts | ps)
+            if j > bj:
+                pr = inter / len(ps); rc = inter / len(ts)
+                bj, bp, br, bf = j, pr, rc, 2 * pr * rc / (pr + rc)
+        jac.append(bj); prec.append(bp); rec.append(br); f1s.append(bf)
+    n = len(jac)
+    return {
+        "mean_best_match_jaccard": float(np.mean(jac)),
+        "mean_best_match_f1": float(np.mean(f1s)),
+        "mean_best_match_precision": float(np.mean(prec)),
+        "mean_best_match_recall": float(np.mean(rec)),
+        "module_recovery_50": float(sum(j >= 0.5 for j in jac) / n),
+        "module_recovery_25": float(sum(j >= 0.25 for j in jac) / n),
+    }
+
+
+def k_metrics(labels_true, labels_pred) -> Dict[str, float]:
+    t = normalize_labels(labels_true)
+    p = normalize_labels(labels_pred)
+    k_true = len(set(t[t != GREY]))
+    k_pred = len(set(p[p != GREY]))
+    sizes = np.bincount(p[p != GREY]) if k_pred else np.array([0])
+    sizes = sizes[sizes > 0] if k_pred else sizes
+    return {
+        "n_modules_true": int(k_true),
+        "n_modules_pred": int(k_pred),
+        "K_ratio": float(k_pred / k_true) if k_true else float("nan"),
+        "K_abs_diff": int(abs(k_pred - k_true)),
+        "module_size_min": int(sizes.min()) if k_pred else 0,
+        "module_size_median": float(np.median(sizes)) if k_pred else 0.0,
+        "module_size_max": int(sizes.max()) if k_pred else 0,
+    }
+
+
+def evaluate_labels(labels_true, labels_pred) -> Dict[str, float]:
+    """All grey-aware metrics for one (truth, prediction) pair of aligned label vectors."""
+    out: Dict[str, float] = {}
+    out.update(ari_nmi_all(labels_true, labels_pred))
+    out.update(ari_nmi_assigned(labels_true, labels_pred))
+    out.update(grey_metrics(labels_true, labels_pred))
+    out.update(best_match_metrics(labels_true, labels_pred))
+    out.update(k_metrics(labels_true, labels_pred))
+    return out
+
+
+def gene_level_metrics(
+    pred_tx: "Dict[str, int] | Sequence[int]",
+    tx_ids: Sequence[str],
+    tx2gene: Dict[str, str],
+    truth_gene: Dict[str, int],
+    truth_tx: Optional[Dict[str, int]] = None,
+) -> Dict[str, float]:
+    """
+    Gene-level recovery from transcript-level predictions.
+
+    * ``gene_ari`` / ``gene_nmi``: majority vote of each gene's non-grey
+      isoform labels against the gene truth (ties → smallest label).
+    * ``split_detection_rate``: among genes whose transcript truth places at
+      least one isoform in a module different from the gene module
+      ("switched" genes), the fraction where the prediction also places that
+      isoform in a module different from the majority of its siblings.
+    * ``isoform_gene_agreement``: fraction of genes with ≥2 assigned isoforms
+      whose assigned isoforms all share one predicted module.
+    """
+    from collections import Counter, defaultdict
+
+    if isinstance(pred_tx, dict):
+        pred_map = {str(k): int(v) for k, v in pred_tx.items()}
+    else:
+        pred_map = {str(t): int(v) for t, v in zip(tx_ids, pred_tx)}
+    by_gene: Dict[str, List[str]] = defaultdict(list)
+    for t in tx_ids:
+        g = tx2gene.get(str(t))
+        if g is not None:
+            by_gene[str(g)].append(str(t))
+
+    gene_true, gene_pred = [], []
+    agree_n = agree_ok = 0
+    split_n = split_ok = 0
+    for g, txs in by_gene.items():
+        if g not in truth_gene:
+            continue
+        votes = [pred_map[t] for t in txs if pred_map.get(t, GREY) != GREY]
+        if votes:
+            c = Counter(votes)
+            top = max(c.values())
+            maj = min(k for k, v in c.items() if v == top)
+            gene_true.append(int(truth_gene[g])); gene_pred.append(maj)
+            if len(votes) >= 2:
+                agree_n += 1
+                agree_ok += int(len(c) == 1)
+        if truth_tx is not None and len(txs) >= 2:
+            tg = int(truth_gene[g])
+            switched = [t for t in txs if int(truth_tx.get(t, tg)) != tg]
+            if switched:
+                split_n += 1
+                siblings = [pred_map[t] for t in txs if t not in switched and pred_map.get(t, GREY) != GREY]
+                if siblings:
+                    sib_maj = Counter(siblings).most_common(1)[0][0]
+                    detected = any(pred_map.get(t, GREY) != GREY and pred_map[t] != sib_maj for t in switched)
+                else:
+                    detected = False
+                split_ok += int(detected)
+    out = {
+        "gene_ari": compute_ari(np.array(gene_true), np.array(gene_pred)) if len(gene_true) > 1 else float("nan"),
+        "gene_nmi": compute_nmi(np.array(gene_true), np.array(gene_pred)) if len(gene_true) > 1 else float("nan"),
+        "n_genes_scored": len(gene_true),
+        "isoform_gene_agreement": agree_ok / agree_n if agree_n else float("nan"),
+        "n_switched_genes": split_n,
+        "split_detection_rate": split_ok / split_n if split_n else float("nan"),
+    }
+    return out

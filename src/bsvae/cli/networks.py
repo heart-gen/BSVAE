@@ -72,6 +72,21 @@ def build_parser() -> argparse.ArgumentParser:
     mp.add_argument("--use-leiden", action="store_true",
                     help="Also run Leiden clustering as fallback comparison.")
     mp.add_argument("--leiden-resolution", type=float, default=1.0)
+    mp.add_argument("--no-postprocess", action="store_true", default=False,
+                    help="Write raw argmax(γ) assignments only (no grey class, min size, merging).")
+    mp.add_argument("--min-gamma", type=float, default=0.5,
+                    help="Features whose top γ is below this are unassigned/grey (default: 0.5).")
+    mp.add_argument("--min-module-size", type=int, default=10,
+                    help="Dissolve modules with fewer features (default: 10, as WGCNA).")
+    mp.add_argument("--merge-cut-height", type=float, default=0.25,
+                    help="Merge modules whose eigengene dissimilarity (1 - cor) is below this "
+                         "(default: 0.25, as WGCNA). Requires --expr.")
+    mp.add_argument("--no-merge", action="store_true", default=False,
+                    help="Skip eigengene-correlation merging.")
+    mp.add_argument("--kme-reassign", action="store_true", default=False,
+                    help="Reassign features by module membership (kME) after merging. Requires --expr.")
+    mp.add_argument("--min-kme", type=float, default=0.3)
+    mp.add_argument("--kme-margin", type=float, default=0.1)
     mp.add_argument("--tx2gene", type=str, default=None,
                     help="TSV (transcript_id, gene_id) for isoform-to-gene aggregation.")
     mp.add_argument("--aggregate-to-gene", action="store_true", default=False,
@@ -140,28 +155,56 @@ def _aggregate_gamma_to_gene(
     gamma: "np.ndarray",
     feature_ids: List[str],
     tx2gene_path: str,
+    weights: "Optional[np.ndarray]" = None,
+    labels: "Optional[np.ndarray]" = None,
 ) -> "tuple[np.ndarray, list[str]]":
-    """Average isoform-level γ (F_tx, K) to gene level, renormalise rows to sum 1."""
+    """
+    Aggregate isoform-level γ (F_tx, K) to gene level.
+
+    Isoforms are weighted by ``weights`` (default: their maximum γ, so
+    confident isoforms dominate; pass ``None`` for a plain mean) and rows are
+    renormalised to sum to 1.  Features missing from the mapping map to
+    themselves.  When ``labels`` are given, the function also returns, as the
+    third element, the list of genes whose isoforms are assigned to two or
+    more different modules (isoform-divergent genes).
+    """
     import numpy as np
     from collections import defaultdict
-    from bsvae.utils.hierarchy import load_tx2gene
+    from bsvae.utils.hierarchy import load_tx2gene, strip_feature_version
 
     tx2gene = load_tx2gene(path=tx2gene_path, feature_ids=feature_ids)
-    # Map every feature to its gene_id; fall back to itself for unmapped features
-    fid_to_gene = {fid: tx2gene.get(fid, fid) for fid in feature_ids}
+    fid_to_gene = {}
+    for fid in feature_ids:
+        key = strip_feature_version(fid)
+        g = tx2gene.get(key, None)
+        fid_to_gene[fid] = str(g) if g is not None else fid
 
     gene_to_idxs: dict = defaultdict(list)
     for i, fid in enumerate(feature_ids):
         gene_to_idxs[fid_to_gene[fid]].append(i)
 
+    if weights is None:
+        w = np.ones(gamma.shape[0], dtype=np.float64)
+    else:
+        w = np.asarray(weights, dtype=np.float64).clip(min=1e-6)
+
     gene_ids = list(gene_to_idxs.keys())
     gamma_gene = np.zeros((len(gene_ids), gamma.shape[1]), dtype=np.float32)
+    divergent = []
     for j, gid in enumerate(gene_ids):
-        gamma_gene[j] = gamma[gene_to_idxs[gid]].mean(axis=0)
+        idxs = gene_to_idxs[gid]
+        ww = w[idxs][:, None]
+        gamma_gene[j] = (gamma[idxs] * ww).sum(axis=0) / ww.sum()
+        if labels is not None:
+            mods = {int(m) for m in labels[idxs] if int(m) >= 0}
+            if len(mods) >= 2:
+                divergent.append((gid, sorted(mods)))
 
     row_sums = gamma_gene.sum(axis=1, keepdims=True)
     row_sums = np.where(row_sums > 0, row_sums, 1.0)
     gamma_gene /= row_sums
+    if labels is not None:
+        return gamma_gene, gene_ids, divergent
     return gamma_gene, gene_ids
 
 
@@ -189,15 +232,56 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
         model.n_modules, len(feature_ids),
     )
 
+    expr = None
+    if args.expr:
+        expr = _read_table(args.expr)
+        expr.index = expr.index.astype(str)
+
+    gamma_final = result["gamma"]
+    labels_final = None
+    if not args.no_postprocess:
+        from bsvae.networks.postprocess import postprocess_assignments, save_postprocess
+        if expr is None and (not args.no_merge or args.kme_reassign):
+            logger.warning(
+                "--expr not given: eigengene merging and kME reassignment are skipped; "
+                "only the confidence cutoff and minimum module size are applied."
+            )
+        post = postprocess_assignments(
+            result["gamma"], feature_ids, expr,
+            min_gamma=args.min_gamma,
+            min_module_size=args.min_module_size,
+            merge_cut_height=0.0 if args.no_merge else args.merge_cut_height,
+            kme_reassign_=args.kme_reassign,
+            min_kme=args.min_kme,
+            kme_margin=args.kme_margin,
+        )
+        save_postprocess(post, args.output_dir, feature_ids)
+        gamma_final = post.gamma
+        labels_final = post.labels
+        logger.info(
+            "Post-processed: %d modules, %d grey (%.1f%%)",
+            post.n_modules, post.n_grey, 100.0 * post.n_grey / max(len(feature_ids), 1),
+        )
+
     if args.aggregate_to_gene:
         if not args.tx2gene:
             logger.warning("--aggregate-to-gene requires --tx2gene; skipping.")
         else:
-            gamma_gene, gene_ids = _aggregate_gamma_to_gene(
-                result["gamma"], result["feature_ids"], args.tx2gene
+            agg = _aggregate_gamma_to_gene(
+                gamma_final, result["feature_ids"], args.tx2gene,
+                weights=gamma_final.max(axis=1), labels=labels_final,
             )
+            gamma_gene, gene_ids = agg[0], agg[1]
             hard_gene = gamma_gene.argmax(axis=1).astype(np.int32)
             out = Path(args.output_dir)
+            if labels_final is not None:
+                import pandas as pd
+                divergent = agg[2]
+                pd.DataFrame(
+                    {"gene_id": [g for g, _ in divergent],
+                     "modules": [";".join(map(str, m)) for _, m in divergent]}
+                ).to_csv(out / "gene_divergent.csv", index=False)
+                logger.info("%d genes have isoforms in ≥2 modules (gene_divergent.csv)", len(divergent))
             np.savez_compressed(
                 out / "gamma_gene.npz",
                 gamma=gamma_gene,
@@ -213,8 +297,7 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
                 len(result["feature_ids"]), len(gene_ids),
             )
 
-    if args.soft_eigengenes and args.expr:
-        expr = _read_table(args.expr)
+    if args.soft_eigengenes and expr is not None:
         eigengenes = compute_module_eigengenes_from_soft(
             expr, result["gamma"], feature_ids
         )

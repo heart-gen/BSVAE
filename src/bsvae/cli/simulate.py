@@ -57,6 +57,14 @@ def build_parser() -> argparse.ArgumentParser:
     bp.add_argument("--dataset", required=True, help="Expression matrix to train on.")
     bp.add_argument("--ground-truth", required=True, help="CSV with ground-truth module labels.")
     bp.add_argument("--model-path", required=True, help="Trained GMMModuleVAE directory.")
+    bp.add_argument("--expr", default=None,
+                    help="Expression matrix for eigengene merging (default: --dataset).")
+    bp.add_argument("--no-postprocess", action="store_true", default=False,
+                    help="Score raw argmax(γ) instead of post-processed assignments.")
+    bp.add_argument("--min-gamma", type=float, default=0.5)
+    bp.add_argument("--min-module-size", type=int, default=10)
+    bp.add_argument("--merge-cut-height", type=float, default=0.25)
+    bp.add_argument("--no-merge", action="store_true", default=False)
     bp.add_argument("--output", required=True, help="Output JSON with benchmark metrics.")
     bp.add_argument("--batch-size", type=int, default=128)
     bp.add_argument("--no-cuda", action="store_true", default=False)
@@ -156,6 +164,16 @@ def handle_benchmark(args, logger: logging.Logger) -> None:
     )
     result = extract_gmm_modules(model, dataloader, feature_ids=feature_ids)
     pred_labels = result["hard_assignments"]
+    if not getattr(args, "no_postprocess", False):
+        from bsvae.networks.postprocess import postprocess_assignments
+        from bsvae.networks.extract_networks import load_expression
+        expr = load_expression(args.expr or args.dataset)
+        post = postprocess_assignments(
+            result["gamma"], feature_ids, expr,
+            min_gamma=args.min_gamma, min_module_size=args.min_module_size,
+            merge_cut_height=0.0 if args.no_merge else args.merge_cut_height,
+        )
+        pred_labels = post.labels
 
     # Align by feature_id (always); fall back to positional order only when
     # the truth file carries no IDs and the lengths agree.
@@ -174,11 +192,14 @@ def handle_benchmark(args, logger: logging.Logger) -> None:
             "Ground truth has no feature_id column and its length differs from the dataset."
         )
 
-    ari = compute_ari(gt_labels, pred_labels)
-    nmi = compute_nmi(gt_labels, pred_labels)
-
-    metrics = {"ari": ari, "nmi": nmi, "n_features": int(len(gt_labels))}
-    logger.info("ARI=%.4f  NMI=%.4f  (n=%d features)", ari, nmi, len(gt_labels))
+    from bsvae.simulation.metrics import evaluate_labels
+    metrics = evaluate_labels(np.asarray(gt_labels), np.asarray(pred_labels))
+    metrics["n_features"] = int(len(gt_labels))
+    ari, nmi = metrics["ari_all"], metrics["nmi_all"]
+    logger.info(
+        "ARI=%.4f  NMI=%.4f  (assigned-only ARI=%.4f, grey=%d, n=%d features)",
+        ari, nmi, metrics["ari_assigned"], metrics["n_pred_grey"], len(gt_labels),
+    )
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
