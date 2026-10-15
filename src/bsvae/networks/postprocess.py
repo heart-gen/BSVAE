@@ -329,14 +329,11 @@ def postprocess_assignments(
     kme_margin: float = 0.1,
 ) -> PostprocessResult:
     """
-    argmax → minimum module size → (with ``expr``) eigengene merging →
-    confidence cutoff on the *merged* γ → (optional) kME reassignment →
-    final eigengenes and kME.
+    confidence cutoff → minimum module size → (with ``expr``) eigengene
+    merging → (optional) kME reassignment → final eigengenes and kME.
 
-    The confidence cutoff is applied after merging so that a feature whose
-    responsibility is spread over several components of one module (which
-    happens when the GMM is over-clustered) is judged by the summed γ of the
-    merged module, not by its best single component.
+    ``gamma`` in the result sums the responsibilities of merged components
+    (rows sum to at most 1; mass on dissolved components is dropped).
 
     ``expr`` is a features × samples DataFrame; without it merging is
     skipped and ``eigengenes``/``kme`` are ``None``.
@@ -350,8 +347,12 @@ def postprocess_assignments(
         min_kme=min_kme, kme_margin=kme_margin,
     )
 
-    labels = gamma.argmax(axis=1).astype(np.int64)
-    labels = enforce_min_module_size(labels, gamma, min_module_size=min_module_size, min_gamma=0.0)
+    # Confidence cutoff on the raw responsibilities before merging: greyed
+    # features are kept out of the eigengenes, which makes merging cleaner.
+    # (Re-evaluating the cutoff on the merged γ was tested and rescued mostly
+    # ambiguous features, lowering assigned-feature ARI on every seed.)
+    labels = assign_with_confidence(gamma, min_gamma=min_gamma)
+    labels = enforce_min_module_size(labels, gamma, min_module_size=min_module_size, min_gamma=min_gamma)
     merge_log: List[dict] = []
 
     if expr is not None:
@@ -368,17 +369,7 @@ def postprocess_assignments(
         module_map = {k: compact.get(k, GREY) for k in range(K)}
 
     n_final = max(module_map.values(), default=-1) + 1
-    if n_final > 0:
-        gamma_merged = _merge_gamma(gamma, module_map, n_final)
-        # Confidence cutoff on the merged responsibilities.
-        labels = assign_with_confidence(gamma_merged, min_gamma=min_gamma)
-        labels = enforce_min_module_size(labels, gamma_merged, min_module_size=min_module_size, min_gamma=min_gamma)
-        labels, compact = _relabel_compact(labels)
-        module_map = {k: compact.get(v, GREY) if v >= 0 else GREY for k, v in module_map.items()}
-        n_final = max(module_map.values(), default=-1) + 1
-        gamma_merged = _merge_gamma(gamma, module_map, n_final) if n_final > 0 else np.zeros((len(labels), 0), np.float32)
-    else:
-        gamma_merged = np.zeros((len(labels), 0), np.float32)
+    gamma_merged = _merge_gamma(gamma, module_map, n_final) if n_final > 0 else np.zeros((len(labels), 0), np.float32)
 
     eigengenes = kme = None
     if expr is not None:
