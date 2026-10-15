@@ -139,7 +139,10 @@ def test_simulation_integration_gmm_vae():
             return torch.tensor(X[i], dtype=torch.float32), feat_ids[i]
 
     loader = DataLoader(TensorDataset(), batch_size=32, shuffle=True)
+    # Extraction must use an ordered loader so predictions align with feat_ids.
+    eval_loader = DataLoader(TensorDataset(), batch_size=64, shuffle=False)
 
+    torch.manual_seed(0)
     model = GMMModuleVAE(
         n_features=N_SAMP, n_latent=LATENT, n_modules=N_MOD,
         hidden_dims=[64, 32], use_batch_norm=False,
@@ -158,7 +161,7 @@ def test_simulation_integration_gmm_vae():
         )
         trainer(loader, epochs=20)
 
-        result = extract_gmm_modules(model, loader, feature_ids=feat_ids)
+        result = extract_gmm_modules(model, eval_loader, feature_ids=feat_ids)
         pred = result["hard_assignments"]
         ari = compute_ari(gt, pred)
         assert ari > 0.3, f"ARI={ari:.3f} too low for basic sanity check"
@@ -303,9 +306,10 @@ def test_simulation_isoform_hier_training(switch_rate):
 
     # ── 2. Train BSVAE-hier (with hierarchy) ─────────────────────────────────
     with tempfile.TemporaryDirectory() as tmpdir:
+        torch.manual_seed(0)
         model_hier = GMMModuleVAE(
             n_features=N_SAMP, n_latent=K_LATENT, n_modules=N_MOD,
-            hidden_dims=[32, 16], use_batch_norm=False,
+            hidden_dims=[32, 16], use_batch_norm=False, normalize_input=True,
         )
         trainer_hier = Trainer(
             model=model_hier,
@@ -317,14 +321,15 @@ def test_simulation_isoform_hier_training(switch_rate):
             transition_epochs=3,
             gene_groups=gene_groups,
         )
-        trainer_hier(make_loader(), epochs=15)
+        trainer_hier(make_loader(), epochs=30)
     assert not model_hier.training
 
     # ── 3. Train BSVAE-generic (no hierarchy) ────────────────────────────────
     with tempfile.TemporaryDirectory() as tmpdir:
+        torch.manual_seed(0)
         model_gen = GMMModuleVAE(
             n_features=N_SAMP, n_latent=K_LATENT, n_modules=N_MOD,
-            hidden_dims=[32, 16], use_batch_norm=False,
+            hidden_dims=[32, 16], use_batch_norm=False, normalize_input=True,
         )
         trainer_gen = Trainer(
             model=model_gen,
@@ -335,7 +340,7 @@ def test_simulation_isoform_hier_training(switch_rate):
             warmup_epochs=5,
             transition_epochs=3,
         )
-        trainer_gen(make_loader(), epochs=15)
+        trainer_gen(make_loader(), epochs=30)
     assert not model_gen.training
 
     # ── 4. Both models produce valid module assignments (loose ARI > 0) ───────

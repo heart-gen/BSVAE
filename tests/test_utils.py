@@ -1,4 +1,4 @@
-"""Tests for utility modules: datasets, helpers, hierarchy, initialization, modelIO."""
+"""Tests for utility modules: datasets, helpers, hierarchy, modelIO."""
 
 import os
 import tempfile
@@ -14,7 +14,6 @@ from bsvae.utils.helpers import (
     create_safe_directory,
     check_bounds,
 )
-from bsvae.utils.initialization import weights_init
 from bsvae.utils.datasets import OmicsDataset, get_omics_dataloader
 from bsvae.utils.hierarchy import load_tx2gene, group_isoforms_by_gene, IsoformStratifiedSampler
 
@@ -57,24 +56,6 @@ def test_check_bounds_out_of_range():
     import argparse
     with pytest.raises(argparse.ArgumentTypeError):
         check_bounds("-1.0", float, lb=0.0, ub=10.0, name="x")
-
-
-# ---------------------------------------------------------------------------
-# initialization
-# ---------------------------------------------------------------------------
-
-def test_weights_init_relu():
-    import torch.nn as nn
-    layer = nn.Linear(20, 10)
-    weights_init(layer, "relu")
-    assert layer.bias.abs().sum().item() == 0.0  # zeros
-
-
-def test_weights_init_linear():
-    import torch.nn as nn
-    layer = nn.Linear(20, 10)
-    weights_init(layer, "linear")
-    assert layer.bias.abs().sum().item() == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -152,10 +133,85 @@ def test_load_tx2gene_from_path(tmp_path):
     assert tx2gene["ENST002"] == "ENSG001"
 
 
-def test_load_tx2gene_infer_from_ensembl():
+def test_load_tx2gene_requires_mapping_file():
+    """Ensembl transcript and gene numbers are unrelated: no inference from IDs."""
     feat_ids = ["ENST00000001", "ENST00000002", "ENST00000003"]
-    tx2gene = load_tx2gene(feature_ids=feat_ids)
-    assert tx2gene["ENST00000001"] == "ENSG00000001"
+    with pytest.raises(ValueError, match="tx2gene"):
+        load_tx2gene(feature_ids=feat_ids)
+
+
+def test_load_tx2gene_strips_versions_and_matches_dataset(tmp_path):
+    df = pd.DataFrame({
+        "transcript_id": ["ENST001.3", "ENST002.1", "ENST003.2"],
+        "gene_id": ["ENSG001.5", "ENSG001.5", "ENSG002.1"],
+    })
+    path = tmp_path / "tx2gene.tsv"
+    df.to_csv(path, sep="\t", index=False)
+    tx2gene = load_tx2gene(path=str(path))
+    assert tx2gene["ENST001"] == "ENSG001"
+    # Dataset IDs carry different versions (and one GENCODE pipe ID): still grouped.
+    feature_ids = ["ENST001.7", "ENST002", "ENST003.9|ENSG002.1|GENE2"]
+    groups = group_isoforms_by_gene(tx2gene, feature_ids)
+    assert groups == {"ENSG001": [0, 1]}
+
+
+def test_load_tx2gene_headerless_and_csv(tmp_path):
+    path = tmp_path / "tx2gene.txt"
+    path.write_text("ENST001\tENSG001\nENST002\tENSG001\nENST003\tENSG002\n")
+    tx2gene = load_tx2gene(path=str(path))
+    assert list(tx2gene.index) == ["ENST001", "ENST002", "ENST003"]
+    assert tx2gene["ENST002"] == "ENSG001"
+    csv_path = tmp_path / "tx2gene.csv"
+    csv_path.write_text("transcript_id,gene_id,gene_name\ntxA,gX,X\ntxB,gX,X\n")
+    tx2gene = load_tx2gene(path=str(csv_path))
+    assert tx2gene["txB"] == "gX"
+
+
+def test_load_tx2gene_warns_on_low_coverage(tmp_path, caplog):
+    import logging
+    path = tmp_path / "tx2gene.tsv"
+    path.write_text("transcript_id\tgene_id\ntx1\tgA\n")
+    with caplog.at_level(logging.WARNING):
+        load_tx2gene(path=str(path), feature_ids=["tx1", "tx2", "tx3", "tx4"])
+    assert any("covers only" in r.message for r in caplog.records)
+
+
+def test_load_tx2gene_keep_version(tmp_path):
+    path = tmp_path / "tx2gene.tsv"
+    path.write_text("transcript_id\tgene_id\nENST001.3\tENSG001.5\n")
+    tx2gene = load_tx2gene(path=str(path), keep_version=True)
+    assert tx2gene["ENST001.3"] == "ENSG001.5"
+
+
+def test_gene_grouped_batch_sampler_complete_groups_and_permutation():
+    from bsvae.utils.hierarchy import GeneGroupedBatchSampler
+    groups = {"gA": [0, 1, 2], "gB": [3, 4], "gC": [5, 6, 7, 8]}
+    sampler = GeneGroupedBatchSampler(
+        n_features=20, gene_groups=groups, batch_size=5, p_multi=1.0, drop_last=False, seed=1,
+    )
+    batches = list(iter(sampler))
+    flat = [i for b in batches for i in b]
+    assert sorted(flat) == list(range(20))          # permutation: every feature once
+    assert all(len(b) <= 5 for b in batches)
+    # With p_multi=1 every gene group that fits in a batch is kept whole.
+    for gid, idxs in groups.items():
+        if len(idxs) <= 5:
+            assert any(set(idxs) <= set(b) for b in batches), gid
+    # Different epochs give different orders; resetting the epoch reproduces.
+    second = list(iter(sampler))
+    assert second != batches
+    sampler.set_epoch(0)
+    assert list(iter(sampler)) == batches
+
+
+def test_gene_grouped_batch_sampler_drop_last_and_len():
+    from bsvae.utils.hierarchy import GeneGroupedBatchSampler
+    sampler = GeneGroupedBatchSampler(
+        n_features=23, gene_groups={"g": [0, 1]}, batch_size=5, p_multi=0.5, drop_last=True,
+    )
+    batches = list(iter(sampler))
+    assert len(sampler) == 4
+    assert all(len(b) == 5 for b in batches)
 
 
 def test_group_isoforms_by_gene():

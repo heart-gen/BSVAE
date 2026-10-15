@@ -79,7 +79,8 @@ bsvae-networks extract-modules \
 Outputs:
 
 - `gamma.npz`
-- `hard_assignments.npz`
+- `hard_assignments.npz` (raw `argmax(γ)`)
+- `modules.csv`, `eigengenes.csv`, `kME.csv`, `merge_log.json` (post-processed: grey class, minimum size, eigengene merging)
 - `soft_eigengenes.csv` when requested
 
 Optional extras:

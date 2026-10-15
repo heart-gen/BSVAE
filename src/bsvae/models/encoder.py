@@ -81,5 +81,7 @@ class FeatureEncoder(nn.Module):
         """
         h = self.encoder(x)
         mu = self.fc_mu(h)
-        logvar = self.fc_logvar(h)
+        # Bound log-variance so exp(logvar) can neither overflow nor underflow
+        # in the KL and posterior-weight computations.
+        logvar = self.fc_logvar(h).clamp(min=-10.0, max=10.0)
         return mu, logvar

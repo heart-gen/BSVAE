@@ -8,33 +8,28 @@ bsvae-train NAME --dataset PATH [options]
 
 from __future__ import annotations
 
-import ast
-import logging
 import sys
 from os.path import join
 
-import torch
 from torch import optim
 
-from bsvae.models import GMMModuleVAE
-from bsvae.models.losses import GMMVAELoss, WarmupLoss
-from bsvae.utils.datasets import get_omics_dataloader
-from bsvae.utils.helpers import (
-    FormatterNoDuplicate,
-    create_safe_directory,
-    get_device,
-    get_n_params,
-    set_seed,
+from bsvae.cli._common import (
+    add_general_args,
+    add_loss_args,
+    add_model_args,
+    add_schedule_args,
+    build_gene_groups,
+    build_losses,
+    build_model,
+    build_train_loader,
+    build_trainer,
+    setup_logging,
+    training_metadata,
 )
-from bsvae.utils.modelIO import save_model, load_model, load_metadata
-from bsvae.utils.training import Trainer, Evaluator
-
-
-def _ast_eval(val):
-    try:
-        return ast.literal_eval(val)
-    except Exception:
-        return val
+from bsvae.utils.datasets import OmicsDataset, get_omics_dataloader
+from bsvae.utils.helpers import FormatterNoDuplicate, create_safe_directory, get_device, get_n_params, set_seed
+from bsvae.utils.modelIO import save_model, load_model
+from bsvae.utils.training import Evaluator
 
 
 def parse_args(cli_args=None):
@@ -45,274 +40,70 @@ def parse_args(cli_args=None):
         description="Train a GMMModuleVAE for biological module discovery.",
         formatter_class=FormatterNoDuplicate,
     )
-
-    # --- Required ---
     p.add_argument("name", type=str, help="Experiment name (output subdirectory).")
     p.add_argument("--dataset", required=True, help="Expression matrix (features × samples). CSV/TSV/HDF5/h5ad.")
-
-    # --- General ---
-    p.add_argument("--outdir", type=str, default="results", help="Directory for outputs.")
-    p.add_argument("--seed", type=int, default=13)
-    p.add_argument("--no-cuda", action="store_true", default=False)
-    p.add_argument("--log-level", choices=["debug", "info", "warning", "error"], default="info")
-    p.add_argument("--no-progress-bar", action="store_true", default=False)
-
-    # --- Training ---
     p.add_argument("--epochs", type=int, default=100)
-    p.add_argument("--batch-size", type=int, default=128)
-    p.add_argument("--lr", type=float, default=5e-4)
-    p.add_argument("--checkpoint-every", type=int, default=10)
-    p.add_argument("--warmup-epochs", type=int, default=20,
-                   help="Phase 1 length: standard N(0,I) VAE (default: 20).")
-    p.add_argument("--transition-epochs", type=int, default=10,
-                   help="GMM loss ramp-in length (default: 10).")
-    p.add_argument("--freeze-gmm-epochs", type=int, default=0,
-                   help="Freeze GMM prior params for first N GMM epochs (default: 0).")
-    p.add_argument("--collapse-threshold", type=float, default=0.5,
-                   help="Relative usage floor; component revived if usage < threshold/K (default: 0.5).")
-    p.add_argument("--collapse-noise-scale", type=float, default=0.5,
-                   help="Noise scale for dead-component revival (sigma multiples, default: 0.5).")
-
-    # --- Model architecture ---
-    p.add_argument("--n-modules", "-K", type=int, default=20,
-                   help="Number of GMM components / biological modules (default: 20).")
-    p.add_argument("--latent-dim", "-z", type=int, default=32,
-                   help="Latent space dimensionality D (default: 32).")
-    p.add_argument("--hidden-dims", type=_ast_eval, default=[512, 256, 128],
-                   help="Encoder hidden layer sizes as Python list (default: [512,256,128]).")
-    p.add_argument("--dropout", type=float, default=0.1)
-    p.add_argument("--no-batch-norm", action="store_false", dest="use_batch_norm")
-    p.add_argument("--use-batch-norm", action="store_true", dest="use_batch_norm", default=True)
-    p.add_argument("--sigma-min", type=float, default=0.3,
-                   help="GMM component σ floor (default: 0.3).")
-    p.add_argument("--normalize-input", action="store_true", default=False,
-                   help="Z-score each feature profile across samples before encoding. "
-                        "Recommended for count-derived data (log2-CPM, etc.).")
-
-    # --- Loss hyperparameters ---
-    p.add_argument("--beta", type=float, default=1.0, help="KL weight (default: 1.0).")
-    p.add_argument("--free-bits", type=float, default=0.0,
-                   help="Per-dim KL lower bound in nats (default: 0.0). "
-                        "Non-zero values hurt GMM cluster recovery by flooring γ to uniform; "
-                        "leave at 0.0 for normal use.")
-    p.add_argument("--kl-warmup-epochs", type=int, default=0,
-                   help="Epochs for β linear ramp within Phase 2 (default: 0).")
-    p.add_argument("--kl-anneal-mode", choices=["linear", "cyclical"], default="linear")
-    p.add_argument("--kl-cycle-length", type=int, default=50)
-    p.add_argument("--sep-strength", type=float, default=0.1,
-                   help="λ_sep: σ-scaled separation loss weight (default: 0.1).")
-    p.add_argument("--sep-alpha", type=float, default=2.0,
-                   help="α: margin multiplier for separation loss (default: 2.0).")
-    p.add_argument("--bal-strength", type=float, default=0.1,
-                   help="λ_bal: γ-usage balance loss weight (default: 0.1). "
-                        "Higher values force uniform usage; lower values allow natural "
-                        "module-size variation but risk dead components.")
-    p.add_argument("--bal-ema-blend", type=float, default=0.5,
-                   help="Balance loss blend α between EMA and batch (default: 0.5).")
-    p.add_argument("--bal-type", choices=["uniform", "entropy", "none"], default="uniform",
-                   help="Balance loss mode (default: 'uniform'). "
-                        "'uniform': KL(uniform || ρ) — prevents collapse and pushes equal sizes. "
-                        "'entropy': -H(ρ) — prevents collapse without equal-size pressure; "
-                        "recommended for variable-size modules (biological data). "
-                        "'none': disabled.")
-    p.add_argument("--bal-scale-gmm", action="store_true", default=False,
-                   help="Scale balance loss by gmm_weight, ramping it in alongside the KL term. "
-                        "Prevents the balance loss from opposing GMM learning during transition. "
-                        "Recommended with --bal-type entropy for variable-size modules.")
-    p.add_argument("--masked-recon", action="store_true", default=False,
-                   help="Compute reconstruction loss only on non-zero input entries. "
-                        "Recommended for zero-inflated count data.")
-    p.add_argument("--pi-entropy-strength", type=float, default=0.0,
-                   help="λ_pi: KL(uniform || π) penalty weight (default: 0.0).")
-    p.add_argument("--hier-strength", type=float, default=0.0,
-                   help="λ_hier: hierarchical isoform loss weight (default: 0.0=disabled).")
-    p.add_argument("--corr-strength", type=float, default=0.0,
-                   help="λ_corr: reconstruction-space pairwise correlation loss weight (default: 0.0=disabled). "
-                        "Penalises MSE between the batch-level Pearson correlation matrices of inputs "
-                        "and reconstructions. Recommended: 0.05–0.2 for NB count data with normalize-input.")
-    p.add_argument("--latent-corr-strength", type=float, default=0.0,
-                   help="λ_lcorr: latent-space correlation alignment loss weight (default: 0.0=disabled). "
-                        "Aligns cosine similarities of encoder μ with input Pearson correlations. "
-                        "More direct than --corr-strength; recommended: 0.1–1.0 for NB count data.")
-    p.add_argument("--tx2gene", type=str, default=None,
-                   help="TSV with (transcript_id, gene_id) for hierarchical loss.")
-    p.add_argument("--isoform-stratified", action="store_true", default=False,
-                   help="Use IsoformStratifiedSampler so isoforms of the same gene "
-                        "co-occur in batches, making --hier-strength effective. "
-                        "Requires --tx2gene.")
-    p.add_argument("--p-multi", type=float, default=0.5,
-                   help="Probability of drawing a full batch from multi-isoform features "
-                        "(default: 0.5). Only active with --isoform-stratified.")
-
-    # --- Evaluation ---
+    add_general_args(p)
+    add_schedule_args(p, checkpoint_default=10)
+    add_model_args(p)
+    add_loss_args(p)
     p.add_argument("--no-eval", action="store_true", default=False,
-                   help="Skip evaluation pass after training.")
-    p.add_argument("--eval-batch-size", type=int, default=None)
-
+                   help="Skip the training-set evaluation pass after training.")
     return p.parse_args(cli_args)
 
 
-def setup_logging(level: str) -> logging.Logger:
-    numeric = getattr(logging, level.upper(), logging.INFO)
-    logging.basicConfig(level=numeric, format="%(asctime)s %(levelname)s: %(message)s")
-    return logging.getLogger(__name__)
-
-
 def main(args):
-    logger = setup_logging(args.log_level)
+    logger = setup_logging(args.log_level, name=__name__)
     set_seed(args.seed)
     device = get_device(use_gpu=not args.no_cuda)
     exp_dir = join(args.outdir, args.name)
-
     create_safe_directory(exp_dir, logger=logger)
 
     # --- Data ---
-    train_loader = get_omics_dataloader(
-        path=args.dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        drop_last=True,
-        logger=logger,
-    )
-    n_features = train_loader.dataset.n_samples   # profile length = number of samples
-    feature_ids = train_loader.dataset.feature_ids
+    dataset = OmicsDataset(args.dataset, logger=logger, return_index=True)
+    n_features = dataset.n_samples   # profile length = number of samples
+    feature_ids = dataset.feature_ids
     logger.info("Dataset: %d features × %d samples", len(feature_ids), n_features)
 
-    # --- Hierarchy ---
-    gene_groups = {}
-    if args.tx2gene and (args.hier_strength > 0 or args.isoform_stratified):
-        from bsvae.utils.hierarchy import load_tx2gene, group_isoforms_by_gene
-        tx2gene = load_tx2gene(path=args.tx2gene, feature_ids=feature_ids)
-        gene_groups = group_isoforms_by_gene(tx2gene, feature_ids)
-        logger.info("Hierarchical groups: %d multi-isoform genes", len(gene_groups))
+    gene_groups = build_gene_groups(args, feature_ids, logger)
+    train_loader = build_train_loader(dataset, args, gene_groups, logger)
 
-    # Validate gene_groups indices are in-bounds
-    if gene_groups:
-        n_features_total = len(feature_ids)
-        for gene_id, idxs in gene_groups.items():
-            bad = [i for i in idxs if i < 0 or i >= n_features_total]
-            if bad:
-                raise ValueError(
-                    f"gene_groups['{gene_id}'] contains out-of-bounds indices {bad} "
-                    f"(dataset has {n_features_total} features)"
-                )
-
-    # Replace DataLoader with IsoformStratifiedSampler if requested
-    if args.isoform_stratified and gene_groups:
-        import torch.utils.data as tud
-        from bsvae.utils.hierarchy import IsoformStratifiedSampler
-        multi_indices = sorted({idx for idxs in gene_groups.values() for idx in idxs})
-        sampler = IsoformStratifiedSampler(
-            n_features=len(feature_ids),
-            multi_isoform_indices=multi_indices,
-            batch_size=args.batch_size,
-            p_multi=args.p_multi,
-            seed=args.seed,
-        )
-        train_loader = tud.DataLoader(
-            train_loader.dataset,
-            batch_size=args.batch_size,
-            sampler=sampler,
-            drop_last=True,
-            pin_memory=train_loader.pin_memory,
-            num_workers=train_loader.num_workers,
-        )
-        logger.info(
-            "IsoformStratifiedSampler: %d multi-isoform features, p_multi=%.2f",
-            len(multi_indices), args.p_multi,
-        )
-    elif args.isoform_stratified and not gene_groups:
-        logger.warning(
-            "--isoform-stratified requested but no multi-isoform gene groups found; "
-            "using standard random sampler."
-        )
-
-    # --- Model ---
-    model = GMMModuleVAE(
-        n_features=n_features,
-        n_latent=args.latent_dim,
-        n_modules=args.n_modules,
-        hidden_dims=args.hidden_dims,
-        dropout=args.dropout,
-        use_batch_norm=args.use_batch_norm,
-        sigma_min=args.sigma_min,
-        normalize_input=args.normalize_input,
-    ).to(device)
+    # --- Model / losses / trainer ---
+    model = build_model(args, n_features).to(device)
     logger.info(
         "Model: %d features, %d latent dims, %d modules | params=%d",
         n_features, args.latent_dim, args.n_modules, get_n_params(model),
     )
-
-    # --- Loss functions ---
-    gmm_loss = GMMVAELoss(
-        beta=args.beta,
-        kl_warmup_epochs=args.kl_warmup_epochs,
-        kl_anneal_mode=args.kl_anneal_mode,
-        kl_cycle_length=args.kl_cycle_length,
-        free_bits=args.free_bits,
-        sep_strength=args.sep_strength,
-        sep_alpha=args.sep_alpha,
-        bal_strength=args.bal_strength,
-        bal_type=args.bal_type,
-        bal_scale_gmm=args.bal_scale_gmm,
-        pi_entropy_strength=args.pi_entropy_strength,
-        bal_ema_blend=args.bal_ema_blend,
-        hier_strength=args.hier_strength,
-        normalize_input=args.normalize_input,
-        masked_recon=args.masked_recon,
-        corr_strength=args.corr_strength,
-        latent_corr_strength=args.latent_corr_strength,
-    )
-    warmup_loss = WarmupLoss(
-        beta=args.beta,
-        kl_warmup_epochs=args.warmup_epochs,
-        kl_anneal_mode=args.kl_anneal_mode,
-        kl_cycle_length=args.kl_cycle_length,
-        free_bits=args.free_bits,
-    )
+    gmm_loss, warmup_loss = build_losses(args)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-
-    # --- Train ---
-    trainer = Trainer(
-        model=model,
-        optimizer=optimizer,
-        gmm_loss_f=gmm_loss,
-        warmup_loss_f=warmup_loss,
-        device=device,
-        logger=logger,
-        save_dir=exp_dir,
-        is_progress_bar=not args.no_progress_bar,
-        warmup_epochs=args.warmup_epochs,
-        transition_epochs=args.transition_epochs,
-        freeze_gmm_epochs=args.freeze_gmm_epochs,
-        gene_groups=gene_groups,
-        collapse_threshold=args.collapse_threshold,
-        collapse_noise_scale=args.collapse_noise_scale,
+    trainer = build_trainer(
+        args, model, optimizer, gmm_loss, warmup_loss, device, logger, exp_dir, gene_groups,
     )
     trainer(train_loader, epochs=args.epochs, checkpoint_every=args.checkpoint_every)
 
     # --- Save ---
-    metadata = vars(args)
-    metadata["n_features"] = n_features
-    save_model(trainer.model, exp_dir, metadata=metadata)
+    save_model(trainer.model, exp_dir, metadata=training_metadata(args, n_features))
     logger.info("Model saved to %s", exp_dir)
 
-    # --- Eval ---
+    # --- Training-set evaluation (no held-out split in bsvae-train) ---
     if not args.no_eval:
         model_eval = load_model(exp_dir, is_gpu=not args.no_cuda)
-        eval_bs = args.eval_batch_size or (args.batch_size // 2)
+        eval_bs = args.eval_batch_size or max(1, args.batch_size // 2)
         eval_loader = get_omics_dataloader(
-            path=args.dataset,
-            batch_size=eval_bs,
-            shuffle=False,
-            drop_last=False,
-            logger=logger,
+            path=args.dataset, batch_size=eval_bs, shuffle=False, drop_last=False,
+            logger=logger, dataset=OmicsDataset.from_frame(_as_frame(dataset)),
         )
         evaluator = Evaluator(
             model_eval, gmm_loss, device=device, logger=logger, save_dir=exp_dir,
             is_progress_bar=not args.no_progress_bar,
         )
-        evaluator(eval_loader)
+        comps = evaluator(eval_loader, return_components=True)
+        logger.info("Training-set evaluation (same features as training): %s", comps)
+
+
+def _as_frame(dataset: OmicsDataset):
+    import pandas as pd
+    return pd.DataFrame(dataset.data.numpy(), index=dataset.feature_ids, columns=dataset.sample_ids)
 
 
 def cli():

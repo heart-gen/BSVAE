@@ -322,11 +322,21 @@ def prepare_leiden_graph(
     return graph, genes
 
 
-def _run_leiden_single(graph, resolution: float, edge_weights):
+LEIDEN_SEED = 13
+
+
+def _modularity(graph, membership, edge_weights) -> float:
+    """Standard (γ=1) modularity, comparable across resolutions."""
+    return float(graph.modularity(membership, weights=edge_weights))
+
+
+def _run_leiden_single(graph, resolution: float, edge_weights, seed: int = LEIDEN_SEED):
     """Run Leiden clustering for a single resolution (helper for parallel execution).
 
     Returns a PartitionResult (serializable) instead of the raw leidenalg partition
-    to avoid pickling issues with PyCapsule objects in parallel execution.
+    to avoid pickling issues with PyCapsule objects in parallel execution.  The
+    quality stored is the standard modularity at γ=1 so that resolutions can be
+    compared on the same scale (the RB quality itself depends on γ).
     """
     import leidenalg
 
@@ -335,11 +345,12 @@ def _run_leiden_single(graph, resolution: float, edge_weights):
         leidenalg.RBConfigurationVertexPartition,
         resolution_parameter=resolution,
         weights=edge_weights,
+        seed=seed,
     )
-    # Extract serializable data before returning to avoid pickle errors
+    membership = list(partition.membership)
     return resolution, PartitionResult(
-        membership=list(partition.membership),
-        quality=partition.quality(),
+        membership=membership,
+        quality=_modularity(graph, membership, edge_weights),
     )
 
 
@@ -397,14 +408,7 @@ def _leiden_partitions_for_resolutions(
         )
 
     for res in iterator:
-        partition = leidenalg.find_partition(
-            graph, leidenalg.RBConfigurationVertexPartition,
-            resolution_parameter=res, weights=edge_weights,
-        )
-        partitions[res] = PartitionResult(
-            membership=list(partition.membership),
-            quality=partition.quality(),
-        )
+        partitions[res] = _run_leiden_single(graph, res, edge_weights)[1]
         if progress and hasattr(iterator, "set_postfix"):
             n_modules = len(set(partitions[res].membership))
             iterator.set_postfix(resolution=f"{res:.2f}", modules=n_modules)
@@ -473,10 +477,12 @@ def optimize_resolution_modularity(
     n_jobs: int = 1,
 ) -> tuple[float, float] | tuple[float, float, pd.Series]:
     """
-    Find optimal Leiden resolution by maximizing modularity.
+    Find optimal Leiden resolution by maximizing standard (γ=1) modularity.
 
     This method selects resolution without using ground truth labels,
-    making it suitable for unbiased benchmarking.
+    making it suitable for unbiased benchmarking.  Partitions are scored
+    with ``igraph.Graph.modularity`` rather than the resolution-dependent
+    RB quality, so values are comparable across the sweep.
 
     Parameters
     ----------
@@ -804,6 +810,11 @@ def compute_module_eigengenes(
     """
     Compute module eigengenes (first principal component per module).
 
+    Each member profile is standardised across samples first and the sign of
+    the component is aligned with the module's mean expression (as in WGCNA
+    ``moduleEigengenes(align="along average")``).  Modules with fewer than two
+    features in ``datExpr`` are skipped with a warning.
+
     Parameters
     ----------
     datExpr:
@@ -814,10 +825,9 @@ def compute_module_eigengenes(
     Returns
     -------
     pandas.DataFrame
-        Samples × modules matrix of eigengene values.
+        Samples × modules matrix of eigengene values (string module columns).
     """
-    from sklearn.decomposition import PCA
-    from sklearn.preprocessing import StandardScaler
+    from bsvae.networks.postprocess import module_eigengenes
 
     module_series = pd.Series(modules, name="module")
     shared_genes = module_series.index.intersection(datExpr.index)
@@ -835,25 +845,24 @@ def compute_module_eigengenes(
         )
 
     logger.info("Computing eigengenes for %d modules", module_series.nunique())
-    eigengenes = {}
-    samples = datExpr.columns
-
-    for module_id, genes in module_series.groupby(module_series):
-        gene_list = list(genes.index.intersection(datExpr.index))
-        if not gene_list:
-            logger.warning("Module %s has no genes in expression matrix; skipping", module_id)
-            continue
-        expr_subset = datExpr.loc[gene_list].T  # samples x genes
-        scaler = StandardScaler()
-        scaled = scaler.fit_transform(expr_subset)
-        pca = PCA(n_components=1)
-        comp = pca.fit_transform(scaled)
-        eigengenes[str(module_id)] = comp[:, 0]
-
-    eigengene_df = pd.DataFrame(eigengenes, index=samples)
-    eigengene_df.index.name = "sample_id"
-    logger.info("Computed eigengenes for %d modules", eigengene_df.shape[1])
-    return eigengene_df
+    # Map arbitrary module labels to integers for the shared implementation.
+    uniq = list(pd.unique(module_series.values))
+    codes = {m: i for i, m in enumerate(uniq)}
+    labels = np.array([codes[m] for m in module_series.values], dtype=np.int64)
+    expr = datExpr.copy()
+    expr.index = expr.index.astype(str)
+    eg = module_eigengenes(expr, labels, [str(g) for g in module_series.index])
+    keep = []
+    for i, m in enumerate(uniq):
+        if i in eg.columns and not eg[i].isna().all():
+            keep.append(i)
+        else:
+            logger.warning("Module %s has fewer than 2 genes in expression matrix; skipping", m)
+    eg = eg[keep]
+    eg.columns = [str(uniq[i]) for i in keep]
+    eg.index.name = "sample_id"
+    logger.info("Computed eigengenes for %d modules", eg.shape[1])
+    return eg
 
 
 def save_modules(modules: Mapping[str, int] | pd.Series, output_path: str) -> None:
@@ -989,7 +998,11 @@ def compute_module_eigengenes_from_soft(
     min_weight: float = 0.05,
 ) -> "pd.DataFrame":
     """
-    Compute soft-weighted eigengenes: first PC of γ-weighted expression per module.
+    Soft-weighted eigengenes: first PC of γ-weighted, standardised expression.
+
+    Each member profile is z-scored across samples, then scaled by sqrt(γ_k)
+    so that the feature's weight in the PCA covariance is γ_k (not γ_k²).
+    The component sign is aligned with the γ-weighted mean profile.
 
     Parameters
     ----------
@@ -1005,39 +1018,24 @@ def compute_module_eigengenes_from_soft(
     Returns
     -------
     eigengenes : pd.DataFrame
-        Samples × modules.
+        Samples × modules; modules with fewer than two features are NaN.
     """
-    from sklearn.decomposition import PCA
+    from bsvae.networks.postprocess import _first_pc, _zscore_rows
 
     K = gamma.shape[1]
     sample_ids = list(expr.columns)
+    expr_idx = pd.Index(expr.index.astype(str))
+    pos = expr_idx.get_indexer(pd.Index([str(f) for f in feature_ids]))
+    values = expr.values.astype(np.float64)
     eigengenes = {}
 
     for k in range(K):
         weights = gamma[:, k]
-        mask = weights >= min_weight
+        mask = (weights >= min_weight) & (pos >= 0)
         if mask.sum() < 2:
-            eigengenes[f"module_{k}"] = np.zeros(len(sample_ids))
+            eigengenes[f"module_{k}"] = np.full(len(sample_ids), np.nan)
             continue
-
-        fids_k = [fid for fid, m in zip(feature_ids, mask) if m]
-        w_k = weights[mask]
-
-        # Subset expression for this module's features
-        common = [f for f in fids_k if f in expr.index]
-        if len(common) < 2:
-            eigengenes[f"module_{k}"] = np.zeros(len(sample_ids))
-            continue
-
-        fid_to_widx = {f: i for i, f in enumerate(fids_k)}
-        w_common = np.array([w_k[fid_to_widx[f]] for f in common])
-        sub_expr = expr.loc[common].values.T  # (S, n_feat)
-
-        # Weight features by γ_k
-        sub_expr_weighted = sub_expr * w_common[np.newaxis, :]
-
-        pca = PCA(n_components=1)
-        pc1 = pca.fit_transform(sub_expr_weighted).ravel()  # (S,)
-        eigengenes[f"module_{k}"] = pc1
+        Z = _zscore_rows(values[pos[mask]]).T           # samples × features
+        eigengenes[f"module_{k}"] = _first_pc(Z, align=True, weights=weights[mask])
 
     return pd.DataFrame(eigengenes, index=sample_ids)

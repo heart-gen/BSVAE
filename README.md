@@ -55,6 +55,7 @@ Supported loaders:
 - `bsvae-sweep-k`
 - `bsvae-networks`
 - `bsvae-simulate`
+- `bsvae-benchmark` (BSVAE vs WGCNA on simulated data; needs R with `WGCNA`)
 
 ## Quickstart
 
@@ -81,7 +82,7 @@ bsvae-sweep-k sweep1 \
 
 This writes sweep outputs under `results/sweep1/sweep_k/` and retrains the selected model under `results/sweep1/final_k<K>/`.
 
-Extract module assignments from the final model:
+Extract module assignments from the final model (post-processing adds a grey class, a minimum module size and eigengene merging, so train with a generous `--n-modules`, about three times the expected module count):
 
 ```bash
 bsvae-networks extract-modules \
@@ -173,8 +174,16 @@ Each scenario replicate writes method-ready files under `results/sim_pub_v1/scen
 
 - `expr/features_x_samples.tsv.gz`
 - `expr/samples_x_features.tsv.gz`
-- `truth/modules_hard.csv`
+- `truth/modules_hard.csv` (null features are `-1`)
+- `truth/tx2gene.tsv` and `truth/modules_gene.csv` for the transcript-level family (`bsvae-simulate init-config --isoform`)
 - `method_inputs.json`
+
+Run BSVAE and WGCNA head-to-head on a grid and summarise grey-aware ARI/NMI, best-match Jaccard, and gene-level recovery:
+
+```bash
+bsvae-benchmark run --config iso.yaml --outdir results/bench --methods bsvae,wgcna --seeds 0,1,2
+bsvae-benchmark summarize --results results/bench/results.tsv
+```
 
 ## Documentation
 

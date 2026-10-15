@@ -57,6 +57,14 @@ def build_parser() -> argparse.ArgumentParser:
     bp.add_argument("--dataset", required=True, help="Expression matrix to train on.")
     bp.add_argument("--ground-truth", required=True, help="CSV with ground-truth module labels.")
     bp.add_argument("--model-path", required=True, help="Trained GMMModuleVAE directory.")
+    bp.add_argument("--expr", default=None,
+                    help="Expression matrix for eigengene merging (default: --dataset).")
+    bp.add_argument("--no-postprocess", action="store_true", default=False,
+                    help="Score raw argmax(γ) instead of post-processed assignments.")
+    bp.add_argument("--min-gamma", type=float, default=0.5)
+    bp.add_argument("--min-module-size", type=int, default=10)
+    bp.add_argument("--merge-cut-height", type=float, default=0.4)
+    bp.add_argument("--no-merge", action="store_true", default=False)
     bp.add_argument("--output", required=True, help="Output JSON with benchmark metrics.")
     bp.add_argument("--batch-size", type=int, default=128)
     bp.add_argument("--no-cuda", action="store_true", default=False)
@@ -66,6 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     cp = subs.add_parser("init-config", help="Write a starter simulation config file.")
     cp.add_argument("--output", default="sim.yaml", help="Destination config path.")
+    cp.add_argument("--isoform", action="store_true", default=False,
+                    help="Write a starter config for the transcript-level "
+                         "nb_isoform_modules family instead of nb_latent_modules.")
 
     # ------------------------------------------------------------------
     # generate-grid
@@ -156,21 +167,42 @@ def handle_benchmark(args, logger: logging.Logger) -> None:
     )
     result = extract_gmm_modules(model, dataloader, feature_ids=feature_ids)
     pred_labels = result["hard_assignments"]
+    if not getattr(args, "no_postprocess", False):
+        from bsvae.networks.postprocess import postprocess_assignments
+        from bsvae.networks.extract_networks import load_expression
+        expr = load_expression(args.expr or args.dataset)
+        post = postprocess_assignments(
+            result["gamma"], feature_ids, expr,
+            min_gamma=args.min_gamma, min_module_size=args.min_module_size,
+            merge_cut_height=0.0 if args.no_merge else args.merge_cut_height,
+        )
+        pred_labels = post.labels
 
-    # Align by feature_ids
-    gt_feat_ids = gt_df["feature_id"].values if "feature_id" in gt_df.columns else None
-    if gt_feat_ids is not None and len(gt_feat_ids) == len(feature_ids):
-        id_to_gt = dict(zip(gt_feat_ids, gt_labels))
-        gt_aligned = np.array([id_to_gt.get(fid, -1) for fid in feature_ids])
-        mask = gt_aligned >= 0
-        gt_labels = gt_aligned[mask]
-        pred_labels = pred_labels[mask]
+    # Align by feature_id (always); fall back to positional order only when
+    # the truth file carries no IDs and the lengths agree.
+    if "feature_id" in gt_df.columns:
+        id_to_gt = dict(zip(gt_df["feature_id"].astype(str), gt_labels))
+        keep = [i for i, fid in enumerate(feature_ids) if str(fid) in id_to_gt]
+        if len(keep) < 0.9 * len(feature_ids):
+            raise ValueError(
+                f"Only {len(keep)}/{len(feature_ids)} dataset features match the ground-truth "
+                "feature_id column; check that the two files describe the same features."
+            )
+        gt_labels = np.array([id_to_gt[str(feature_ids[i])] for i in keep])
+        pred_labels = pred_labels[keep]
+    elif len(gt_labels) != len(feature_ids):
+        raise ValueError(
+            "Ground truth has no feature_id column and its length differs from the dataset."
+        )
 
-    ari = compute_ari(gt_labels, pred_labels)
-    nmi = compute_nmi(gt_labels, pred_labels)
-
-    metrics = {"ari": ari, "nmi": nmi, "n_features": int(len(gt_labels))}
-    logger.info("ARI=%.4f  NMI=%.4f  (n=%d features)", ari, nmi, len(gt_labels))
+    from bsvae.simulation.metrics import evaluate_labels
+    metrics = evaluate_labels(np.asarray(gt_labels), np.asarray(pred_labels))
+    metrics["n_features"] = int(len(gt_labels))
+    ari, nmi = metrics["ari_all"], metrics["nmi_all"]
+    logger.info(
+        "ARI=%.4f  NMI=%.4f  (assigned-only ARI=%.4f, grey=%d, n=%d features)",
+        ari, nmi, metrics["ari_assigned"], metrics["n_pred_grey"], len(gt_labels),
+    )
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -180,9 +212,12 @@ def handle_benchmark(args, logger: logging.Logger) -> None:
 
 
 def handle_init_config(args, logger: logging.Logger) -> None:
-    from bsvae.simulation.scenario import write_starter_config
+    from bsvae.simulation.scenario import write_starter_config, write_isoform_starter_config
 
-    write_starter_config(args.output)
+    if getattr(args, "isoform", False):
+        write_isoform_starter_config(args.output)
+    else:
+        write_starter_config(args.output)
     logger.info("Starter simulation config written to %s", args.output)
 
 

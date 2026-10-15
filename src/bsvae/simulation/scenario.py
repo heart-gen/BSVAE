@@ -1,18 +1,41 @@
+"""
+Scenario-grid simulation of count-based co-expression data.
+
+Generator families
+------------------
+``nb_latent_modules``
+    Features load on one (or, with overlap, two) latent module factors; NB
+    counts with library-size variation, optional gene-specific batch
+    confounding, gene-specific nonlinearity, cell-type mixing and dropout.
+``nb_isoform_modules``
+    Transcript-level data with genes made of several isoforms, gene-level
+    modules, isoform switching/mixing, and null (grey) genes.  Implemented in
+    :mod:`bsvae.simulation.isoform` on top of the helpers here.
+
+Random streams
+--------------
+Each scenario seed is split into independent child streams (structure,
+factors, loadings, baselines, arm-specific effects, observation noise), so
+two grid arms that differ only in, say, ``confounding`` share the same
+modules, factors and loadings and differ only in the confounding draw.
+"""
+
 from __future__ import annotations
 
 import copy
 import json
 import itertools
 from pathlib import Path
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 
+# GTEx v11 Whole Blood calibration (see scripts/calibrate_nb_from_gtex.py).
 DEFAULT_CONFIG: Dict = {
-    "version": 1,
+    "version": 2,
     "base_seed": 13,
     "reps": 30,
     "generator": {
@@ -20,21 +43,27 @@ DEFAULT_CONFIG: Dict = {
         "n_features": 6000,
         "n_modules": 20,
         "module_size_distribution": "long_tail",
+        "null_fraction": 0.0,
         "hub_fraction": 0.05,
         "hub_multiplier": 2.0,
-        "baseline_log_mean": -2.0,
-        "baseline_log_sd": 0.6,
-        "libsize_log_sd": 0.5,
-        "dispersion": "medium",
-        "signal_scale": 0.8,
+        "baseline_log_mean": 2.638,
+        "baseline_log_sd": 1.601,
+        "libsize_log_sd": 0.364,
+        "dispersion": "heterogeneous",
+        "signal_scale": 1.9,
+        "factor_corr": 0.0,
         "overlap_rate": 0.1,
         "nonlinear_mode": "off",
         "dropout_mode": "off",
+        "confounding": "none",
+        "confound_feature_frac": 0.3,
+        "condition_effect": True,
+        "celltype_confound": "none",
         "truth_edge_top_k": 25,
     },
     "grid": {
         "n_samples": [100, 300],
-        "signal_scale": [0.4, 0.8, 1.2],
+        "signal_scale": [1.0, 1.9, 3.0],
         "overlap_rate": [0.0, 0.2],
         "confounding": ["none", "moderate"],
         "nonlinear_mode": ["off", "on"],
@@ -49,7 +78,7 @@ DEFAULT_CONFIG: Dict = {
             "name": "high_overlap_nonlinear",
             "overlap_rate": 0.35,
             "nonlinear_mode": "on",
-            "signal_scale": 0.6,
+            "signal_scale": 1.2,
             "confounding": "moderate",
         },
     ],
@@ -60,6 +89,21 @@ DEFAULT_CONFIG: Dict = {
     },
 }
 
+ISOFORM_GENERATOR_DEFAULTS: Dict = {
+    "family": "nb_isoform_modules",
+    "n_genes": 4000,
+    "isoforms_per_gene": {"dist": "geometric", "p": 0.45, "min": 1, "max": 6},
+    "n_modules": 16,
+    "module_size_distribution": "long_tail",
+    "switch_rate": 0.15,
+    "alpha": 1.0,
+    "null_fraction": 0.10,
+    "iso_offset_sd": 0.3,
+    "dominant_isoform_frac": 0.6,
+    "factor_corr": 0.3,
+    "id_version": False,
+}
+
 
 def _ensure_list(value):
     if isinstance(value, list):
@@ -68,15 +112,23 @@ def _ensure_list(value):
 
 
 def load_config(path: str | Path) -> Dict:
+    """Load a YAML (PyYAML, if installed) or JSON scenario config."""
     p = Path(path)
     text = p.read_text(encoding="utf-8")
     try:
-        cfg = json.loads(text)
-    except json.JSONDecodeError as exc:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    try:
+        import yaml  # type: ignore
+    except ImportError as exc:
         raise ValueError(
-            "Config parsing failed. `bsvae-simulate` expects JSON-compatible YAML. "
-            "Use `bsvae-simulate init-config` to create a starter file."
+            "Config parsing failed: the file is not JSON and PyYAML is not installed. "
+            "Install pyyaml or use `bsvae-simulate init-config` to create a JSON starter file."
         ) from exc
+    cfg = yaml.safe_load(text)
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Config {path} did not parse to a mapping")
     return cfg
 
 
@@ -84,6 +136,40 @@ def write_starter_config(path: str | Path) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(DEFAULT_CONFIG, indent=2), encoding="utf-8")
+
+
+ISOFORM_STARTER_CONFIG: Dict = {
+    "version": 2,
+    "base_seed": 13,
+    "reps": 5,
+    "generator": {
+        **{k: v for k, v in DEFAULT_CONFIG["generator"].items()
+           if k not in ("family", "n_features", "n_modules", "overlap_rate", "null_fraction")},
+        "family": "nb_isoform_modules",
+        "n_genes": 4000,
+        "n_modules": 16,
+        "isoforms_per_gene": {"dist": "geometric", "p": 0.45, "min": 1, "max": 6},
+        "switch_rate": 0.15,
+        "alpha": 1.0,
+        "null_fraction": 0.10,
+        "iso_offset_sd": 0.3,
+        "dominant_isoform_frac": 0.6,
+        "factor_corr": 0.3,
+    },
+    "grid": {
+        "n_samples": [100, 300],
+        "switch_rate": [0.0, 0.15, 0.3],
+        "alpha": [1.0, 0.5],
+    },
+    "stress": [],
+    "outputs": {"emit_wgcna_matrix": True, "emit_gnvae_folds": False, "gnvae_n_folds": 10},
+}
+
+
+def write_isoform_starter_config(path: str | Path) -> None:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(ISOFORM_STARTER_CONFIG, indent=2), encoding="utf-8")
 
 
 @dataclass
@@ -97,9 +183,26 @@ class ScenarioResult:
     edge_list: pd.DataFrame
     gene_metadata: pd.DataFrame
     metadata: Dict
+    modules_overlap: Optional[pd.DataFrame] = None
+    extra_truth: Dict[str, pd.DataFrame] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Shared building blocks
+# ---------------------------------------------------------------------------
+
+STREAM_NAMES = ("struct", "factors", "loadings", "baseline", "arm", "noise")
+
+
+def spawn_streams(seed: int) -> Dict[str, np.random.Generator]:
+    """Independent child generators so grid arms are paired at a seed."""
+    children = np.random.default_rng(int(seed)).spawn(len(STREAM_NAMES))
+    return dict(zip(STREAM_NAMES, children))
 
 
 def _build_module_sizes(n_features: int, n_modules: int, mode: str, rng: np.random.Generator) -> np.ndarray:
+    if n_modules <= 0:
+        return np.zeros(0, dtype=int)
     if mode == "balanced":
         base = n_features // n_modules
         rem = n_features % n_modules
@@ -123,6 +226,197 @@ def _build_module_sizes(n_features: int, n_modules: int, mode: str, rng: np.rand
     raise ValueError(f"Unknown module_size_distribution: {mode}")
 
 
+def _latent_factors(rng: np.random.Generator, n_samples: int, n_modules: int, factor_corr: float) -> np.ndarray:
+    """Module factors (S × K); with ``factor_corr`` > 0, modules in the same
+    meta-group share a common component (TF programmes co-activating modules)."""
+    z_indep = rng.normal(0.0, 1.0, size=(n_samples, n_modules))
+    if factor_corr > 0.0 and n_modules >= 2:
+        n_meta = max(2, n_modules // 4)
+        meta_assign = rng.integers(0, n_meta, size=n_modules)
+        z_meta = rng.normal(0.0, 1.0, size=(n_samples, n_meta))
+        return np.sqrt(1.0 - factor_corr) * z_indep + np.sqrt(factor_corr) * z_meta[:, meta_assign]
+    return z_indep
+
+
+_NONLINEAR_FUNCS = {
+    0: lambda z: z,                                  # identity
+    1: lambda z: 1.6 * np.tanh(z),                   # saturating
+    2: lambda z: np.maximum(z, 0.0) * 1.7 - 0.68,    # ReLU-like (centred)
+    3: lambda z: (z > 0).astype(float) * 2.0 - 1.0,  # step
+    4: lambda z: (z ** 2 - 1.0) / np.sqrt(2.0),      # centred square (non-monotone)
+}
+
+
+def _signal_eta(
+    z: np.ndarray,
+    W: np.ndarray,
+    nonlinear_mode: str,
+    rng_arm: np.random.Generator,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """
+    Signal part of the log-mean, S × F.
+
+    ``nonlinear_mode="on"`` applies a feature-specific link f_g to the factors
+    before the loading, so features of one module relate to each other
+    nonlinearly.  ``"factor"`` reproduces the old behaviour of transforming
+    the factor itself (every member stays linear in the same transformed
+    factor).  ``"off"`` is linear.
+    """
+    if nonlinear_mode == "on":
+        n_features = W.shape[0]
+        func_ids = rng_arm.integers(0, len(_NONLINEAR_FUNCS), size=n_features)
+        eta = np.zeros((z.shape[0], n_features), dtype=np.float64)
+        for fid, f in _NONLINEAR_FUNCS.items():
+            cols = np.where(func_ids == fid)[0]
+            if cols.size == 0:
+                continue
+            eta[:, cols] = f(z) @ W[cols].T
+        return eta, func_ids
+    if nonlinear_mode == "factor":
+        z_nl = np.zeros_like(z)
+        z_nl[:, 0::2] = np.tanh(z[:, 0::2])
+        z_nl[:, 1::2] = (z[:, 1::2] > 0).astype(float)
+        return (z + 0.6 * z_nl) @ W.T, None
+    if nonlinear_mode in ("off", "linear", None):
+        return z @ W.T, None
+    raise ValueError(f"Unknown nonlinear_mode: {nonlinear_mode}")
+
+
+def _nb_observe(
+    eta_signal: np.ndarray,
+    alpha: np.ndarray,
+    *,
+    generator_cfg: Dict,
+    confounding: str,
+    dropout_mode: str,
+    dropout_target: float,
+    cond_feature_mask: Optional[np.ndarray],
+    rng_arm: np.random.Generator,
+    rng_noise: np.random.Generator,
+) -> Dict:
+    """
+    Turn a signal log-mean (S × F) and per-feature baselines into log2-CPM.
+
+    Adds (from the arm stream) gene-specific batch effects, a condition
+    effect, cell-type composition effects and dropout; samples NB counts
+    (noise stream); then CPM-normalises and log2-transforms.
+    """
+    n_samples, n_features = eta_signal.shape
+    eta = eta_signal + alpha[None, :]
+
+    condition = rng_arm.integers(0, 2, size=n_samples)
+    if confounding == "none":
+        batch = np.zeros(n_samples, dtype=int)
+        batch_sd = 0.0
+    elif confounding in ("moderate", "strong"):
+        batch = rng_arm.integers(0, 3, size=n_samples)
+        batch_sd = 0.4 if confounding == "moderate" else 0.8
+    else:
+        raise ValueError(f"Unknown confounding level: {confounding}")
+
+    # Gene-specific batch effects: a random subset of features each gets its
+    # own effect per batch, so the structure survives CPM normalisation (a
+    # per-sample scalar shared by all features would be removed by it).
+    frac = float(generator_cfg.get("confound_feature_frac", 0.3))
+    n_aff = int(round(frac * n_features)) if confounding != "none" else 0
+    affected = rng_arm.choice(n_features, size=n_aff, replace=False) if n_aff > 0 else np.zeros(0, dtype=int)
+    if n_aff > 0:
+        n_batches = int(batch.max()) + 1
+        eff = rng_arm.normal(0.0, batch_sd, size=(n_batches, n_aff))
+        eta[:, affected] += eff[batch]
+
+    beta_cond = np.zeros(n_features, dtype=np.float64)
+    if bool(generator_cfg.get("condition_effect", True)) and cond_feature_mask is not None:
+        n_c = int(cond_feature_mask.sum())
+        if n_c > 0:
+            beta_cond[cond_feature_mask] = rng_arm.normal(0.4, 0.1, size=n_c)
+            eta = eta + condition[:, None] * beta_cond[None, :]
+
+    ct_fractions = None
+    celltype_confound = generator_cfg.get("celltype_confound", "none")
+    if celltype_confound != "none":
+        n_ct = int(generator_cfg.get("n_celltypes", 3))
+        ct_effect_sd = 0.4 if celltype_confound == "moderate" else 0.8
+        ct_conc = 2.0 if celltype_confound == "moderate" else 1.0
+        n_ct_markers = max(10, int(0.15 * n_features))
+        ct_fractions = rng_arm.dirichlet(np.ones(n_ct) * ct_conc, size=n_samples)
+        ct_signatures = np.zeros((n_ct, n_features), dtype=np.float64)
+        for c in range(n_ct):
+            markers = rng_arm.choice(n_features, size=min(n_ct_markers, n_features), replace=False)
+            ct_signatures[c, markers] = rng_arm.normal(0.0, ct_effect_sd, size=markers.size)
+        eta = eta + ct_fractions @ ct_signatures
+
+    libsize = np.exp(rng_noise.normal(0.0, float(generator_cfg.get("libsize_log_sd", 0.364)), size=n_samples))
+    mu = np.exp(np.clip(eta, -10, 10)) * libsize[:, None]
+
+    dispersion_mode = generator_cfg.get("dispersion", "heterogeneous")
+    if dispersion_mode == "heterogeneous":
+        log_theta = -0.5 + 0.3 * alpha + rng_noise.normal(0.0, 0.3, size=n_features)
+        theta = np.exp(log_theta).clip(0.3, 20.0)
+    elif dispersion_mode == "low":
+        theta = np.full(n_features, 20.0)
+    elif dispersion_mode == "high":
+        theta = np.full(n_features, 1.5)
+    else:  # "medium"
+        theta = np.full(n_features, 5.0)
+
+    p = theta[None, :] / (theta[None, :] + mu)
+    counts = rng_noise.negative_binomial(theta[None, :], p).astype(np.float32)
+
+    if dropout_mode in {"logistic", "high"}:
+        target = dropout_target if dropout_mode == "high" else 0.2
+        log_mu = np.log1p(mu)
+        mid = float(np.quantile(log_mu, target))
+        probs = 1.0 / (1.0 + np.exp((log_mu - mid) / 0.7))
+        mask = rng_arm.random(probs.shape) < probs
+        counts[mask] = 0.0
+
+    cpm = counts / np.maximum(counts.sum(axis=1, keepdims=True), 1.0) * 1e6
+    expr = np.log2(cpm + 1.0)
+
+    covariates = pd.DataFrame(
+        {"condition": condition, "batch": batch, "libsize": libsize}
+    )
+    return {
+        "expr": expr,
+        "covariates": covariates,
+        "theta": theta,
+        "libsize": libsize,
+        "batch_affected": affected,
+        "beta_cond": beta_cond,
+        "ct_fractions": ct_fractions,
+    }
+
+
+def _edge_truth(W: np.ndarray, memberships: List[set], module_members: Dict[int, List[int]], top_k: int) -> Dict[Tuple[int, int], float]:
+    """Top-k within-module edges per feature by |W_i · W_j|, vectorised per module."""
+    edge_map: Dict[Tuple[int, int], float] = {}
+    if top_k <= 0:
+        return edge_map
+    for k, members in module_members.items():
+        if len(members) < 2:
+            continue
+        idx = np.asarray(members)
+        Wk = W[idx]
+        sims = np.abs(Wk @ Wk.T)
+        np.fill_diagonal(sims, -np.inf)
+        kk = min(top_k, len(idx) - 1)
+        top = np.argpartition(sims, -kk, axis=1)[:, -kk:]
+        for r in range(len(idx)):
+            i = int(idx[r])
+            for c in top[r]:
+                j = int(idx[c])
+                w = float(sims[r, c])
+                a, b = (i, j) if i < j else (j, i)
+                if w > edge_map.get((a, b), -np.inf):
+                    edge_map[(a, b)] = w
+    return edge_map
+
+
+# ---------------------------------------------------------------------------
+# nb_latent_modules family
+# ---------------------------------------------------------------------------
+
 def _simulate_counts(
     n_features: int,
     n_samples: int,
@@ -136,29 +430,37 @@ def _simulate_counts(
     seed: int,
     generator_cfg: Dict,
 ) -> ScenarioResult:
-    rng = np.random.default_rng(seed)
+    streams = spawn_streams(seed)
+    rs, rf, rl, rb, ra, rn = (streams[n] for n in STREAM_NAMES)
 
     feature_ids = [f"feature_{i:05d}" for i in range(n_features)]
     sample_ids = [f"sample_{j:04d}" for j in range(n_samples)]
     module_names = [f"M{k + 1:02d}" for k in range(n_modules)]
 
+    # Null (background) features carry no module loading: truth label -1.
+    null_fraction = float(generator_cfg.get("null_fraction", 0.0))
+    n_null = int(round(null_fraction * n_features))
+    is_null = np.zeros(n_features, dtype=bool)
+    if n_null > 0:
+        is_null[rs.choice(n_features, size=n_null, replace=False)] = True
+    signal_idx = np.where(~is_null)[0]
+
     module_sizes = _build_module_sizes(
-        n_features=n_features,
-        n_modules=n_modules,
-        mode=generator_cfg.get("module_size_distribution", "long_tail"),
-        rng=rng,
+        n_features=len(signal_idx), n_modules=n_modules,
+        mode=generator_cfg.get("module_size_distribution", "long_tail"), rng=rs,
     )
+    primary = np.full(n_features, -1, dtype=int)
+    assigned = np.concatenate([np.full(sz, k, dtype=int) for k, sz in enumerate(module_sizes)])
+    rs.shuffle(assigned)
+    primary[signal_idx] = assigned
 
-    primary = np.concatenate([np.full(sz, k, dtype=int) for k, sz in enumerate(module_sizes)])
-    rng.shuffle(primary)
-
-    memberships = [set([int(primary[i])]) for i in range(n_features)]
-    n_overlap = int(overlap_rate * n_features)
-    if n_overlap > 0:
-        overlap_idx = rng.choice(n_features, size=n_overlap, replace=False)
+    memberships = [set([int(primary[i])]) if primary[i] >= 0 else set() for i in range(n_features)]
+    n_overlap = int(overlap_rate * len(signal_idx))
+    if n_overlap > 0 and n_modules > 1:
+        overlap_idx = rs.choice(signal_idx, size=n_overlap, replace=False)
         for i in overlap_idx:
             choices = [k for k in range(n_modules) if k != primary[i]]
-            memberships[int(i)].add(int(rng.choice(choices)))
+            memberships[int(i)].add(int(rs.choice(choices)))
 
     module_members = {k: [i for i, m in enumerate(memberships) if k in m] for k in range(n_modules)}
 
@@ -170,156 +472,53 @@ def _simulate_counts(
         if not members:
             continue
         n_h = max(1, int(hub_frac * len(members)))
-        chosen = rng.choice(members, size=min(n_h, len(members)), replace=False)
+        chosen = rs.choice(members, size=min(n_h, len(members)), replace=False)
         hub_by_module[k] = set(int(i) for i in chosen)
 
-    # Correlated latent factors: group modules into meta-modules; within each
-    # meta-module, factors share a common component (factor_corr = rho).
-    # Biologically motivated: transcription factor programs co-activate groups
-    # of co-expression modules (e.g., immune activation → multiple immune modules).
-    factor_corr = float(generator_cfg.get("factor_corr", 0.0))
-    if factor_corr > 0.0:
-        n_meta = max(2, n_modules // 4)
-        meta_assign = rng.integers(0, n_meta, size=n_modules)      # (K,) — module→meta-group
-        z_meta  = rng.normal(0.0, 1.0, size=(n_samples, n_meta))   # shared component
-        z_indep = rng.normal(0.0, 1.0, size=(n_samples, n_modules)) # private component
-        z_lin = (np.sqrt(1.0 - factor_corr) * z_indep
-                 + np.sqrt(factor_corr) * z_meta[:, meta_assign])
-    else:
-        z_lin = rng.normal(0.0, 1.0, size=(n_samples, n_modules))
+    z = _latent_factors(rf, n_samples, n_modules, float(generator_cfg.get("factor_corr", 0.0)))
 
-    if nonlinear_mode == "on":
-        z_nl = np.zeros_like(z_lin)
-        z_nl[:, 0::2] = np.tanh(z_lin[:, 0::2])
-        z_nl[:, 1::2] = (z_lin[:, 1::2] > 0).astype(float)
-        z = z_lin + 0.6 * z_nl
-    else:
-        z = z_lin
-
-    W = np.zeros((n_features, n_modules), dtype=np.float32)
+    W = np.zeros((n_features, n_modules), dtype=np.float64)
     for g in range(n_features):
         for k in memberships[g]:
-            scale = signal_scale
-            if g in hub_by_module[k]:
-                scale *= hub_mult
-            # Use abs so all module members co-vary in the same direction,
-            # ensuring positive within-module correlation (co-expression).
-            W[g, k] = abs(rng.normal(0.0, scale))
-    W += rng.normal(0.0, 0.02, size=W.shape)
+            scale = signal_scale * (hub_mult if g in hub_by_module[k] else 1.0)
+            W[g, k] = abs(rl.normal(0.0, scale))
+    W += rl.normal(0.0, 0.02, size=W.shape)
 
-    alpha = rng.normal(
-        float(generator_cfg.get("baseline_log_mean", -2.0)),
-        float(generator_cfg.get("baseline_log_sd", 0.6)),
+    alpha = rb.normal(
+        float(generator_cfg.get("baseline_log_mean", 2.638)),
+        float(generator_cfg.get("baseline_log_sd", 1.601)),
         size=n_features,
     )
 
-    condition = rng.integers(0, 2, size=n_samples)
-    if confounding == "none":
-        batch = np.zeros(n_samples, dtype=int)
-        batch_eff = np.array([0.0], dtype=np.float32)
-    elif confounding == "moderate":
-        batch = rng.integers(0, 3, size=n_samples)
-        batch_eff = rng.normal(0.0, 0.4, size=3)
-    elif confounding == "strong":
-        batch = rng.integers(0, 3, size=n_samples)
-        batch_eff = rng.normal(0.0, 0.8, size=3)
-    else:
-        raise ValueError(f"Unknown confounding level: {confounding}")
+    eta_signal, func_ids = _signal_eta(z, W, nonlinear_mode, ra)
 
-    libsize = np.exp(rng.normal(0.0, float(generator_cfg.get("libsize_log_sd", 0.5)), size=n_samples))
+    affected_modules = set(rs.choice(np.arange(n_modules), size=max(1, n_modules // 5), replace=False)) if n_modules else set()
+    cond_mask = np.array([any(k in affected_modules for k in memberships[g]) for g in range(n_features)])
 
-    affected_modules = set(rng.choice(np.arange(n_modules), size=max(1, n_modules // 5), replace=False))
-    cond_gene_mask = np.array([any(k in affected_modules for k in memberships[g]) for g in range(n_features)])
-    beta_cond = np.zeros(n_features, dtype=np.float32)
-    beta_cond[cond_gene_mask] = rng.normal(0.4, 0.1, size=cond_gene_mask.sum())
-
-    eta = z @ W.T
-    eta = eta + alpha[None, :]
-    eta = eta + condition[:, None] * beta_cond[None, :]
-    eta = eta + batch_eff[batch][:, None]
-
-    # Cell-type composition confounding: bulk RNA-seq samples are mixtures of
-    # cell types whose proportions vary between samples, creating strong
-    # co-expression signals unrelated to biological modules.
-    # Model: additive in log-count space (linear mixture approximation).
-    celltype_confound = generator_cfg.get("celltype_confound", "none")
-    if celltype_confound != "none":
-        n_ct         = int(generator_cfg.get("n_celltypes", 3))
-        ct_effect_sd = 0.4 if celltype_confound == "moderate" else 0.8
-        ct_conc      = 2.0 if celltype_confound == "moderate" else 1.0  # lower = more variable
-        n_ct_markers = max(10, int(0.15 * n_features))  # ~15% of genes per cell type
-
-        # Sample cell-type proportions: (n_samples, n_ct)
-        ct_fractions = rng.dirichlet(np.ones(n_ct) * ct_conc, size=n_samples)
-
-        # Cell-type marker signatures in log-count space: (n_ct, n_features)
-        # Each cell type independently selects marker genes — some overlap is allowed.
-        ct_signatures = np.zeros((n_ct, n_features), dtype=np.float32)
-        for c in range(n_ct):
-            markers = rng.choice(n_features, size=n_ct_markers, replace=False)
-            ct_signatures[c, markers] = rng.normal(0.0, ct_effect_sd, size=n_ct_markers)
-
-        # Additive effect in log-count space: (n_samples, n_features)
-        eta = eta + (ct_fractions @ ct_signatures)
-    else:
-        ct_fractions  = None
-        ct_signatures = None
-
-    mu = np.exp(np.clip(eta, -10, 10)) * libsize[:, None]
-
-    dispersion_mode = generator_cfg.get("dispersion", "medium")
-    if dispersion_mode == "heterogeneous":
-        # Gene-level mean-dispersion relationship calibrated for bulk RNA-seq:
-        # higher-expressed genes are less overdispersed (closer to Poisson).
-        # log(theta) ≈ -0.5 + 0.3 * alpha_g + N(0, 0.3)
-        # alpha ~ GTEx WB mean 2.6 → theta ~ 1.3  (matches "high" mode centre)
-        # alpha ~ 0 → theta ~ 0.6  (low-expression: overdispersed)
-        # alpha ~ 5 → theta ~ 2.7  (high-expression: less overdispersed)
-        log_theta = -0.5 + 0.3 * alpha + rng.normal(0.0, 0.3, size=n_features)
-        theta = np.exp(log_theta).clip(0.3, 20.0)
-    elif dispersion_mode == "low":
-        theta = np.full(n_features, 20.0)
-    elif dispersion_mode == "high":
-        theta = np.full(n_features, 1.5)
-    else:  # "medium"
-        theta = np.full(n_features, 5.0)
-
-    p = theta[None, :] / (theta[None, :] + mu)
-    counts = rng.negative_binomial(theta[None, :], p).astype(np.float32)
-
-    if dropout_mode in {"logistic", "high"}:
-        target = dropout_target if dropout_mode == "high" else 0.2
-        log_mu = np.log1p(mu)
-        mid = float(np.quantile(log_mu, target))
-        probs = 1.0 / (1.0 + np.exp((log_mu - mid) / 0.7))
-        mask = rng.random(probs.shape) < probs
-        counts[mask] = 0.0
-
-    cpm = counts / np.maximum(counts.sum(axis=1, keepdims=True), 1.0) * 1e6
-    expr = np.log2(cpm + 1.0)
-
-    expr_sxg = pd.DataFrame(expr, index=sample_ids, columns=feature_ids)
+    obs = _nb_observe(
+        eta_signal, alpha, generator_cfg=generator_cfg, confounding=confounding,
+        dropout_mode=dropout_mode, dropout_target=dropout_target,
+        cond_feature_mask=cond_mask, rng_arm=ra, rng_noise=rn,
+    )
+    expr_sxg = pd.DataFrame(obs["expr"], index=sample_ids, columns=feature_ids)
     expr_gxs = expr_sxg.T
-
-    covariates = pd.DataFrame(
-        {
-            "sample_id": sample_ids,
-            "condition": condition,
-            "batch": batch,
-            "libsize": libsize,
-        }
-    ).set_index("sample_id")
+    covariates = obs["covariates"]
+    covariates.index = pd.Index(sample_ids, name="sample_id")
 
     modules_hard = pd.DataFrame(
+        {"feature_id": feature_ids, "module": primary.astype(int), "is_null": is_null.astype(int)}
+    )
+    modules_overlap = pd.DataFrame(
         {
             "feature_id": feature_ids,
-            "module": primary.astype(int),
+            "modules": [";".join(module_names[k] for k in sorted(m)) if m else "grey" for m in memberships],
+            "n_memberships": [len(m) for m in memberships],
         }
     )
 
     modules_long_rows = []
     for g in range(n_features):
-        memberships_g = sorted(list(memberships[g]))
+        memberships_g = sorted(memberships[g])
         denom = max(1, len(memberships_g))
         for k in memberships_g:
             modules_long_rows.append(
@@ -330,61 +529,40 @@ def _simulate_counts(
                     "membership_weight": float(abs(W[g, k]) / denom),
                 }
             )
-    modules_long = pd.DataFrame(modules_long_rows)
-
+    modules_long = pd.DataFrame(modules_long_rows, columns=["feature_id", "module", "is_hub", "membership_weight"])
     module_latents = pd.DataFrame(z, index=sample_ids, columns=module_names)
 
-    top_k = int(generator_cfg.get("truth_edge_top_k", 25))
-    edge_map: Dict[Tuple[int, int], float] = {}
-    for i in range(n_features):
-        candidates = set()
-        for k in memberships[i]:
-            candidates.update(module_members[k])
-        candidates.discard(i)
-        if not candidates:
-            continue
-        cand_idx = np.fromiter(candidates, dtype=int)
-        sims = np.abs(W[cand_idx] @ W[i])
-        if cand_idx.size > top_k:
-            keep = np.argpartition(sims, -top_k)[-top_k:]
-            cand_idx = cand_idx[keep]
-            sims = sims[keep]
-        for j, w in zip(cand_idx, sims):
-            a, b = (i, int(j)) if i < int(j) else (int(j), i)
-            if a == b:
-                continue
-            old = edge_map.get((a, b), -np.inf)
-            if float(w) > old:
-                edge_map[(a, b)] = float(w)
-    edge_rows = [
-        {
-            "source": feature_ids[i],
-            "target": feature_ids[j],
-            "weight": w,
-            "is_within_module": 1,
-        }
-        for (i, j), w in edge_map.items()
-    ]
-    edge_list = pd.DataFrame(edge_rows)
+    edge_map = _edge_truth(W, memberships, module_members, int(generator_cfg.get("truth_edge_top_k", 25)))
+    edge_list = pd.DataFrame(
+        [{"source": feature_ids[i], "target": feature_ids[j], "weight": w, "is_within_module": 1}
+         for (i, j), w in edge_map.items()],
+        columns=["source", "target", "weight", "is_within_module"],
+    )
 
     gene_metadata = pd.DataFrame(
         {
             "feature_id": feature_ids,
-            "primary_module": [module_names[k] for k in primary],
+            "primary_module": [module_names[k] if k >= 0 else "grey" for k in primary],
             "n_memberships": [len(m) for m in memberships],
             "is_hub_any": [int(any(g in hub_by_module[k] for k in memberships[g])) for g in range(n_features)],
+            "is_null": is_null.astype(int),
             "alpha": alpha,
-            "dispersion": theta,
+            "dispersion": obs["theta"],
+            "batch_affected": np.isin(np.arange(n_features), obs["batch_affected"]).astype(int),
+            "nonlinear_func": func_ids if func_ids is not None else 0,
         }
     )
 
     metadata = {
+        "family": "nb_latent_modules",
         "n_features": n_features,
         "n_samples": n_samples,
         "n_modules": n_modules,
         "seed": seed,
         "signal_scale": signal_scale,
         "overlap_rate": overlap_rate,
+        "null_fraction": null_fraction,
+        "n_null": int(n_null),
         "confounding": confounding,
         "nonlinear_mode": nonlinear_mode,
         "dropout_mode": dropout_mode,
@@ -392,7 +570,8 @@ def _simulate_counts(
         "module_sizes": module_sizes.tolist(),
         "factor_corr": float(generator_cfg.get("factor_corr", 0.0)),
         "celltype_confound": generator_cfg.get("celltype_confound", "none"),
-        "dispersion_mode": generator_cfg.get("dispersion", "medium"),
+        "dispersion_mode": generator_cfg.get("dispersion", "heterogeneous"),
+        "n_batch_affected": int(len(obs["batch_affected"])),
     }
 
     return ScenarioResult(
@@ -405,12 +584,18 @@ def _simulate_counts(
         edge_list=edge_list,
         gene_metadata=gene_metadata,
         metadata=metadata,
+        modules_overlap=modules_overlap,
     )
 
 
+# ---------------------------------------------------------------------------
+# Grid handling
+# ---------------------------------------------------------------------------
+
 def _write_gnvae_splits(expr_gxs: pd.DataFrame, output_dir: Path, n_folds: int, seed: int) -> None:
+    """Sample-level (column) folds for sample-wise VAEs such as GNVAE."""
     rng = np.random.default_rng(seed)
-    n = expr_gxs.shape[0]
+    n = expr_gxs.shape[1]
     order = rng.permutation(n)
 
     fold_sizes = np.full(n_folds, n // n_folds, dtype=int)
@@ -418,15 +603,14 @@ def _write_gnvae_splits(expr_gxs: pd.DataFrame, output_dir: Path, n_folds: int, 
 
     current = 0
     for fold_id, fold_size in enumerate(fold_sizes):
-        test_idx = order[current : current + fold_size]
-        train_idx = np.concatenate([order[:current], order[current + fold_size :]])
+        test_idx = order[current: current + fold_size]
+        train_idx = np.concatenate([order[:current], order[current + fold_size:]])
         current += fold_size
 
         fold_dir = output_dir / "gnvae" / f"fold_{fold_id}"
         fold_dir.mkdir(parents=True, exist_ok=True)
-
-        expr_gxs.iloc[train_idx].to_csv(fold_dir / "X_train.tsv.gz", sep="\t", compression="gzip")
-        expr_gxs.iloc[test_idx].to_csv(fold_dir / "X_test.tsv.gz", sep="\t", compression="gzip")
+        expr_gxs.iloc[:, train_idx].to_csv(fold_dir / "X_train.tsv.gz", sep="\t", compression="gzip")
+        expr_gxs.iloc[:, test_idx].to_csv(fold_dir / "X_test.tsv.gz", sep="\t", compression="gzip")
 
 
 def _scenario_id(base_idx: int, factor_dict: Dict) -> str:
@@ -436,6 +620,10 @@ def _scenario_id(base_idx: int, factor_dict: Dict) -> str:
 
 def expand_scenarios(config: Dict) -> List[Tuple[str, Dict]]:
     gen = copy.deepcopy(config.get("generator", {}))
+    if gen.get("family") == "nb_isoform_modules":
+        merged = copy.deepcopy(ISOFORM_GENERATOR_DEFAULTS)
+        merged.update(gen)
+        gen = merged
     grid = config.get("grid", {})
 
     keys = sorted(grid.keys())
@@ -462,6 +650,29 @@ def expand_scenarios(config: Dict) -> List[Tuple[str, Dict]]:
     return scenarios
 
 
+def simulate_params(params: Dict, seed: int) -> ScenarioResult:
+    """Dispatch on ``params["family"]`` and run the generator."""
+    family = str(params.get("family", "nb_latent_modules"))
+    if family == "nb_latent_modules":
+        return _simulate_counts(
+            n_features=int(params.get("n_features", 6000)),
+            n_samples=int(params.get("n_samples", 300)),
+            n_modules=int(params.get("n_modules", 20)),
+            signal_scale=float(params.get("signal_scale", 1.9)),
+            overlap_rate=float(params.get("overlap_rate", 0.1)),
+            confounding=str(params.get("confounding", "none")),
+            nonlinear_mode=str(params.get("nonlinear_mode", "off")),
+            dropout_mode=str(params.get("dropout_mode", "off")),
+            dropout_target=float(params.get("dropout_target", 0.5)),
+            seed=seed,
+            generator_cfg=params,
+        )
+    if family == "nb_isoform_modules":
+        from bsvae.simulation.isoform import simulate_isoform_counts
+        return simulate_isoform_counts(params=params, seed=seed)
+    raise ValueError(f"Unknown generator family: {family}")
+
+
 def generate_scenario(config: Dict, scenario_id: str, rep: int, outdir: str | Path, base_seed: int | None = None) -> Path:
     scenarios = dict(expand_scenarios(config))
     if scenario_id not in scenarios:
@@ -469,49 +680,41 @@ def generate_scenario(config: Dict, scenario_id: str, rep: int, outdir: str | Pa
         raise ValueError(f"Unknown scenario_id: {scenario_id}. Examples: {available}")
 
     params = copy.deepcopy(scenarios[scenario_id])
-
     seed0 = int(config.get("base_seed", 13) if base_seed is None else base_seed)
     seed = seed0 + rep
 
-    result = _simulate_counts(
-        n_features=int(params.get("n_features", 6000)),
-        n_samples=int(params.get("n_samples", 300)),
-        n_modules=int(params.get("n_modules", 20)),
-        signal_scale=float(params.get("signal_scale", 0.8)),
-        overlap_rate=float(params.get("overlap_rate", 0.1)),
-        confounding=str(params.get("confounding", "none")),
-        nonlinear_mode=str(params.get("nonlinear_mode", "off")),
-        dropout_mode=str(params.get("dropout_mode", "off")),
-        dropout_target=float(params.get("dropout_target", 0.5)),
-        seed=seed,
-        generator_cfg=params,
-    )
+    result = simulate_params(params, seed)
 
     base = Path(outdir) / "scenarios" / scenario_id / f"rep_{rep:03d}"
     (base / "expr").mkdir(parents=True, exist_ok=True)
     (base / "truth").mkdir(parents=True, exist_ok=True)
 
+    outputs_cfg = config.get("outputs", {})
     expr_gxs_path = base / "expr" / "features_x_samples.tsv.gz"
     expr_sxg_path = base / "expr" / "samples_x_features.tsv.gz"
     cov_path = base / "covariates.tsv.gz"
 
     result.expr_features_x_samples.to_csv(expr_gxs_path, sep="\t", compression="gzip")
-    result.expr_samples_x_features.to_csv(expr_sxg_path, sep="\t", compression="gzip")
+    emit_wgcna = bool(outputs_cfg.get("emit_wgcna_matrix", True))
+    if emit_wgcna:
+        result.expr_samples_x_features.to_csv(expr_sxg_path, sep="\t", compression="gzip")
     result.covariates.to_csv(cov_path, sep="\t", compression="gzip")
 
     modules_hard_path = base / "truth" / "modules_hard.csv"
-    modules_long_path = base / "truth" / "modules_long.csv"
-    latents_path = base / "truth" / "module_latents.tsv.gz"
-    edge_list_path = base / "truth" / "edge_list.tsv.gz"
-    gene_meta_path = base / "truth" / "gene_metadata.tsv.gz"
-
     result.modules_hard.to_csv(modules_hard_path, index=False)
-    result.modules_long.to_csv(modules_long_path, index=False)
-    result.module_latents.to_csv(latents_path, sep="\t", compression="gzip")
-    result.edge_list.to_csv(edge_list_path, sep="\t", index=False, compression="gzip")
-    result.gene_metadata.to_csv(gene_meta_path, sep="\t", index=False, compression="gzip")
+    result.modules_long.to_csv(base / "truth" / "modules_long.csv", index=False)
+    result.module_latents.to_csv(base / "truth" / "module_latents.tsv.gz", sep="\t", compression="gzip")
+    result.edge_list.to_csv(base / "truth" / "edge_list.tsv.gz", sep="\t", index=False, compression="gzip")
+    result.gene_metadata.to_csv(base / "truth" / "gene_metadata.tsv.gz", sep="\t", index=False, compression="gzip")
+    if result.modules_overlap is not None:
+        result.modules_overlap.to_csv(base / "truth" / "modules_overlap.csv", index=False)
+    extra_paths = {}
+    for name, df in result.extra_truth.items():
+        sep = "\t" if name.endswith((".tsv", ".tsv.gz")) else ","
+        p = base / "truth" / name
+        df.to_csv(p, sep=sep, index=False, compression="gzip" if name.endswith(".gz") else None)
+        extra_paths[name] = str(p)
 
-    outputs_cfg = config.get("outputs", {})
     if bool(outputs_cfg.get("emit_gnvae_folds", True)):
         _write_gnvae_splits(
             expr_gxs=result.expr_features_x_samples,
@@ -528,17 +731,32 @@ def generate_scenario(config: Dict, scenario_id: str, rep: int, outdir: str | Pa
         "parameters": params,
         "summary": result.metadata,
     }
-    (base / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    (base / "metadata.json").write_text(json.dumps(metadata, indent=2, default=_json_default), encoding="utf-8")
 
     method_inputs = {
         "bsvae_dataset": str(expr_gxs_path),
         "bsvae_ground_truth": str(modules_hard_path),
-        "wgcna_expr": str(expr_sxg_path),
         "gnvae_gene_expression_filename": str(expr_gxs_path),
     }
+    if emit_wgcna:
+        method_inputs["wgcna_expr"] = str(expr_sxg_path)
+    if "tx2gene.tsv" in extra_paths:
+        method_inputs["bsvae_tx2gene"] = extra_paths["tx2gene.tsv"]
+    if "modules_gene.csv" in extra_paths:
+        method_inputs["bsvae_ground_truth_gene"] = extra_paths["modules_gene.csv"]
     (base / "method_inputs.json").write_text(json.dumps(method_inputs, indent=2), encoding="utf-8")
 
     return base
+
+
+def _json_default(obj):
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return str(obj)
 
 
 def generate_grid(config: Dict, outdir: str | Path, reps: int | None = None, base_seed: int | None = None) -> Dict:
@@ -551,18 +769,15 @@ def generate_grid(config: Dict, outdir: str | Path, reps: int | None = None, bas
     for scenario_id, params in scenarios:
         for rep in range(n_reps):
             run_dir = generate_scenario(
-                config=config,
-                scenario_id=scenario_id,
-                rep=rep,
-                outdir=outdir,
-                base_seed=base_seed,
+                config=config, scenario_id=scenario_id, rep=rep, outdir=outdir, base_seed=base_seed,
             )
             manifest_rows.append(
                 {
                     "scenario_id": scenario_id,
                     "rep": rep,
                     "run_dir": str(run_dir),
-                    "n_features": int(params.get("n_features", 6000)),
+                    "family": params.get("family", "nb_latent_modules"),
+                    "n_features": int(params.get("n_features", params.get("n_genes", 6000))),
                     "n_samples": int(params.get("n_samples", 300)),
                     "n_modules": int(params.get("n_modules", 20)),
                 }
@@ -594,7 +809,6 @@ def validate_grid(grid_dir: str | Path) -> Dict:
         run_dir = Path(row["run_dir"])
         required = [
             run_dir / "expr" / "features_x_samples.tsv.gz",
-            run_dir / "expr" / "samples_x_features.tsv.gz",
             run_dir / "covariates.tsv.gz",
             run_dir / "truth" / "modules_hard.csv",
             run_dir / "method_inputs.json",

@@ -58,29 +58,31 @@ Key outputs:
 
 Selection behavior:
 
-- with `--stability-reps 1`, the best `K` is chosen by validation loss
+- with `--stability-reps 1`, the best `K` is chosen by held-out ELBO (reconstruction + β·KL)
 - with `--stability-reps > 1`, the best `K` is chosen by mean pairwise ARI on held-out features
 
 ## 4. Train A Final Model Directly
 
-If you already know `K`, train directly with `bsvae-train`.
+If you already know roughly how many modules to expect, train directly with `bsvae-train`. Use about three times that number of components (post-processing merges split modules; see "Choosing K" in the hyperparameters page).
 
 ```bash
 bsvae-train study1 \
   --dataset data/expression.csv \
   --epochs 120 \
-  --n-modules 24 \
-  --latent-dim 32
+  --n-modules 48 \
+  --latent-dim 32 \
+  --normalize-input
 ```
 
 Useful flags to review for production runs:
 
-- `--normalize-input`
+- `--normalize-input` (recommended for log-CPM style data)
+- `--beta` (1–2 works well now that the KL is scaled per observed value)
 - `--warmup-epochs`
 - `--transition-epochs`
-- `--free-bits`
+- `--bal-type` / `--bal-strength`
 - `--sep-strength`
-- `--bal-strength`
+- `--collapse-min-usage`
 - `--checkpoint-every`
 
 ## 5. Extract Feature Networks
@@ -108,7 +110,7 @@ Outputs are sparse adjacency files such as:
 
 ## 6. Extract Modules
 
-`extract-modules` saves soft and hard GMM assignments. Add `--expr` and `--soft-eigengenes` to compute eigengenes.
+`extract-modules` saves soft and hard GMM assignments and, by default, post-processes them the way WGCNA post-processes a tree cut: low-confidence features become unassigned (grey), undersized modules are dissolved, and modules with highly correlated eigengenes are merged. Pass `--expr` so merging and kME can run (and `--soft-eigengenes` for γ-weighted eigengenes); `--no-postprocess` keeps raw `argmax(γ)`.
 
 ```bash
 bsvae-networks extract-modules \
@@ -121,14 +123,14 @@ bsvae-networks extract-modules \
 
 Primary outputs:
 
-- `gamma.npz`
-- `hard_assignments.npz`
+- `modules.csv` (`feature_id, module, module_label`; grey is `-1`), `eigengenes.csv`, `kME.csv`, `merge_log.json`
+- `gamma.npz`, `hard_assignments.npz` (raw), `gamma_merged.npz`
 - `soft_eigengenes.csv` when requested
 
 Optional comparison outputs:
 
 - `leiden_modules.csv` with `--use-leiden`
-- `gamma_gene.npz` and `hard_assignments_gene.npz` with `--aggregate-to-gene --tx2gene`
+- `gamma_gene.npz`, `hard_assignments_gene.npz` and `gene_divergent.csv` with `--aggregate-to-gene --tx2gene`
 
 ## 7. Export Latents
 
@@ -218,6 +220,6 @@ Each replicate directory includes method-ready files such as:
 
 ## 11. Legacy Configuration Note
 
-The active CLI does not use `hyperparam.ini`. The files in `src/bsvae/hyperparam.ini` and `docs/hyperparam.ini` are retained for compatibility context only.
+The active CLI does not use `hyperparam.ini`; the legacy ini files have been removed.
 
 For reproducible runs, prefer shell scripts or workflow files with explicit CLI flags.

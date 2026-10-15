@@ -57,11 +57,15 @@ bsvae-networks extract-modules \
   --soft-eigengenes
 ```
 
-Extra outputs:
+Post-processing (on by default) mirrors WGCNA: a confidence cutoff (`--min-gamma`) leaves uncertain features unassigned (grey, label `-1`), undersized modules are dissolved (`--min-module-size`), and modules whose eigengenes correlate above `1 - --merge-cut-height` are merged. Pass `--no-postprocess` for raw `argmax(γ)`.
 
-- `soft_eigengenes.csv`
+Outputs:
+
+- `modules.csv` (`feature_id, module, module_label`), `eigengenes.csv`, `kME.csv`, `merge_log.json`, `gamma_merged.npz`
+- `gamma.npz`, `hard_assignments.npz` (raw)
+- `soft_eigengenes.csv` with `--soft-eigengenes`
 - `leiden_modules.csv` with `--use-leiden`
-- `gamma_gene.npz` and `hard_assignments_gene.npz` with `--aggregate-to-gene --tx2gene`
+- `gamma_gene.npz`, `hard_assignments_gene.npz` and `gene_divergent.csv` (genes whose isoforms land in two or more modules) with `--aggregate-to-gene --tx2gene`
 
 ## Export Latents
 

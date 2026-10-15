@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "base_seed": 13,
   "reps": 30,
   "generator": {
@@ -7,24 +7,46 @@
     "n_features": 6000,
     "n_modules": 20,
     "module_size_distribution": "long_tail",
+    "null_fraction": 0.0,
     "hub_fraction": 0.05,
     "hub_multiplier": 2.0,
-    "baseline_log_mean": -2.0,
-    "baseline_log_sd": 0.6,
-    "libsize_log_sd": 0.5,
-    "dispersion": "medium",
-    "signal_scale": 0.8,
+    "baseline_log_mean": 2.638,
+    "baseline_log_sd": 1.601,
+    "libsize_log_sd": 0.364,
+    "dispersion": "heterogeneous",
+    "signal_scale": 1.9,
+    "factor_corr": 0.0,
     "overlap_rate": 0.1,
     "nonlinear_mode": "off",
     "dropout_mode": "off",
+    "confounding": "none",
+    "confound_feature_frac": 0.3,
+    "condition_effect": true,
+    "celltype_confound": "none",
     "truth_edge_top_k": 25
   },
   "grid": {
-    "n_samples": [100, 300],
-    "signal_scale": [0.4, 0.8, 1.2],
-    "overlap_rate": [0.0, 0.2],
-    "confounding": ["none", "moderate"],
-    "nonlinear_mode": ["off", "on"]
+    "n_samples": [
+      100,
+      300
+    ],
+    "signal_scale": [
+      1.0,
+      1.9,
+      3.0
+    ],
+    "overlap_rate": [
+      0.0,
+      0.2
+    ],
+    "confounding": [
+      "none",
+      "moderate"
+    ],
+    "nonlinear_mode": [
+      "off",
+      "on"
+    ]
   },
   "stress": [
     {
@@ -36,7 +58,7 @@
       "name": "high_overlap_nonlinear",
       "overlap_rate": 0.35,
       "nonlinear_mode": "on",
-      "signal_scale": 0.6,
+      "signal_scale": 1.2,
       "confounding": "moderate"
     }
   ],

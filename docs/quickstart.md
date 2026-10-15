@@ -28,7 +28,7 @@ Expected outputs in `results/pilot_run/`:
 
 ## 3. Recommended: Tune The Number Of Modules
 
-`--n-modules` sets the number of Gaussian-mixture components. For most real datasets, use `bsvae-sweep-k` before a production run.
+`--n-modules` sets the number of Gaussian-mixture components, not the final module count: post-processing in `extract-modules` merges components whose eigengenes correlate, so use about three times the number of modules you expect (at least 20). `bsvae-sweep-k` can pick the component count by held-out ELBO before a production run.
 
 ```bash
 bsvae-sweep-k sweep_pilot \
@@ -67,7 +67,8 @@ bsvae-networks extract-modules \
 Expected outputs:
 
 - `gamma.npz`
-- `hard_assignments.npz`
+- `hard_assignments.npz` (raw `argmax(γ)`)
+- `modules.csv`, `eigengenes.csv`, `kME.csv`, `merge_log.json` (post-processed: grey class, minimum size, eigengene merging)
 - `soft_eigengenes.csv` when requested
 
 ## 6. Export Latents

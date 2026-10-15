@@ -85,8 +85,11 @@ def latent_corr_loss(x: torch.Tensor, mu: torch.Tensor, eps: float = 1e-6) -> to
     x_n = F.normalize(x_c, p=2, dim=1, eps=eps)
     C_x = x_n @ x_n.T                             # (B, B) — detached target
 
-    # Latent cosine similarities (learned)
-    mu_n = F.normalize(mu, p=2, dim=1, eps=eps)
+    # Latent cosine similarities (learned). Centre μ across the batch first so
+    # the similarity is a correlation in latent space too, not an angle that
+    # depends on a shared offset.
+    mu_c = mu - mu.mean(dim=0, keepdim=True)
+    mu_n = F.normalize(mu_c, p=2, dim=1, eps=eps)
     S_mu = mu_n @ mu_n.T                           # (B, B)
 
     return F.mse_loss(S_mu, C_x.detach())
@@ -141,6 +144,37 @@ def kl_normal_loss_with_free_bits(mu, logvar, free_bits=0.0, reduction="mean"):
         kl_sum = torch.clamp(kl, min=free_bits).sum() if free_bits > 0 else kl.sum()
         return kl_sum, kl_per_dim
     raise ValueError(f"Unknown reduction '{reduction}'; expected 'mean' or 'sum'.")
+
+
+def _recon_target(
+    x: torch.Tensor,
+    model: Optional[nn.Module],
+    normalize_input: bool,
+    masked_recon: bool,
+):
+    """
+    Build the reconstruction target (and optional mask) for a batch.
+
+    The model's ``normalize_input`` flag is the single source of truth when a
+    model is given; otherwise the loss's own flag is used.  The mask is taken
+    on the raw input and keeps every non-zero entry, so log-scale data with
+    negative values is handled correctly.
+    """
+    should_normalize = getattr(model, "normalize_input", normalize_input)
+    mask = (x != 0).float() if masked_recon else None
+    x_target = x
+    if should_normalize:
+        mu_x = x.mean(dim=-1, keepdim=True)
+        sigma_x = x.std(dim=-1, keepdim=True).clamp(min=1e-6)
+        x_target = (x - mu_x) / sigma_x
+    return x_target, mask
+
+
+def _recon_loss(recon_x: torch.Tensor, x_target: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+    if mask is not None:
+        sq_err = (recon_x - x_target) ** 2
+        return (sq_err * mask).sum() / mask.sum().clamp(min=1.0)
+    return F.mse_loss(recon_x, x_target, reduction="mean")
 
 
 # ---------------------------------------------------------------------------
@@ -236,14 +270,49 @@ def kl_vade(
 # Hierarchical loss
 # ---------------------------------------------------------------------------
 
+def _pair_term(
+    mu_iso: torch.Tensor,
+    x_iso: Optional[torch.Tensor],
+    margin: float,
+    corr_weight: bool,
+) -> Optional[torch.Tensor]:
+    """Weighted mean hinge distance over isoform pairs of one gene (or None)."""
+    n = mu_iso.shape[0]
+    diffs = mu_iso.unsqueeze(0) - mu_iso.unsqueeze(1)          # (n, n, D)
+    dists = torch.sqrt((diffs ** 2).sum(dim=-1) + 1e-12)        # (n, n)
+    if margin > 0.0:
+        dists = torch.clamp(dists - margin, min=0.0)
+    mask = torch.triu(torch.ones(n, n, device=mu_iso.device), diagonal=1)
+    if corr_weight and x_iso is not None:
+        with torch.no_grad():
+            xc = x_iso - x_iso.mean(dim=1, keepdim=True)
+            xn = F.normalize(xc, p=2, dim=1, eps=1e-6)
+            w = torch.clamp(xn @ xn.T, min=0.0, max=1.0)          # (n, n)
+        mask = mask * w
+    denom = mask.sum()
+    if denom <= 0:
+        return None
+    return (dists * mask).sum() / denom
+
+
 def hierarchical_loss(
     mu: torch.Tensor,
     gene_groups: Dict[str, List[int]],
     feature_idx_in_batch: Optional[torch.Tensor] = None,
     idx_to_gene: Optional[Dict[int, str]] = None,
+    x: Optional[torch.Tensor] = None,
+    margin: float = 0.0,
+    corr_weight: bool = False,
 ) -> torch.Tensor:
     """
-    Mean pairwise L2 in μ-space for isoforms of the same gene.
+    Mean pairwise hinge L2 in μ-space for isoforms of the same gene.
+
+    With ``margin > 0`` only pairs farther apart than ``margin`` are pulled
+    together, so isoforms that already share a component are left alone.
+    With ``corr_weight=True`` (requires ``x``) each pair is weighted by the
+    positive part of the Pearson correlation of the two input profiles, so
+    isoforms whose expression diverges (isoform switching) are not forced
+    into the same module.
 
     Parameters
     ----------
@@ -254,6 +323,9 @@ def hierarchical_loss(
     idx_to_gene : optional precomputed reverse mapping dataset_idx → gene_id.
         When provided alongside feature_idx_in_batch, enables an O(B) fast path
         (128 Python dict lookups) instead of O(G × n_iso) GPU tensor equality ops.
+    x : (B, N) optional input profiles (used only when ``corr_weight``)
+    margin : float — hinge margin in latent units (0 = plain attraction)
+    corr_weight : bool — weight pairs by max(0, Pearson(x_i, x_j))
 
     Returns
     -------
@@ -280,11 +352,14 @@ def hierarchical_loss(
                 mu_iso = torch.stack(
                     [mu[batch_positions].mean(dim=0) for batch_positions in positions_by_idx.values()]
                 )
-                n = mu_iso.shape[0]
-                diffs = mu_iso.unsqueeze(0) - mu_iso.unsqueeze(1)  # (n, n, D)
-                dists = diffs.norm(dim=-1)                          # (n, n)
-                mask = torch.triu(torch.ones(n, n, device=mu.device), diagonal=1)
-                losses.append((dists * mask).sum() / mask.sum())
+                x_iso = None
+                if corr_weight and x is not None:
+                    x_iso = torch.stack(
+                        [x[batch_positions].mean(dim=0) for batch_positions in positions_by_idx.values()]
+                    )
+                term = _pair_term(mu_iso, x_iso, margin, corr_weight)
+                if term is not None:
+                    losses.append(term)
 
         if idx_to_gene is not None:
             # Fast path: O(B) Python dict lookups — no GPU tensor ops per gene
@@ -309,11 +384,10 @@ def hierarchical_loss(
                     f"batch size {B}. Pass feature_idx_in_batch to use dataset-level indices."
                 )
             mu_iso = mu[feat_indices]   # (n, D)
-            n = mu_iso.shape[0]
-            diffs = mu_iso.unsqueeze(0) - mu_iso.unsqueeze(1)  # (n, n, D)
-            dists = diffs.norm(dim=-1)                          # (n, n)
-            mask = torch.triu(torch.ones(n, n, device=mu.device), diagonal=1)
-            losses.append((dists * mask).sum() / mask.sum())
+            x_iso = x[feat_indices] if (corr_weight and x is not None) else None
+            term = _pair_term(mu_iso, x_iso, margin, corr_weight)
+            if term is not None:
+                losses.append(term)
 
     if not losses:
         return mu.new_zeros(1).squeeze()
@@ -351,10 +425,18 @@ class GMMVAELoss(nn.Module):
         λ_sep — weight for separation loss. Default: 0.1.
     sep_alpha : float
         α — margin multiplier for σ-scaled separation. Default: 2.0.
+    kl_per_element : bool
+        If True (default), scale the KL term by 1/N (N = profile length) so
+        that, like the per-element MSE reconstruction, it is expressed per
+        observed value and ``beta=1`` is a true ELBO weight.  Set False for
+        the legacy behaviour where the KL was summed over latent dimensions
+        while the reconstruction was averaged over N, which made the
+        effective KL weight grow with the number of samples.
     bal_strength : float
         λ_bal — weight for γ-usage balance loss. Default: 0.1.
-        Higher values force uniform component usage, which hurts recovery
-        of imbalanced module sizes (common in real biological data).
+        With the default ``bal_type="entropy"`` this only discourages dead
+        components; ``bal_type="uniform"`` additionally pushes toward equal
+        module sizes, which hurts recovery of imbalanced modules.
         Lower values risk dead components; the collapse-revival mechanism
         handles this, but very small values (< 0.01) may cause cascading
         collapse.
@@ -364,6 +446,10 @@ class GMMVAELoss(nn.Module):
         Blend factor for EMA vs batch usage in balance loss. Default: 0.5.
     hier_strength : float
         λ_hier — weight for hierarchical loss. Default: 0.0.
+    hier_margin : float
+        Hinge margin for the hierarchical loss (latent units). Default: 0.0.
+    hier_corr_weight : bool
+        Weight isoform pairs by max(0, Pearson(x_i, x_j)). Default: False.
     normalize_input : bool
         If True, z-score x before computing the reconstruction loss so the
         target space matches GMMModuleVAE(normalize_input=True) output.
@@ -397,7 +483,7 @@ class GMMVAELoss(nn.Module):
         sep_strength: float = 0.1,
         sep_alpha: float = 2.0,
         bal_strength: float = 0.1,
-        bal_type: str = "uniform",
+        bal_type: str = "entropy",
         bal_scale_gmm: bool = False,
         pi_entropy_strength: float = 0.0,
         bal_ema_blend: float = 0.5,
@@ -406,9 +492,15 @@ class GMMVAELoss(nn.Module):
         masked_recon: bool = False,
         corr_strength: float = 0.0,
         latent_corr_strength: float = 0.0,
+        kl_per_element: bool = True,
+        hier_margin: float = 0.0,
+        hier_corr_weight: bool = False,
     ):
         super().__init__()
         self.beta = beta
+        self.kl_per_element = kl_per_element
+        self.hier_margin = hier_margin
+        self.hier_corr_weight = hier_corr_weight
         self.kl_warmup_epochs = kl_warmup_epochs
         self.kl_anneal_mode = kl_anneal_mode
         self.kl_cycle_length = kl_cycle_length
@@ -427,8 +519,10 @@ class GMMVAELoss(nn.Module):
         self.corr_strength = corr_strength
         self.latent_corr_strength = latent_corr_strength
 
-    def get_beta_for_epoch(self, epoch: int) -> float:
-        """Compute effective β from annealing schedule (ported from BaseLoss)."""
+    def get_beta_for_epoch(self, epoch: Optional[int]) -> float:
+        """Effective β for a phase-relative epoch; ``None`` means full β (evaluation)."""
+        if epoch is None:
+            return self.beta
         if self.kl_anneal_mode == "cyclical":
             cycle_pos = epoch % self.kl_cycle_length
             ratio = min(cycle_pos / max(self.kl_cycle_length // 2, 1), 1.0)
@@ -466,7 +560,8 @@ class GMMVAELoss(nn.Module):
         gamma : (B, K) — soft GMM assignments
         model : GMMModuleVAE instance
         storer : optional loss log dict
-        epoch : int — current training epoch
+        epoch : int or None — epoch relative to the start of the GMM phase
+            (None = full β, used for evaluation)
         gene_groups : optional dict for hierarchical loss
         feature_idx : optional (B,) int tensor for hierarchical loss
         gmm_weight : float — ramp weight for GMM terms (0→1 during transition)
@@ -478,22 +573,8 @@ class GMMVAELoss(nn.Module):
         loss : scalar tensor
         """
         # --- Reconstruction ---
-        # Mask based on raw x (before any normalization) for masked_recon.
-        mask = (x > 0).float() if self.masked_recon else None
-        # Normalize target to match model's output space if normalize_input=True.
-        # Prefer the model's flag as the single source of truth; fall back to
-        # the loss's own flag for backward compatibility.
-        should_normalize = getattr(model, "normalize_input", self.normalize_input)
-        x_target = x
-        if should_normalize:
-            mu_x = x.mean(dim=-1, keepdim=True)
-            sigma_x = x.std(dim=-1, keepdim=True).clamp(min=1e-6)
-            x_target = (x - mu_x) / sigma_x
-        if mask is not None:
-            sq_err = (recon_x - x_target) ** 2
-            recon_loss = (sq_err * mask).sum() / mask.sum().clamp(min=1.0)
-        else:
-            recon_loss = F.mse_loss(recon_x, x_target, reduction="mean")
+        x_target, mask = _recon_target(x, model, self.normalize_input, self.masked_recon)
+        recon_loss = _recon_loss(recon_x, x_target, mask)
 
         # --- KL (VaDE) ---
         prior = model.gmm_prior
@@ -506,6 +587,8 @@ class GMMVAELoss(nn.Module):
             log_pi=prior.log_pi,
             free_bits=self.free_bits,
         )
+        if self.kl_per_element:
+            kl_loss = kl_loss / float(x.shape[1])
         effective_beta = self.get_beta_for_epoch(epoch)
 
         # --- Separation ---
@@ -536,7 +619,10 @@ class GMMVAELoss(nn.Module):
         # --- Hierarchical ---
         hier_loss = x.new_zeros(1).squeeze()
         if self.hier_strength > 0.0 and gene_groups:
-            hier_loss = hierarchical_loss(mu, gene_groups, feature_idx, idx_to_gene=idx_to_gene)
+            hier_loss = hierarchical_loss(
+                mu, gene_groups, feature_idx, idx_to_gene=idx_to_gene,
+                x=x_target, margin=self.hier_margin, corr_weight=self.hier_corr_weight,
+            )
 
         # --- Total ---
         # bal_scale_gmm=True ramps the balance loss with gmm_weight so it does not
@@ -590,6 +676,8 @@ class WarmupLoss(nn.Module):
         kl_cycle_length: int = 50,
         free_bits: float = 0.0,
         normalize_input: bool = False,
+        masked_recon: bool = False,
+        kl_per_element: bool = True,
     ):
         super().__init__()
         self.beta = beta
@@ -598,8 +686,12 @@ class WarmupLoss(nn.Module):
         self.kl_cycle_length = kl_cycle_length
         self.free_bits = free_bits
         self.normalize_input = normalize_input
+        self.masked_recon = masked_recon
+        self.kl_per_element = kl_per_element
 
-    def get_beta_for_epoch(self, epoch: int) -> float:
+    def get_beta_for_epoch(self, epoch: Optional[int]) -> float:
+        if epoch is None:
+            return self.beta
         if self.kl_anneal_mode == "cyclical":
             cycle_pos = epoch % self.kl_cycle_length
             ratio = min(cycle_pos / max(self.kl_cycle_length // 2, 1), 1.0)
@@ -616,17 +708,16 @@ class WarmupLoss(nn.Module):
         mu: torch.Tensor,
         logvar: torch.Tensor,
         storer: Optional[Dict[str, list]] = None,
-        epoch: int = 0,
+        epoch: Optional[int] = 0,
+        model: Optional[nn.Module] = None,
     ) -> torch.Tensor:
-        x_target = x
-        if self.normalize_input:
-            mu_x = x.mean(dim=-1, keepdim=True)
-            sigma_x = x.std(dim=-1, keepdim=True).clamp(min=1e-6)
-            x_target = (x - mu_x) / sigma_x
-        recon_loss = F.mse_loss(recon_x, x_target, reduction="mean")
+        x_target, mask = _recon_target(x, model, self.normalize_input, self.masked_recon)
+        recon_loss = _recon_loss(recon_x, x_target, mask)
         kl_loss, _ = kl_normal_loss_with_free_bits(
             mu, logvar, free_bits=self.free_bits, reduction="mean"
         )
+        if self.kl_per_element:
+            kl_loss = kl_loss / float(x.shape[1])
         effective_beta = self.get_beta_for_epoch(epoch)
         loss = recon_loss + effective_beta * kl_loss
 

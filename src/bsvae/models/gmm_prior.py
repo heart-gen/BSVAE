@@ -67,8 +67,14 @@ class GaussianMixturePrior(nn.Module):
         # Learnable parameters
         self.log_pi_unnorm = nn.Parameter(torch.zeros(n_components))
         self.mu_k = nn.Parameter(torch.randn(n_components, n_latent) * 0.5)
-        # Initialise log σ² so σ ≈ 1.0 (well above sigma_min)
-        self.log_sigma2_k = nn.Parameter(torch.zeros(n_components))
+        # Component variance is parameterised as
+        #   log σ²_k = log σ²_min + softplus(sigma2_raw_k)
+        # so the floor is enforced smoothly and gradients never vanish at the
+        # floor (a hard clamp would freeze σ_k once it hit sigma_min).
+        # Initialise so that σ ≈ 1.0 (well above sigma_min).
+        self.sigma2_raw = nn.Parameter(torch.zeros(n_components))
+        with torch.no_grad():
+            self.sigma2_raw.fill_(self._raw_from_log_sigma2(0.0))
 
         # EMA buffer for γ-usage balance
         self.register_buffer(
@@ -90,10 +96,42 @@ class GaussianMixturePrior(nn.Module):
         return torch.exp(self.log_pi)
 
     @property
+    def _log_sigma2_min(self) -> float:
+        return 2.0 * math.log(self.sigma_min)
+
+    def _raw_from_log_sigma2(self, log_sigma2: float) -> float:
+        """Inverse of log σ² = log σ²_min + softplus(raw)."""
+        gap = max(float(log_sigma2) - self._log_sigma2_min, 1e-6)
+        return float(math.log(math.expm1(gap)))
+
+    @property
+    def log_sigma2_k(self) -> torch.Tensor:
+        """Log component variances (floored), shape (K,)."""
+        return self._log_sigma2_min + F.softplus(self.sigma2_raw)
+
+    @property
     def sigma2_k(self) -> torch.Tensor:
         """Component variances with σ floor, shape (K,)."""
-        log_min = 2.0 * math.log(self.sigma_min)
-        return torch.exp(torch.clamp(self.log_sigma2_k, min=log_min))
+        return torch.exp(self.log_sigma2_k)
+
+    @torch.no_grad()
+    def set_log_sigma2_(self, k: int, log_sigma2: float) -> None:
+        """Set component k's log variance (floored at log σ²_min) in place."""
+        self.sigma2_raw[k] = self._raw_from_log_sigma2(log_sigma2)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Backward compatibility: checkpoints saved before the softplus
+        # parameterisation stored ``log_sigma2_k`` directly.
+        old_key = prefix + "log_sigma2_k"
+        new_key = prefix + "sigma2_raw"
+        if old_key in state_dict and new_key not in state_dict:
+            old = state_dict.pop(old_key)
+            raw = torch.tensor(
+                [self._raw_from_log_sigma2(float(v)) for v in old.flatten()],
+                dtype=old.dtype,
+            ).reshape(old.shape)
+            state_dict[new_key] = raw
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     # ------------------------------------------------------------------
     # Core computations
@@ -175,7 +213,9 @@ class GaussianMixturePrior(nn.Module):
         """
         σ-scaled inter-centroid separation penalty.
 
-        L_sep = Σ_{i<j} max(0, α·(σ_i + σ_j) − ‖μ_i − μ_j‖)²
+        L_sep = (1 / n_pairs) Σ_{i<j} max(0, α·(σ_i + σ_j) − ‖μ_i − μ_j‖)²
+
+        The mean over the K(K−1)/2 pairs keeps the loss scale independent of K.
 
         Parameters
         ----------
@@ -199,9 +239,10 @@ class GaussianMixturePrior(nn.Module):
 
         violation = torch.clamp(margin - dist, min=0.0) ** 2    # (K, K)
 
-        # Sum upper triangle (i < j)
+        # Mean over upper triangle (i < j)
         mask = torch.triu(torch.ones(K, K, device=dist.device), diagonal=1)
-        return (violation * mask).sum()
+        n_pairs = max(K * (K - 1) / 2.0, 1.0)
+        return (violation * mask).sum() / n_pairs
 
     def balance_loss(
         self,
@@ -271,19 +312,29 @@ class GaussianMixturePrior(nn.Module):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def kmeans_init_(self, mu_samples: torch.Tensor) -> None:
+    def kmeans_init_(
+        self,
+        mu_samples: torch.Tensor,
+        seed: int = 0,
+        minibatch_threshold: int = 50_000,
+    ) -> None:
         """
         Warm-start centroids from K-means on encoder mean samples.
 
-        Also initialises log_sigma2_k from the within-cluster variance
-        and resets log_pi_unnorm to uniform.
+        Also initialises the component variances from the within-cluster
+        variance and the mixing weights from the cluster counts.
 
         Parameters
         ----------
         mu_samples : torch.Tensor, shape (N, D)
-            Accumulated encoder means from Phase 1 training.
+            Encoder means for every feature at the end of Phase 1.
+        seed : int
+            Random state for K-means.
+        minibatch_threshold : int
+            Above this many samples ``MiniBatchKMeans`` is used (transcript
+            scale); below it full ``KMeans(n_init=10)``.
         """
-        from sklearn.cluster import KMeans
+        from sklearn.cluster import KMeans, MiniBatchKMeans
 
         K = self.K
         X = mu_samples.cpu().numpy()
@@ -293,7 +344,13 @@ class GaussianMixturePrior(nn.Module):
                 f"kmeans_init_: need at least K={K} samples but got {len(X)}. "
                 "Increase the dataset size or reduce n_modules."
             )
-        km = KMeans(n_clusters=K, random_state=0, n_init=10)
+        if len(X) > minibatch_threshold:
+            km = MiniBatchKMeans(
+                n_clusters=K, random_state=seed, n_init=3,
+                batch_size=4096, max_iter=200,
+            )
+        else:
+            km = KMeans(n_clusters=K, random_state=seed, n_init=10)
         labels = km.fit_predict(X)
         centers = torch.tensor(km.cluster_centers_, dtype=torch.float32)
 
@@ -301,17 +358,15 @@ class GaussianMixturePrior(nn.Module):
         self.mu_k.copy_(centers.to(self.mu_k.device))
 
         # Estimate within-cluster variance per component
-        log_min = 2.0 * math.log(self.sigma_min)
         for k in range(K):
             mask = labels == k
             if mask.sum() > 1:
                 cluster_pts = torch.tensor(X[mask], dtype=torch.float32)
                 var_k = (cluster_pts - centers[k]).pow(2).mean()
-                log_var_k = torch.log(var_k + 1e-6).clamp(min=log_min)
+                log_var_k = float(torch.log(var_k + 1e-6))
             else:
-                log_var_k = torch.tensor(0.0)  # σ² = 1
-
-            self.log_sigma2_k[k] = log_var_k.to(self.log_sigma2_k.device)
+                log_var_k = 0.0  # σ² = 1
+            self.set_log_sigma2_(k, log_var_k)
 
         # Initialise mixing weights from K-means cluster counts (Laplace-smoothed).
         # This gives the GMM a data-driven prior on module sizes rather than forcing

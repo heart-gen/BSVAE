@@ -9,7 +9,8 @@ BSVAE is a CLI-first workflow for feature-level module discovery in omics data. 
 | `bsvae-train` | Train a `GMMModuleVAE` on a `features x samples` matrix |
 | `bsvae-sweep-k` | Select the number of modules with held-out validation and optional stability replicates |
 | `bsvae-networks` | Extract networks, modules, latents, and latent-analysis outputs from a trained model |
-| `bsvae-simulate` | Generate synthetic datasets, build scenario grids, and benchmark recovery |
+| `bsvae-simulate` | Generate synthetic datasets (gene- or transcript-level), build scenario grids, and score a trained model |
+| `bsvae-benchmark` | Run BSVAE and WGCNA head-to-head on a scenario grid with grey-aware metrics |
 
 ## Data Orientation
 
