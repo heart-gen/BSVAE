@@ -329,11 +329,14 @@ def postprocess_assignments(
     kme_margin: float = 0.1,
 ) -> PostprocessResult:
     """
-    confidence cutoff → minimum module size → (with ``expr``) eigengene
-    merging → (optional) kME reassignment → final eigengenes and kME.
+    argmax → minimum module size → (with ``expr``) eigengene merging →
+    confidence cutoff on the *merged* responsibilities → minimum module size
+    → (optional) kME reassignment → final eigengenes and kME.
 
     ``gamma`` in the result sums the responsibilities of merged components
-    (rows sum to at most 1; mass on dissolved components is dropped).
+    (rows sum to at most 1; mass on dissolved components is dropped), and
+    ``min_gamma`` is applied to those sums, so a feature spread across
+    components of one over-clustered module is judged by their total.
 
     ``expr`` is a features × samples DataFrame; without it merging is
     skipped and ``eigengenes``/``kme`` are ``None``.
@@ -347,12 +350,13 @@ def postprocess_assignments(
         min_kme=min_kme, kme_margin=kme_margin,
     )
 
-    # Confidence cutoff on the raw responsibilities before merging: greyed
-    # features are kept out of the eigengenes, which makes merging cleaner.
-    # (Re-evaluating the cutoff on the merged γ was tested and rescued mostly
-    # ambiguous features, lowering assigned-feature ARI on every seed.)
-    labels = assign_with_confidence(gamma, min_gamma=min_gamma)
-    labels = enforce_min_module_size(labels, gamma, min_module_size=min_module_size, min_gamma=min_gamma)
+    # argmax over components, then merge; the confidence cutoff is applied to
+    # the merged responsibilities below.  With an over-clustered GMM a module
+    # member's responsibility is spread over several components of the same
+    # module, so judging confidence per component would grey out members
+    # that are confident once those components are merged.
+    labels = gamma.argmax(axis=1).astype(np.int64)
+    labels = enforce_min_module_size(labels, gamma, min_module_size=min_module_size, min_gamma=0.0)
     merge_log: List[dict] = []
 
     if expr is not None:
@@ -369,7 +373,16 @@ def postprocess_assignments(
         module_map = {k: compact.get(k, GREY) for k in range(K)}
 
     n_final = max(module_map.values(), default=-1) + 1
-    gamma_merged = _merge_gamma(gamma, module_map, n_final) if n_final > 0 else np.zeros((len(labels), 0), np.float32)
+    if n_final > 0:
+        gamma_merged = _merge_gamma(gamma, module_map, n_final)
+        labels = assign_with_confidence(gamma_merged, min_gamma=min_gamma)
+        labels = enforce_min_module_size(labels, gamma_merged, min_module_size=min_module_size, min_gamma=min_gamma)
+        labels, compact = _relabel_compact(labels)
+        module_map = {k: (compact.get(v, GREY) if v >= 0 else GREY) for k, v in module_map.items()}
+        n_final = max(module_map.values(), default=-1) + 1
+        gamma_merged = _merge_gamma(gamma, module_map, n_final) if n_final > 0 else np.zeros((len(labels), 0), np.float32)
+    else:
+        gamma_merged = np.zeros((len(labels), 0), np.float32)
 
     eigengenes = kme = None
     if expr is not None:

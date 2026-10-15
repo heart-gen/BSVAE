@@ -156,7 +156,7 @@ bsvae-networks extract-modules \
   --soft-eigengenes
 ```
 
-By default the GMM assignments are post-processed the way WGCNA post-processes a tree cut: features whose top responsibility is below `--min-gamma` become unassigned ("grey", label `-1`), modules smaller than `--min-module-size` are dissolved, and modules whose eigengenes correlate above `1 - --merge-cut-height` are merged (merging and kME need `--expr`).
+By default the GMM assignments are post-processed the way WGCNA post-processes a tree cut: modules smaller than `--min-module-size` are dissolved, modules whose eigengenes correlate above `1 - --merge-cut-height` are merged, and features whose summed responsibility for their merged module is below `--min-gamma` become unassigned ("grey", label `-1`). The cutoff is applied after merging so that a member whose responsibility is spread over several components of one over-clustered module is judged by their total (merging and kME need `--expr`).
 
 Because merging consolidates split modules, train with a generous `--n-modules` (about three times the number of modules you expect, at least 20): K-means initialisation gives centroids to the largest modules first, so small modules only get a component of their own when K is larger than the module count. The benchmark harness does this automatically (`--over-cluster-factor`, default 3).
 
@@ -307,6 +307,8 @@ Common files:
 
 Configs are JSON by default; YAML is accepted when PyYAML is installed (`pip install bsvae[yaml]`).
 
+Counts are library-size normalised with DESeq-style median-of-ratios size factors (`generator.normalization: "median_ratio"`, the default) before the log2 transform. Plain CPM (`"cpm"`) is available but makes every feature without module signal co-vary against the large modules, so "null" features are no longer null and no method can leave them unassigned.
+
 ## `bsvae-benchmark`
 
 Head-to-head benchmark of BSVAE and WGCNA on a scenario grid. WGCNA runs through `Rscript` with the packaged `wgcna.R` (R with the `WGCNA` package must be installed; otherwise its rows are recorded as skipped).
@@ -317,6 +319,6 @@ bsvae-benchmark run --config iso.yaml --outdir results/bench --methods bsvae,wgc
 bsvae-benchmark summarize --results results/bench/results.tsv
 ```
 
-BSVAE is trained with `--over-cluster-factor` (default 3) times the true module count and merged back by post-processing; pass `--over-cluster-factor 1` to train with the true K.
+BSVAE is trained with `--over-cluster-factor` (default 3) times the true module count and merged back by post-processing; pass `--over-cluster-factor 1` to train with the true K. Methods: `bsvae`, `wgcna` (signed network, the WGCNA authors' recommendation), `wgcna_unsigned`, `wgcna_signed`.
 
 `run` writes one row per (scenario, replicate, method, seed) to `results.tsv` as soon as it finishes (resumable with the same command), per-run outputs under `scenarios/<id>/rep_<r>/methods/<method>/seed_<s>/`, and `summary.tsv` (mean ± sd per scenario and method). BSVAE options (`--epochs`, `--latent-dim`, `--hier-strength`, `--isoform-stratified`, ...), post-processing options (`--min-gamma`, `--min-module-size`, `--merge-cut-height`, `--no-postprocess`) and WGCNA options (`--wgcna-network-type`, `--wgcna-soft-power`, `--wgcna-min-module-size`, `--wgcna-merge-cut-height`, `--wgcna-threads`) can be overridden. `scripts/benchmark_sims.py` drives the same harness over seven laptop-sized reference scenarios.

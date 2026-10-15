@@ -33,6 +33,7 @@ from bsvae.simulation.scenario import expand_scenarios, generate_scenario, load_
 logger = logging.getLogger(__name__)
 
 METHODS = ("bsvae", "wgcna")
+KNOWN_METHODS = ("bsvae", "wgcna", "wgcna_signed", "wgcna_unsigned")
 
 
 # ---------------------------------------------------------------------------
@@ -150,10 +151,15 @@ def run_one(
             train_cfg={k: v for k, v in cfg.items() if not k.startswith("_")},
             post_cfg=post_cfg, device=device, postprocess=postprocess, **kwargs,
         )
-    elif method == "wgcna":
+    elif method in ("wgcna", "wgcna_unsigned", "wgcna_signed"):
         cfg = dict(WGCNA_DEFAULTS)
         cfg.update(wgcna_cfg or {})
+        if method == "wgcna_unsigned":
+            cfg["network_type"] = "unsigned"
+        elif method == "wgcna_signed":
+            cfg["network_type"] = "signed"
         result = run_wgcna(expr, workdir=out_dir, seed=seed, **cfg)
+        result.method = method
     else:
         raise ValueError(f"Unknown method: {method}")
 
@@ -202,7 +208,10 @@ def run_grid(
     n_reps = int(cfg.get("reps", 1) if reps is None else reps)
     seed_list = list(seeds) if seeds is not None else [0]
     methods = [m for m in methods]
-    if "wgcna" in methods and not wgcna_available():
+    unknown = [m for m in methods if m not in KNOWN_METHODS]
+    if unknown:
+        raise ValueError(f"Unknown method(s): {unknown}; choose from {KNOWN_METHODS}")
+    if any(m.startswith("wgcna") for m in methods) and not wgcna_available():
         logger.warning("WGCNA (Rscript + WGCNA package) not available; its rows will be marked skipped")
 
     for sid, params in scenarios:

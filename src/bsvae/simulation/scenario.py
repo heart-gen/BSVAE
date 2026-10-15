@@ -59,6 +59,7 @@ DEFAULT_CONFIG: Dict = {
         "confound_feature_frac": 0.3,
         "condition_effect": True,
         "celltype_confound": "none",
+        "normalization": "median_ratio",
         "truth_edge_top_k": 25,
     },
     "grid": {
@@ -371,8 +372,7 @@ def _nb_observe(
         mask = rng_arm.random(probs.shape) < probs
         counts[mask] = 0.0
 
-    cpm = counts / np.maximum(counts.sum(axis=1, keepdims=True), 1.0) * 1e6
-    expr = np.log2(cpm + 1.0)
+    expr = normalize_counts(counts, method=str(generator_cfg.get("normalization", "median_ratio")))
 
     covariates = pd.DataFrame(
         {"condition": condition, "batch": batch, "libsize": libsize}
@@ -386,6 +386,37 @@ def _nb_observe(
         "beta_cond": beta_cond,
         "ct_fractions": ct_fractions,
     }
+
+
+def normalize_counts(counts: np.ndarray, method: str = "median_ratio") -> np.ndarray:
+    """
+    Library-size normalise a samples × features count matrix and return
+    log2(normalised counts per million + 1).
+
+    ``"cpm"`` divides by the total count, which makes every feature without
+    module signal co-vary against the large modules (a compositional
+    artefact).  ``"median_ratio"`` uses DESeq-style size factors (median over
+    features of the ratio to the geometric-mean reference, computed on
+    features expressed in every sample), which is robust to a few strongly
+    varying modules and is what real pipelines use.
+    """
+    counts = np.asarray(counts, dtype=np.float64)
+    totals = np.maximum(counts.sum(axis=1), 1.0)
+    if method == "cpm":
+        size = totals / 1e6
+    elif method == "median_ratio":
+        expressed = (counts > 0).all(axis=0)
+        if expressed.sum() >= 10:
+            logc = np.log(counts[:, expressed])
+            ref = logc.mean(axis=0)
+            size = np.exp(np.median(logc - ref[None, :], axis=1))
+        else:  # too few universally expressed features: fall back to totals
+            size = totals / np.exp(np.mean(np.log(totals)))
+        # Rescale so values are on a CPM-like scale (same median library).
+        size = size / np.exp(np.mean(np.log(size))) * (np.exp(np.mean(np.log(totals))) / 1e6)
+    else:
+        raise ValueError(f"Unknown normalization: {method}")
+    return np.log2(counts / size[:, None] + 1.0)
 
 
 def _edge_truth(W: np.ndarray, memberships: List[set], module_members: Dict[int, List[int]], top_k: int) -> Dict[Tuple[int, int], float]:
