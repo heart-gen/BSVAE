@@ -74,6 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     cp = subs.add_parser("init-config", help="Write a starter simulation config file.")
     cp.add_argument("--output", default="sim.yaml", help="Destination config path.")
+    cp.add_argument("--isoform", action="store_true", default=False,
+                    help="Write a starter config for the transcript-level "
+                         "nb_isoform_modules family instead of nb_latent_modules.")
 
     # ------------------------------------------------------------------
     # generate-grid
@@ -209,9 +212,12 @@ def handle_benchmark(args, logger: logging.Logger) -> None:
 
 
 def handle_init_config(args, logger: logging.Logger) -> None:
-    from bsvae.simulation.scenario import write_starter_config
+    from bsvae.simulation.scenario import write_starter_config, write_isoform_starter_config
 
-    write_starter_config(args.output)
+    if getattr(args, "isoform", False):
+        write_isoform_starter_config(args.output)
+    else:
+        write_starter_config(args.output)
     logger.info("Starter simulation config written to %s", args.output)
 
 
