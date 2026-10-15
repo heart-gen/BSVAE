@@ -62,7 +62,7 @@ bsvae-sweep-k = "bsvae.cli.sweep_k:cli"
 bsvae-benchmark = "bsvae.cli.benchmark:cli"
 
 [tool.poetry.group.dev.dependencies]
-pytest = ">=8.4.2,<9.0.0"
+pytest = ">=8.4.2,<10.0.0"
 pytest-cov = ">=7.0.0,<8.0.0"
 
 [tool.pytest.ini_options]
