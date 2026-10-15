@@ -50,6 +50,8 @@ def add_general_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--log-level", choices=["debug", "info", "warning", "error"], default="info")
     g.add_argument("--no-progress-bar", action="store_true", default=False)
     g.add_argument("--num-workers", type=int, default=0, help="DataLoader workers (default: 0).")
+    g.add_argument("--amp", action="store_true", default=False,
+                   help="Mixed-precision (bfloat16) forward pass on CUDA.")
 
 
 def add_model_args(p: argparse.ArgumentParser) -> None:
@@ -311,6 +313,7 @@ def build_trainer(
         collapse_noise_scale=args.collapse_noise_scale,
         seed=args.seed,
         collapse_threshold=getattr(args, "collapse_threshold", None),
+        amp=getattr(args, "amp", False),
     )
 
 

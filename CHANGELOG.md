@@ -36,6 +36,10 @@ Consensus and isoform-specific modules
 * `bsvae-networks module-quality`: kME summaries, GMT enrichment with q-values, and preservation in a second dataset (permutation Z-density and kME correlation).
 * `bsvae-networks regress-covariates` removes known sample covariates before training; `bsvae_regressed` / `wgcna_regressed` benchmark methods.
 
+Performance
+
+* Network edge lists are built with vectorised NumPy instead of Python double loops; the hierarchical loss evaluates all isoform pairs of a batch in one pass; `--amp` enables a bfloat16 forward pass on CUDA.
+
 Default changes
 
 * `--bal-type` entropy; KL per element; `--collapse-min-usage` 0.002; sweep `--free-bits` 0.0; extract-modules post-processing on with `--merge-cut-height` 0.4; GTEx-calibrated simulation defaults.

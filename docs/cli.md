@@ -63,6 +63,7 @@ Common options:
 - `--collapse-threshold` deprecated and ignored
 - `--collapse-noise-scale` default `0.5`
 - `--num-workers` default `0`
+- `--amp` mixed-precision (bfloat16) forward pass on CUDA
 - `--no-eval`
 - `--eval-batch-size`
 - `--no-cuda`

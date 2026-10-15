@@ -397,20 +397,47 @@ def hierarchical_loss(
                 if gid is not None:
                     gene_to_batch_pos.setdefault(gid, {}).setdefault(dataset_idx, []).append(batch_pos)
 
+            # Build all isoform pairs of all genes at once (one GPU pass).
+            left, right, gene_of_pair = [], [], []
+            iso_rows: List[List[int]] = []
+            g = 0
             for positions_by_idx in gene_to_batch_pos.values():
                 if len(positions_by_idx) < 2:
                     continue
-                mu_iso = torch.stack(
-                    [mu[batch_positions].mean(dim=0) for batch_positions in positions_by_idx.values()]
-                )
-                x_iso = None
-                if corr_weight and x is not None:
-                    x_iso = torch.stack(
-                        [x[batch_positions].mean(dim=0) for batch_positions in positions_by_idx.values()]
-                    )
-                term = _pair_term(mu_iso, x_iso, margin, corr_weight)
-                if term is not None:
-                    losses.append(term)
+                base = len(iso_rows)
+                iso_rows.extend(list(positions_by_idx.values()))
+                n = len(positions_by_idx)
+                for a in range(n):
+                    for b in range(a + 1, n):
+                        left.append(base + a); right.append(base + b); gene_of_pair.append(g)
+                g += 1
+            if not left:
+                return
+            # Average repeated draws of the same feature (usually a single position).
+            if all(len(r) == 1 for r in iso_rows):
+                sel = torch.tensor([r[0] for r in iso_rows], device=mu.device)
+                mu_iso = mu[sel]
+                x_iso = x[sel] if (corr_weight and x is not None) else None
+            else:
+                mu_iso = torch.stack([mu[r].mean(dim=0) for r in iso_rows])
+                x_iso = torch.stack([x[r].mean(dim=0) for r in iso_rows]) if (corr_weight and x is not None) else None
+            li = torch.tensor(left, device=mu.device); ri = torch.tensor(right, device=mu.device)
+            gi = torch.tensor(gene_of_pair, device=mu.device)
+            d = torch.sqrt(((mu_iso[li] - mu_iso[ri]) ** 2).sum(dim=-1) + 1e-12)
+            if margin > 0.0:
+                d = torch.clamp(d - margin, min=0.0)
+            w = torch.ones_like(d)
+            if corr_weight and x_iso is not None:
+                with torch.no_grad():
+                    xc = x_iso - x_iso.mean(dim=1, keepdim=True)
+                    xn = F.normalize(xc, p=2, dim=1, eps=1e-6)
+                    w = torch.clamp((xn[li] * xn[ri]).sum(dim=1), min=0.0, max=1.0)
+            # Weighted mean per gene, then mean over genes with any weight.
+            num = torch.zeros(g, device=mu.device).index_add_(0, gi, d * w)
+            den = torch.zeros(g, device=mu.device).index_add_(0, gi, w)
+            ok = den > 0
+            if ok.any():
+                losses.append((num[ok] / den[ok]).mean())
 
         if idx_to_gene is not None:
             # Fast path: O(B) Python dict lookups — no GPU tensor ops per gene
