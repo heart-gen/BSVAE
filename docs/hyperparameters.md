@@ -79,7 +79,7 @@ bsvae-train study1 \
   --n-modules 20 \
   --latent-dim 32 \
   --normalize-input \
-  --latent-corr-strength 0.5
+  --beta 2.0
 ```
 
 Transcript-level data:
@@ -89,9 +89,11 @@ bsvae-train iso1 \
   --dataset data/transcripts.csv \
   --tx2gene data/tx2gene.tsv \
   --normalize-input \
-  --latent-corr-strength 0.5 \
+  --beta 2.0 \
   --hier-strength 0.05 --isoform-stratified
 ```
+
+On the reference simulations (`scripts/benchmark_sims.py`), `--beta` between 1 and 2 with `--normalize-input` and no latent-correlation loss recovered modules best; `--latent-corr-strength 0.5`, which earlier runs used to counteract the over-weighted KL, lowers ARI now that the KL is scaled per element. The hierarchical loss trades isoform-split detection for within-gene agreement: `--hier-strength 0.05` keeps most switched isoforms separable, while disabling `--hier-corr-weight` forces isoforms together and halves split detection.
 
 Model-selection workflow:
 

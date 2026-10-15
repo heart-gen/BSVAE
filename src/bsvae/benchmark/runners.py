@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 WGCNA_SCRIPT = Path(__file__).with_name("wgcna.R")
 
 # BSVAE defaults for benchmarking (shared with bsvae-train; overrides only).
+# beta=2.0 and no latent-correlation loss were the most consistent settings
+# across the long-tail, nonlinear and isoform reference scenarios once the
+# KL is scaled per element; the latent-correlation loss used by the old
+# benchmark compensated for the previous over-weighted KL and now hurts.
 BSVAE_DEFAULTS: Dict = {
     "epochs": 150,
     "warmup_epochs": 30,
@@ -37,9 +41,9 @@ BSVAE_DEFAULTS: Dict = {
     "hidden_dims": [256, 128],
     "batch_size": 128,
     "lr": 5e-4,
-    "beta": 1.0,
+    "beta": 2.0,
     "normalize_input": True,
-    "latent_corr_strength": 0.5,
+    "latent_corr_strength": 0.0,
     "bal_type": "entropy",
     "bal_strength": 0.1,
     "sep_strength": 0.1,
