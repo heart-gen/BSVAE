@@ -218,6 +218,6 @@ Each replicate directory includes method-ready files such as:
 
 ## 11. Legacy Configuration Note
 
-The active CLI does not use `hyperparam.ini`. The files in `src/bsvae/hyperparam.ini` and `docs/hyperparam.ini` are retained for compatibility context only.
+The active CLI does not use `hyperparam.ini`; the legacy ini files have been removed.
 
 For reproducible runs, prefer shell scripts or workflow files with explicit CLI flags.

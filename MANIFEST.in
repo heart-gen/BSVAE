@@ -1,2 +1,1 @@
-include hyperparam.ini
 recursive-include src/bsvae *.ini *.json

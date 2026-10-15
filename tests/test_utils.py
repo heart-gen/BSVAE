@@ -1,4 +1,4 @@
-"""Tests for utility modules: datasets, helpers, hierarchy, initialization, modelIO."""
+"""Tests for utility modules: datasets, helpers, hierarchy, modelIO."""
 
 import os
 import tempfile
@@ -14,7 +14,6 @@ from bsvae.utils.helpers import (
     create_safe_directory,
     check_bounds,
 )
-from bsvae.utils.initialization import weights_init
 from bsvae.utils.datasets import OmicsDataset, get_omics_dataloader
 from bsvae.utils.hierarchy import load_tx2gene, group_isoforms_by_gene, IsoformStratifiedSampler
 
@@ -57,24 +56,6 @@ def test_check_bounds_out_of_range():
     import argparse
     with pytest.raises(argparse.ArgumentTypeError):
         check_bounds("-1.0", float, lb=0.0, ub=10.0, name="x")
-
-
-# ---------------------------------------------------------------------------
-# initialization
-# ---------------------------------------------------------------------------
-
-def test_weights_init_relu():
-    import torch.nn as nn
-    layer = nn.Linear(20, 10)
-    weights_init(layer, "relu")
-    assert layer.bias.abs().sum().item() == 0.0  # zeros
-
-
-def test_weights_init_linear():
-    import torch.nn as nn
-    layer = nn.Linear(20, 10)
-    weights_init(layer, "linear")
-    assert layer.bias.abs().sum().item() == 0.0
 
 
 # ---------------------------------------------------------------------------

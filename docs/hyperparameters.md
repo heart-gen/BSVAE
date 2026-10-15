@@ -2,7 +2,7 @@
 
 The active training workflow is configured through explicit CLI flags, primarily on `bsvae-train` and `bsvae-sweep-k`.
 
-`hyperparam.ini` is not part of the active CLI path. The files in `src/bsvae/hyperparam.ini` and `docs/hyperparam.ini` are retained only for legacy context.
+`hyperparam.ini` is not part of the active CLI path; the legacy ini files have been removed.
 
 ## Model And Architecture
 
