@@ -49,6 +49,10 @@ class GaussianMixturePrior(nn.Module):
         Default: 0.3 (safe; users may lower explicitly if needed).
     ema_alpha : float
         EMA decay for ρ_ema in balance loss. Default: 0.99.
+    diag_covariance : bool
+        Learn one variance per latent dimension for each component
+        (diagonal covariance) instead of a single isotropic variance.
+        Default: False.
     """
 
     def __init__(
@@ -57,12 +61,14 @@ class GaussianMixturePrior(nn.Module):
         n_latent: int,
         sigma_min: float = 0.3,
         ema_alpha: float = 0.99,
+        diag_covariance: bool = False,
     ):
         super().__init__()
         self.K = n_components
         self.D = n_latent
         self.sigma_min = sigma_min
         self.ema_alpha = ema_alpha
+        self.diag_covariance = bool(diag_covariance)
 
         # Learnable parameters
         self.log_pi_unnorm = nn.Parameter(torch.zeros(n_components))
@@ -72,7 +78,8 @@ class GaussianMixturePrior(nn.Module):
         # so the floor is enforced smoothly and gradients never vanish at the
         # floor (a hard clamp would freeze σ_k once it hit sigma_min).
         # Initialise so that σ ≈ 1.0 (well above sigma_min).
-        self.sigma2_raw = nn.Parameter(torch.zeros(n_components))
+        shape = (n_components, n_latent) if self.diag_covariance else (n_components,)
+        self.sigma2_raw = nn.Parameter(torch.zeros(*shape))
         with torch.no_grad():
             self.sigma2_raw.fill_(self._raw_from_log_sigma2(0.0))
 
@@ -106,18 +113,33 @@ class GaussianMixturePrior(nn.Module):
 
     @property
     def log_sigma2_k(self) -> torch.Tensor:
-        """Log component variances (floored), shape (K,)."""
+        """Log component variances (floored), shape (K,) or (K, D) with diagonal covariance."""
         return self._log_sigma2_min + F.softplus(self.sigma2_raw)
 
     @property
     def sigma2_k(self) -> torch.Tensor:
-        """Component variances with σ floor, shape (K,)."""
+        """Component variances with σ floor, shape (K,) or (K, D)."""
         return torch.exp(self.log_sigma2_k)
 
+    @property
+    def sigma_k_scalar(self) -> torch.Tensor:
+        """Per-component σ summary (geometric mean over dimensions), shape (K,)."""
+        s2 = self.sigma2_k
+        if s2.dim() == 2:
+            return torch.exp(0.5 * torch.log(s2).mean(dim=1))
+        return torch.sqrt(s2)
+
     @torch.no_grad()
-    def set_log_sigma2_(self, k: int, log_sigma2: float) -> None:
-        """Set component k's log variance (floored at log σ²_min) in place."""
-        self.sigma2_raw[k] = self._raw_from_log_sigma2(log_sigma2)
+    def set_log_sigma2_(self, k: int, log_sigma2) -> None:
+        """Set component k's log variance(s) (floored at log σ²_min) in place."""
+        if self.sigma2_raw.dim() == 2:
+            vals = torch.as_tensor(log_sigma2, dtype=torch.float32).reshape(-1)
+            if vals.numel() == 1:
+                vals = vals.expand(self.D)
+            self.sigma2_raw[k] = torch.tensor([self._raw_from_log_sigma2(float(v)) for v in vals])
+        else:
+            v = torch.as_tensor(log_sigma2, dtype=torch.float32).reshape(-1).mean()
+            self.sigma2_raw[k] = self._raw_from_log_sigma2(float(v))
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         # Backward compatibility: checkpoints saved before the softplus
@@ -159,21 +181,22 @@ class GaussianMixturePrior(nn.Module):
         B, D = mu_f.shape
         K = self.K
 
-        sigma2 = self.sigma2_k  # (K,)
-
-        # ‖μ_f - μ_k‖²  →  (B, K)
-        # mu_f: (B, D), mu_k: (K, D)
+        sigma2 = self.sigma2_k  # (K,) or (K, D)
         diff = mu_f.unsqueeze(1) - self.mu_k.unsqueeze(0)  # (B, K, D)
-        sq_dist = (diff ** 2).sum(dim=-1)                   # (B, K)
-
-        # trace term: Σ_d exp(logvar_f_d)  →  (B,)
-        trace = torch.exp(logvar_f).sum(dim=-1)             # (B,)
-
-        # Expected log-likelihood: (B, K)
-        log_prob = (
-            -0.5 * D * torch.log(2.0 * math.pi * sigma2).unsqueeze(0)
-            - (sq_dist + trace.unsqueeze(1)) / (2.0 * sigma2.unsqueeze(0))
-        )
+        var_f = torch.exp(logvar_f).unsqueeze(1)            # (B, 1, D)
+        if sigma2.dim() == 2:
+            s2 = sigma2.unsqueeze(0)                         # (1, K, D)
+            log_prob = (
+                -0.5 * torch.log(2.0 * math.pi * s2).sum(dim=-1)
+                - ((diff ** 2 + var_f) / (2.0 * s2)).sum(dim=-1)
+            )
+        else:
+            sq_dist = (diff ** 2).sum(dim=-1)                # (B, K)
+            trace = var_f.sum(dim=-1)                        # (B, 1)
+            log_prob = (
+                -0.5 * D * torch.log(2.0 * math.pi * sigma2).unsqueeze(0)
+                - (sq_dist + trace) / (2.0 * sigma2.unsqueeze(0))
+            )
         return log_prob
 
     def posterior_weights(
@@ -227,7 +250,7 @@ class GaussianMixturePrior(nn.Module):
         loss : torch.Tensor, scalar
         """
         K = self.K
-        sigma = torch.sqrt(self.sigma2_k)  # (K,)
+        sigma = self.sigma_k_scalar  # (K,)
 
         # All pairwise centroid distances
         diff = self.mu_k.unsqueeze(0) - self.mu_k.unsqueeze(1)  # (K, K, D)
@@ -362,10 +385,11 @@ class GaussianMixturePrior(nn.Module):
             mask = labels == k
             if mask.sum() > 1:
                 cluster_pts = torch.tensor(X[mask], dtype=torch.float32)
-                var_k = (cluster_pts - centers[k]).pow(2).mean()
-                log_var_k = float(torch.log(var_k + 1e-6))
+                sq = (cluster_pts - centers[k]).pow(2)
+                var_k = sq.mean(dim=0) if self.diag_covariance else sq.mean()
+                log_var_k = torch.log(var_k + 1e-6)
             else:
-                log_var_k = 0.0  # σ² = 1
+                log_var_k = torch.zeros(self.D if self.diag_covariance else 1)  # σ² = 1
             self.set_log_sigma2_(k, log_var_k)
 
         # Initialise mixing weights from K-means cluster counts (Laplace-smoothed).

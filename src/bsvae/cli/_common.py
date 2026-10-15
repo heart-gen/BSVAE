@@ -68,6 +68,9 @@ def add_model_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--normalize-input", action="store_true", default=False,
                    help="Z-score each feature profile across samples before encoding. "
                         "Recommended for count-derived data (log2-CPM, etc.).")
+    g.add_argument("--diag-covariance", action="store_true", default=False,
+                   help="Learn a variance per latent dimension for each GMM component "
+                        "(diagonal instead of isotropic covariance).")
 
 
 def add_schedule_args(p: argparse.ArgumentParser, checkpoint_default: int = 10) -> None:
@@ -129,6 +132,12 @@ def add_loss_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--latent-corr-strength", type=float, default=0.0,
                    help="λ_lcorr: latent-space correlation alignment loss weight "
                         "(recommended 0.1–1.0 with --normalize-input).")
+    g.add_argument("--contrastive-strength", type=float, default=0.0,
+                   help="λ_nce: size-invariant neighbour-contrastive latent alignment (default: 0.0=disabled).")
+    g.add_argument("--contrastive-k", type=int, default=5, help="Positives per anchor (default: 5).")
+    g.add_argument("--contrastive-tau", type=float, default=0.1, help="Contrastive temperature (default: 0.1).")
+    g.add_argument("--contrastive-min-corr", type=float, default=0.3,
+                   help="Minimum Pearson r for a positive pair (default: 0.3).")
     # Hierarchical / isoform options
     g.add_argument("--hier-strength", type=float, default=0.0,
                    help="λ_hier: hierarchical isoform loss weight (default: 0.0=disabled).")
@@ -165,6 +174,7 @@ def model_kwargs(args, n_features: int) -> Dict:
         use_batch_norm=args.use_batch_norm,
         sigma_min=args.sigma_min,
         normalize_input=args.normalize_input,
+        diag_covariance=getattr(args, "diag_covariance", False),
     )
 
 
@@ -194,6 +204,10 @@ def gmm_loss_kwargs(args) -> Dict:
         corr_strength=args.corr_strength,
         latent_corr_strength=args.latent_corr_strength,
         kl_per_element=args.kl_per_element,
+        contrastive_strength=getattr(args, "contrastive_strength", 0.0),
+        contrastive_k=getattr(args, "contrastive_k", 5),
+        contrastive_tau=getattr(args, "contrastive_tau", 0.1),
+        contrastive_min_corr=getattr(args, "contrastive_min_corr", 0.3),
     )
 
 

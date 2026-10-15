@@ -33,6 +33,7 @@ Common options:
 - `--use-batch-norm` / `--no-batch-norm`
 - `--sigma-min` default `0.3`
 - `--normalize-input`
+- `--diag-covariance` (one variance per latent dimension per component instead of isotropic)
 - `--beta` default `1.0` (a true per-element ELBO weight; see `--no-kl-per-element`)
 - `--no-kl-per-element` legacy KL scaling (sum over latent dims), whose effective β grows with the number of samples
 - `--free-bits` default `0.0`
@@ -51,6 +52,8 @@ Common options:
 - `--no-hier-corr-weight` disable weighting isoform pairs by their positive expression correlation
 - `--corr-strength` default `0.0`
 - `--latent-corr-strength` default `0.0`
+- `--contrastive-strength` default `0.0` (size-invariant neighbour-contrastive latent alignment)
+- `--contrastive-k` default `5`, `--contrastive-tau` default `0.1`, `--contrastive-min-corr` default `0.3`
 - `--masked-recon`
 - `--tx2gene` (header optional; Ensembl version suffixes are stripped on both sides)
 - `--keep-tx-version`
@@ -188,6 +191,80 @@ Outputs:
 - `leiden_modules.csv` when requested
 - `gamma_gene.npz`, `hard_assignments_gene.npz` and `gene_divergent.csv` when gene aggregation is requested
 
+### `consensus-modules`
+
+Majority-vote consensus over several `extract-modules` runs (for example different seeds). Runs are aligned by module overlap, each feature takes the label most runs agree on, and the agreement fraction is reported as a stability score.
+
+```bash
+bsvae-networks consensus-modules \
+  --modules results/seed0/modules.csv results/seed1/modules.csv results/seed2/modules.csv \
+  --output-dir results/consensus
+```
+
+Options:
+
+- `--min-agreement` default `0.5` (features below this agreement are unassigned)
+- `--min-module-size` default `10`
+
+Outputs: `consensus_modules.csv` (`feature_id, module, module_label, agreement`) and `consensus_summary.json` (per-run ARI to the consensus).
+
+### `isoform-specific`
+
+Call isoforms whose expression belongs to a module other than their gene's. Each multi-isoform transcript's profile is regressed on its gene aggregate (isoforms summed on the linear scale); the residual is correlated with every module eigengene from `extract-modules`, and a transcript is called when its residual kME to a module other than its gene's majority module reaches `--min-kme`.
+
+```bash
+bsvae-networks isoform-specific \
+  --dataset data/transcripts.tsv.gz --tx2gene data/tx2gene.tsv \
+  --modules results/run/modules/modules.csv --output results/run/isoform_specific.csv
+```
+
+Options:
+
+- `--min-kme` default `0.4` (0.4–0.5 gives 6–9× enrichment of truly switched isoforms over the base rate on the isoform simulations; lower values trade precision for recall)
+- `--keep-tx-version`
+
+Output columns: `gene_id, gene_module, best_other_module, kme_residual, r2_gene, n_isoforms, called`.
+
+### `isoform-residuals`
+
+Write the gene-programme-removed residual matrix itself (what `isoform-specific` correlates with the eigengenes), for custom downstream analysis. Clustering the residuals alone does **not** recover isoform-specific modules: switched isoforms are too few per module to form clusters of their own, so the membership test above is the recommended route.
+
+```bash
+bsvae-networks isoform-residuals \
+  --dataset data/transcripts.tsv.gz --tx2gene data/tx2gene.tsv \
+  --output results/residuals.tsv.gz --stats results/residual_stats.tsv
+```
+
+Options:
+
+- `--min-isoforms` default `2`
+- `--keep-tx-version`
+
+### `module-quality`
+
+Per-module quality (size, mean within-module correlation, eigengene variance explained, kME distribution), optional Fisher enrichment of GMT annotation sets with Benjamini–Hochberg q-values, and optional preservation of the modules in a second dataset (permutation Z-score of within-module density, `Z_density`, with WGCNA's conventions: > 2 weak, > 10 strong; plus `cor_kME`, the correlation of members' kME between datasets).
+
+```bash
+bsvae-networks module-quality \
+  --modules results/run/modules/modules.csv --expr data/expression.csv \
+  --test-expr data/replication.csv --annotations go.gmt --output-dir results/run/quality
+```
+
+Options:
+
+- `--test-expr`, `--n-perm` default `200`
+- `--annotations` (GMT), `--min-overlap` default `3`
+
+Outputs: `module_quality.csv`, `module_preservation.csv`, `module_enrichment.csv`.
+
+### `regress-covariates`
+
+Remove known sample covariates (batch, sex, age, cell-type proportions, ...) from every feature profile by least squares before training, the way `limma::removeBatchEffect` does; numeric covariates are centred, categorical ones one-hot encoded.
+
+```bash
+bsvae-networks regress-covariates --dataset data/expression.csv --covariates data/samples.tsv --columns batch,sex --output data/expression_corrected.tsv.gz
+```
+
 ### `export-latents`
 
 Export latent arrays for all features.
@@ -319,6 +396,6 @@ bsvae-benchmark run --config iso.yaml --outdir results/bench --methods bsvae,wgc
 bsvae-benchmark summarize --results results/bench/results.tsv
 ```
 
-BSVAE is trained with `--over-cluster-factor` (default 3) times the true module count and merged back by post-processing; pass `--over-cluster-factor 1` to train with the true K. Methods: `bsvae`, `wgcna` (signed network, the WGCNA authors' recommendation), `wgcna_unsigned`, `wgcna_signed`.
+BSVAE is trained with `--over-cluster-factor` (default 3) times the true module count and merged back by post-processing; pass `--over-cluster-factor 1` to train with the true K. Methods: `bsvae`, `bsvae_consensus` (majority vote over `--consensus-runs` seeds, default 3), `bsvae_isoform` (isoform-specific membership calls, scored by switched-isoform recall/precision/ARI), `bsvae_regressed` / `wgcna_regressed` (batch regressed out of the simulated matrix first), `wgcna` (signed network, the WGCNA authors' recommendation), `wgcna_unsigned`, `wgcna_signed`.
 
 `run` writes one row per (scenario, replicate, method, seed) to `results.tsv` as soon as it finishes (resumable with the same command), per-run outputs under `scenarios/<id>/rep_<r>/methods/<method>/seed_<s>/`, and `summary.tsv` (mean ± sd per scenario and method). BSVAE options (`--epochs`, `--latent-dim`, `--hier-strength`, `--isoform-stratified`, ...), post-processing options (`--min-gamma`, `--min-module-size`, `--merge-cut-height`, `--no-postprocess`) and WGCNA options (`--wgcna-network-type`, `--wgcna-soft-power`, `--wgcna-min-module-size`, `--wgcna-merge-cut-height`, `--wgcna-threads`) can be overridden. `scripts/benchmark_sims.py` drives the same harness over seven laptop-sized reference scenarios.

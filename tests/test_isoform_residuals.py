@@ -44,3 +44,22 @@ def test_residuals_isolate_switched_isoform_signal():
         (gaps_sw if row["is_switched"] == 1 else gaps_plain).append(c_new)
     assert np.mean(gaps_sw) > 0.35
     assert np.mean(gaps_sw) > np.mean(gaps_plain) + 0.15
+
+
+def test_isoform_specific_calls_enrich_switched_isoforms():
+    from bsvae.utils.isoform import isoform_specific_calls
+    p = dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=300, n_samples=80, n_modules=4, switch_rate=0.4,
+             alpha=1.0, signal_scale=3.0, null_fraction=0.0)
+    r = simulate_params(p, seed=3)
+    expr = r.expr_features_x_samples
+    t2g = dict(zip(r.extra_truth["tx2gene.tsv"]["transcript_id"], r.extra_truth["tx2gene.tsv"]["gene_id"]))
+    truth = r.modules_hard.set_index("feature_id")["module"].reindex(expr.index).values   # oracle labels
+    calls = isoform_specific_calls(expr, t2g, truth, list(expr.index), min_kme=0.4)
+    st = r.extra_truth["switch_table.tsv.gz"].set_index("transcript_id")
+    is_sw = st.loc[calls.index, "is_switched"].values == 1
+    called = calls["called"].values
+    precision = (called & is_sw).sum() / called.sum()
+    recall = (called & is_sw).sum() / is_sw.sum()
+    assert recall > 0.5 and precision > 3 * is_sw.mean()
+    hit = calls[called & is_sw]
+    assert (hit["best_other_module"].values == st.loc[hit.index, "tx_module"].values).mean() > 0.8

@@ -216,7 +216,7 @@ def test_switched_isoform_metrics_toy():
     assert m["switched_ari"] == pytest.approx(1.0)
 
 
-def test_run_grid_residual_and_consensus_methods(tmp_path):
+def test_run_grid_isoform_and_consensus_methods(tmp_path):
     cfg = {
         "base_seed": 1, "reps": 1,
         "generator": dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=150, n_samples=30, n_modules=3, switch_rate=0.3),
@@ -224,10 +224,23 @@ def test_run_grid_residual_and_consensus_methods(tmp_path):
         "outputs": {"emit_gnvae_folds": False},
     }
     bs = {"epochs": 6, "warmup_epochs": 2, "transition_epochs": 1, "hidden_dims": [16], "no_cuda": True}
-    df = run_grid(cfg, tmp_path, methods=("bsvae_residual", "bsvae_consensus"), seeds=[0], bsvae_cfg=bs, consensus_runs=2)
-    assert set(df["method"]) == {"bsvae_residual", "bsvae_consensus"}
+    df = run_grid(cfg, tmp_path, methods=("bsvae_isoform", "bsvae_consensus"), seeds=[0], bsvae_cfg=bs, consensus_runs=2)
+    assert set(df["method"]) == {"bsvae_isoform", "bsvae_consensus"}
     assert (df["status"] == "ok").all()
-    res = df[df["method"] == "bsvae_residual"].iloc[0]
+    res = df[df["method"] == "bsvae_isoform"].iloc[0]
     assert np.isfinite(res["switched_recall"]) and "switched_precision" in df.columns
     cons = df[df["method"] == "bsvae_consensus"].iloc[0]
     assert cons["m_n_runs"] == 2 and np.isfinite(cons["ari_all"])
+
+
+def test_run_grid_regressed_method(tmp_path):
+    from bsvae.simulation.scenario import DEFAULT_CONFIG
+    cfg = {
+        "base_seed": 1, "reps": 1,
+        "generator": dict(DEFAULT_CONFIG["generator"], n_features=200, n_samples=40, n_modules=3,
+                          confounding="strong", overlap_rate=0.0),
+        "grid": {}, "outputs": {"emit_gnvae_folds": False},
+    }
+    bs = {"epochs": 6, "warmup_epochs": 2, "transition_epochs": 1, "hidden_dims": [16], "no_cuda": True}
+    df = run_grid(cfg, tmp_path, methods=("bsvae_regressed",), seeds=[0], bsvae_cfg=bs)
+    assert df["method"].tolist() == ["bsvae_regressed"] and (df["status"] == "ok").all()

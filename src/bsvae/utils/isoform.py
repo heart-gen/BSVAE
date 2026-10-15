@@ -105,3 +105,74 @@ def isoform_residuals(
 
 
 __all__ = ["map_transcripts_to_genes", "gene_aggregate", "isoform_residuals"]
+
+
+def isoform_specific_calls(
+    expr: pd.DataFrame,
+    tx2gene: "pd.Series | Dict[str, str]",
+    labels: np.ndarray,
+    feature_ids: Sequence[str],
+    min_kme: float = 0.4,
+    keep_version: bool = False,
+    eigengenes: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """
+    Call isoforms whose *gene-programme-removed* profile belongs to a module
+    other than their gene's module ("isoform-specific membership").
+
+    For every multi-isoform transcript the residual (see
+    :func:`isoform_residuals`) is correlated with each module eigengene from
+    the transcript-level run (``labels`` on ``feature_ids``).  A transcript is
+    called when its residual kME to some module other than its gene's
+    majority module is at least ``min_kme``.  On the isoform simulations a
+    threshold of 0.4–0.5 gives 6–9× enrichment of truly switched isoforms over
+    the base rate; lower thresholds trade precision for recall.
+
+    Returns a table indexed by transcript with gene_id, gene_module,
+    best_other_module, kme_residual, r2_gene, n_isoforms and ``called``.
+    """
+    from collections import Counter
+
+    from bsvae.networks.postprocess import compute_kme, module_eigengenes
+
+    expr = expr.copy(); expr.index = expr.index.astype(str)
+    fids = [str(f) for f in feature_ids]
+    labels = np.asarray(labels).astype(np.int64)
+    if eigengenes is None:
+        eigengenes = module_eigengenes(expr, labels, fids)
+    eigengenes = eigengenes.dropna(axis=1, how="any")
+    resid, stats = isoform_residuals(expr, tx2gene, keep_version=keep_version)
+    if eigengenes.shape[1] == 0 or len(resid) == 0:
+        return pd.DataFrame(columns=["gene_id", "gene_module", "best_other_module", "kme_residual",
+                                     "r2_gene", "n_isoforms", "called"])
+    kme = compute_kme(resid, eigengenes, list(resid.index))
+    tx_gene = map_transcripts_to_genes(fids, tx2gene, keep_version)
+    lab = pd.Series(labels, index=fids)
+    gene_mod: Dict[str, int] = {}
+    for g, idx in tx_gene.dropna().groupby(tx_gene.dropna()).groups.items():
+        votes = [int(v) for v in lab.loc[list(idx)] if v >= 0]
+        gene_mod[g] = Counter(votes).most_common(1)[0][0] if votes else -1
+    cols = [int(c) for c in kme.columns]
+    rows = []
+    for i, tx in enumerate(resid.index):
+        g = stats.loc[tx, "gene_id"]
+        gm = gene_mod.get(g, -1)
+        row = kme.iloc[i].values.astype(float).copy()
+        if gm in cols:
+            row[cols.index(gm)] = 0.0
+        row = np.nan_to_num(row)
+        j = int(np.abs(row).argmax())
+        rows.append({
+            "gene_id": g, "gene_module": gm, "best_other_module": cols[j],
+            "kme_residual": float(row[j]), "r2_gene": float(stats.loc[tx, "r2_gene"]),
+            "n_isoforms": int(stats.loc[tx, "n_isoforms"]),
+            "called": bool(abs(row[j]) >= float(min_kme)),
+        })
+    out = pd.DataFrame(rows, index=resid.index)
+    out.index.name = "feature_id"
+    logger.info("Isoform-specific calls: %d of %d multi-isoform transcripts (kME ≥ %.2f)",
+                int(out["called"].sum()), len(out), min_kme)
+    return out
+
+
+__all__.append("isoform_specific_calls")

@@ -290,7 +290,7 @@ class Trainer:
             D = gmm.D
             for i, k in enumerate(dead):
                 best = live_sorted[i % len(live_sorted)]
-                sigma_best = float(gmm.sigma2_k[best].sqrt())
+                sigma_best = float(gmm.sigma_k_scalar[best])
                 noise = torch.randn(D, device=gmm.mu_k.device) * sigma_best * self.collapse_noise_scale
                 gmm.mu_k.data[k] = gmm.mu_k.data[best] + noise
                 gmm.sigma2_raw.data[k] = gmm.sigma2_raw.data[best]

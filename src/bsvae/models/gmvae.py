@@ -59,6 +59,9 @@ class GMMModuleVAE(BaseVAE):
         The decoder then reconstructs in the z-scored space. Recommended for
         count-derived data (e.g. log2-CPM) where features have heterogeneous
         means. Default: False.
+    diag_covariance : bool
+        One learned variance per latent dimension per GMM component instead of
+        an isotropic variance. Default: False.
     """
 
     def __init__(
@@ -73,6 +76,7 @@ class GMMModuleVAE(BaseVAE):
         sigma_min: float = 0.3,
         ema_alpha: float = 0.99,
         normalize_input: bool = False,
+        diag_covariance: bool = False,
     ):
         super().__init__(n_features, n_latent)
         self.n_modules = n_modules
@@ -95,6 +99,7 @@ class GMMModuleVAE(BaseVAE):
             n_latent=n_latent,
             sigma_min=sigma_min,
             ema_alpha=ema_alpha,
+            diag_covariance=diag_covariance,
         )
 
     def forward(self, x: torch.Tensor):

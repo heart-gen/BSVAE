@@ -95,6 +95,57 @@ def latent_corr_loss(x: torch.Tensor, mu: torch.Tensor, eps: float = 1e-6) -> to
     return F.mse_loss(S_mu, C_x.detach())
 
 
+def neighbour_contrastive_loss(
+    x: torch.Tensor,
+    mu: torch.Tensor,
+    k_pos: int = 5,
+    tau: float = 0.1,
+    min_corr: float = 0.3,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Size-invariant contrastive alignment of the latent with co-expression.
+
+    For every feature in the batch its ``k_pos`` most correlated batch-mates
+    (Pearson r ≥ ``min_corr``) are positives; an InfoNCE loss on the cosine
+    similarity of (batch-centred) μ pulls each feature toward its positives
+    and away from the rest of the batch.  Every feature contributes one term
+    regardless of the size of its module, unlike the reconstruction loss,
+    where a module's influence on the latent grows with its size.
+
+    Parameters
+    ----------
+    x   : (B, N) input profiles (z-scored if normalize_input)
+    mu  : (B, D) encoder means
+    k_pos : positives per anchor
+    tau : softmax temperature
+    min_corr : minimum Pearson correlation for a positive
+    """
+    B = x.shape[0]
+    if B < 3:
+        return mu.new_zeros(1).squeeze()
+    with torch.no_grad():
+        x_c = x - x.mean(dim=1, keepdim=True)
+        x_n = F.normalize(x_c, p=2, dim=1, eps=eps)
+        C = x_n @ x_n.T
+        C.fill_diagonal_(-2.0)
+        k = min(int(k_pos), B - 1)
+        top_val, top_idx = C.topk(k, dim=1)                    # (B, k)
+        pos_mask = torch.zeros_like(C, dtype=torch.bool)
+        pos_mask.scatter_(1, top_idx, top_val >= float(min_corr))
+    if not pos_mask.any():
+        return mu.new_zeros(1).squeeze()
+    mu_c = mu - mu.mean(dim=0, keepdim=True)
+    mu_n = F.normalize(mu_c, p=2, dim=1, eps=eps)
+    logits = (mu_n @ mu_n.T) / float(tau)
+    logits = logits.masked_fill(torch.eye(B, dtype=torch.bool, device=mu.device), -1e4)
+    log_prob = F.log_softmax(logits, dim=1)
+    n_pos = pos_mask.sum(dim=1)
+    anchors = n_pos > 0
+    per_anchor = -torch.where(pos_mask, log_prob, torch.zeros_like(log_prob)).sum(dim=1)[anchors] / n_pos[anchors]
+    return per_anchor.mean()
+
+
 def gaussian_nll(x, recon_x, log_var=None, reduction="mean"):
     """Gaussian negative log-likelihood per feature."""
     if log_var is None:
@@ -206,7 +257,7 @@ def kl_vade(
     logvar : (B, D) — encoder log-variances
     gamma : (B, K) — soft GMM assignments
     mu_k : (K, D) — GMM centroids
-    sigma2_k : (K,) — GMM component variances (with σ floor already applied)
+    sigma2_k : (K,) or (K, D) — GMM component variances (with σ floor already applied)
     log_pi : (K,) — log mixing proportions
     free_bits : float — per (component, dimension) KL lower bound (nats).
         Applied after averaging over the batch: the batch-mean KL for each
@@ -229,8 +280,8 @@ def kl_vade(
     diff = mu.unsqueeze(1) - mu_k.unsqueeze(0)               # (B, K, D)
     diff_sq = diff ** 2                                       # (B, K, D)
 
-    # sigma²_k broadcast: (1, K, 1)
-    sigma2 = sigma2_k.unsqueeze(0).unsqueeze(-1)              # (1, K, 1)
+    # sigma²_k broadcast: (1, K, 1) for isotropic, (1, K, D) for diagonal
+    sigma2 = sigma2_k.unsqueeze(0) if sigma2_k.dim() == 2 else sigma2_k.unsqueeze(0).unsqueeze(-1)
 
     # Per-dim KL(N_f || N_k): (B, K, D)
     kl_dim = 0.5 * (
@@ -425,6 +476,12 @@ class GMMVAELoss(nn.Module):
         λ_sep — weight for separation loss. Default: 0.1.
     sep_alpha : float
         α — margin multiplier for σ-scaled separation. Default: 2.0.
+    contrastive_strength : float
+        λ_nce — weight of the neighbour-contrastive latent alignment
+        (``neighbour_contrastive_loss``). Size-invariant: every feature pulls
+        toward its most correlated batch-mates. Default: 0.0 (disabled).
+    contrastive_k, contrastive_tau, contrastive_min_corr : positives per
+        anchor (5), temperature (0.1) and minimum correlation (0.3).
     kl_per_element : bool
         If True (default), scale the KL term by 1/N (N = profile length) so
         that, like the per-element MSE reconstruction, it is expressed per
@@ -495,9 +552,17 @@ class GMMVAELoss(nn.Module):
         kl_per_element: bool = True,
         hier_margin: float = 0.0,
         hier_corr_weight: bool = False,
+        contrastive_strength: float = 0.0,
+        contrastive_k: int = 5,
+        contrastive_tau: float = 0.1,
+        contrastive_min_corr: float = 0.3,
     ):
         super().__init__()
         self.beta = beta
+        self.contrastive_strength = contrastive_strength
+        self.contrastive_k = contrastive_k
+        self.contrastive_tau = contrastive_tau
+        self.contrastive_min_corr = contrastive_min_corr
         self.kl_per_element = kl_per_element
         self.hier_margin = hier_margin
         self.hier_corr_weight = hier_corr_weight
@@ -616,6 +681,14 @@ class GMMVAELoss(nn.Module):
         if self.latent_corr_strength > 0.0:
             latent_corr = latent_corr_loss(x_target, mu)
 
+        # --- Neighbour contrastive (size-invariant) ---
+        nce_loss = x.new_zeros(1).squeeze()
+        if self.contrastive_strength > 0.0:
+            nce_loss = neighbour_contrastive_loss(
+                x_target, mu, k_pos=self.contrastive_k, tau=self.contrastive_tau,
+                min_corr=self.contrastive_min_corr,
+            )
+
         # --- Hierarchical ---
         hier_loss = x.new_zeros(1).squeeze()
         if self.hier_strength > 0.0 and gene_groups:
@@ -636,6 +709,7 @@ class GMMVAELoss(nn.Module):
             + self.pi_entropy_strength * pi_entropy_loss
             + self.corr_strength * corr_loss
             + self.latent_corr_strength * latent_corr
+            + self.contrastive_strength * nce_loss
             + self.hier_strength * hier_loss
         )
 
@@ -649,6 +723,7 @@ class GMMVAELoss(nn.Module):
             storer.setdefault("pi_entropy_loss", []).append(pi_entropy_loss.item())
             storer.setdefault("corr_loss", []).append(corr_loss.item())
             storer.setdefault("latent_corr_loss", []).append(latent_corr.item())
+            storer.setdefault("contrastive_loss", []).append(nce_loss.item())
             storer.setdefault("hier_loss", []).append(hier_loss.item())
             storer.setdefault("gmm_weight", []).append(gmm_weight)
             storer.setdefault("loss", []).append(loss.item())

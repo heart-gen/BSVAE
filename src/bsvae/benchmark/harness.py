@@ -33,7 +33,7 @@ from bsvae.simulation.scenario import expand_scenarios, generate_scenario, load_
 logger = logging.getLogger(__name__)
 
 METHODS = ("bsvae", "wgcna")
-KNOWN_METHODS = ("bsvae", "bsvae_consensus", "bsvae_residual", "wgcna", "wgcna_signed", "wgcna_unsigned")
+KNOWN_METHODS = ("bsvae", "bsvae_consensus", "bsvae_isoform", "bsvae_regressed", "wgcna", "wgcna_signed", "wgcna_unsigned", "wgcna_regressed")
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +48,7 @@ def load_truth(run_dir: str | Path) -> Dict:
     out: Dict = {
         "labels": pd.Series(hard["module"].astype(int).values, index=hard["feature_id"].astype(str)),
         "expr_path": run_dir / "expr" / "features_x_samples.tsv.gz",
+        "covariates_path": run_dir / "covariates.tsv.gz",
         "metadata": json.loads((run_dir / "metadata.json").read_text()),
     }
     tx2gene_path = truth / "tx2gene.tsv"
@@ -66,7 +67,7 @@ def evaluate_run(truth: Dict, result: MethodResult) -> Dict[str, float]:
     """Score a MethodResult against loaded truth; NaN metrics when not ok."""
     if result.status != "ok" or result.labels is None:
         return {}
-    if result.method == "bsvae_residual":
+    if result.method == "bsvae_isoform":
         if "switch_table" not in truth:
             return {}
         pred = result.labels.copy(); pred.index = pred.index.astype(str)
@@ -141,11 +142,19 @@ def run_one(
     truth = load_truth(run_dir)
     expr = pd.read_csv(truth["expr_path"], sep="\t", index_col=0)
     expr.index = expr.index.astype(str)
+    if method.endswith("_regressed"):
+        from bsvae.utils.preprocess import regress_covariates
+        cov = pd.read_csv(truth["covariates_path"], sep="\t", index_col=0)
+        # Known technical covariate only (batch); condition is biology.
+        expr = regress_covariates(expr, cov, columns=["batch"])
+        method_base = method[: -len("_regressed")]
+    else:
+        method_base = method
     out_dir = run_dir / "methods" / method / f"seed_{seed}"
     out_dir.mkdir(parents=True, exist_ok=True)
     n_modules = int(truth["metadata"]["summary"].get("n_modules", truth["metadata"]["parameters"].get("n_modules", 20)))
 
-    if method == "bsvae":
+    if method_base == "bsvae":
         cfg = dict(bsvae_cfg or {})
         if k_mode == "sweep":
             cfg.setdefault("_k_mode", "sweep")
@@ -187,34 +196,40 @@ def run_one(
                 params={"n_runs": cons.n_runs, "run_ari_to_consensus": cons.run_ari,
                         "mean_agreement": float(cons.agreement.mean())},
             )
-    elif method == "bsvae_residual":
-        from bsvae.utils.isoform import isoform_residuals
+    elif method == "bsvae_isoform":
+        from bsvae.utils.isoform import isoform_specific_calls
         if "tx2gene" not in truth:
-            result = MethodResult("bsvae_residual", "skipped", message="scenario has no transcript structure")
+            result = MethodResult("bsvae_isoform", "skipped", message="scenario has no transcript structure")
         else:
-            resid, _ = isoform_residuals(expr, truth["tx2gene"])
             cfg = {k: v for k, v in (bsvae_cfg or {}).items() if not k.startswith("_")}
-            cfg["normalize_input"] = True
             kwargs = {"over_cluster_factor": over_cluster_factor} if over_cluster_factor is not None else {}
-            sub = run_bsvae(resid, n_modules=n_modules, seed=seed, workdir=out_dir, train_cfg=cfg,
+            sub = run_bsvae(expr, n_modules=n_modules, seed=seed, workdir=out_dir, train_cfg=cfg,
                             post_cfg=post_cfg, device=device, postprocess=postprocess, **kwargs)
-            labels = pd.Series(-1, index=expr.index.astype(str), name="module")
             if sub.status == "ok":
-                labels.loc[sub.labels.index.astype(str)] = sub.labels.values
-            result = MethodResult("bsvae_residual", sub.status, labels=labels if sub.status == "ok" else None,
-                                  runtime_s=sub.runtime_s, params=sub.params, message=sub.message)
-
+                fids = [str(f) for f in expr.index]
+                lab = sub.labels.reindex(fids).fillna(-1).astype(int).values
+                min_kme = float((post_cfg or {}).get("isoform_min_kme", 0.4))
+                calls = isoform_specific_calls(expr, truth["tx2gene"], lab, fids, min_kme=min_kme, eigengenes=sub.eigengenes)
+                labels = pd.Series(-1, index=fids, name="module")
+                called = calls[calls["called"]]
+                labels.loc[called.index] = called["best_other_module"].astype(int).values
+                calls.to_csv(out_dir / "isoform_specific_calls.csv")
+                result = MethodResult("bsvae_isoform", "ok", labels=labels, runtime_s=sub.runtime_s,
+                                      params={**sub.params, "isoform_min_kme": min_kme, "n_called": int(len(called))})
+            else:
+                result = MethodResult("bsvae_isoform", sub.status, runtime_s=sub.runtime_s, message=sub.message)
+    elif method_base in ("wgcna", "wgcna_unsigned", "wgcna_signed"):
         cfg = dict(WGCNA_DEFAULTS)
         cfg.update(wgcna_cfg or {})
-        if method == "wgcna_unsigned":
+        if method_base == "wgcna_unsigned":
             cfg["network_type"] = "unsigned"
-        elif method == "wgcna_signed":
+        elif method_base == "wgcna_signed":
             cfg["network_type"] = "signed"
         result = run_wgcna(expr, workdir=out_dir, seed=seed, **cfg)
-        result.method = method
     else:
         raise ValueError(f"Unknown method: {method}")
 
+    result.method = method
     metrics = evaluate_run(truth, result) if result.status == "ok" else {}
     if result.labels is not None:
         pd.DataFrame({"feature_id": result.labels.index, "module": result.labels.values}).to_csv(
