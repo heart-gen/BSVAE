@@ -5,6 +5,11 @@ Subcommands
 -----------
   extract-networks   Method A (μ cosine) or Method B (FAISS γ-kNN)
   extract-modules    GMM soft/hard assignments + soft-weighted eigengenes
+  consensus-modules  Consensus (majority vote) over several extract-modules runs
+  isoform-residuals  Gene-programme-removed transcript matrix (residuals)
+  isoform-specific   Call isoforms whose residual belongs to another module
+  module-quality     kME summaries, enrichment, preservation in a second dataset
+  regress-covariates Remove known sample covariates before training
   export-latents     Save μ, logσ², γ as NPZ
   latent-analysis    UMAP, clustering, covariate correlation
 """
@@ -94,6 +99,70 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Aggregate isoform-level γ to gene level by averaging across "
                          "isoforms per gene. Saves gamma_gene.npz and "
                          "hard_assignments_gene.npz. Requires --tx2gene.")
+
+    # ------------------------------------------------------------------
+    # consensus-modules
+    # ------------------------------------------------------------------
+    cm = subs.add_parser("consensus-modules",
+                         help="Consensus of several extract-modules runs (e.g. different seeds).")
+    cm.add_argument("--modules", nargs="+", required=True,
+                    help="Two or more modules.csv files (feature_id, module) from extract-modules.")
+    cm.add_argument("--output-dir", required=True)
+    cm.add_argument("--min-agreement", type=float, default=0.5,
+                    help="Features whose consensus label is supported by fewer than this fraction "
+                         "of runs are unassigned (default: 0.5).")
+    cm.add_argument("--min-module-size", type=int, default=10)
+
+    # ------------------------------------------------------------------
+    # isoform-residuals
+    # ------------------------------------------------------------------
+    ir = subs.add_parser("isoform-residuals",
+                         help="Remove each isoform's gene-level programme; cluster the residuals for "
+                              "isoform-specific modules.")
+    ir.add_argument("--dataset", required=True, help="Transcript matrix (transcripts × samples, log scale).")
+    ir.add_argument("--tx2gene", required=True)
+    ir.add_argument("--output", required=True, help="Residual matrix path (.tsv.gz / .csv).")
+    ir.add_argument("--stats", default=None, help="Optional per-transcript statistics table.")
+    ir.add_argument("--min-isoforms", type=int, default=2)
+    ir.add_argument("--keep-tx-version", action="store_true", default=False)
+
+    # ------------------------------------------------------------------
+    # isoform-specific
+    # ------------------------------------------------------------------
+    isp = subs.add_parser("isoform-specific",
+                          help="Call isoforms whose gene-programme-removed profile belongs to another module.")
+    isp.add_argument("--dataset", required=True, help="Transcript matrix (transcripts × samples).")
+    isp.add_argument("--tx2gene", required=True)
+    isp.add_argument("--modules", required=True, help="modules.csv from extract-modules on the same matrix.")
+    isp.add_argument("--output", required=True, help="Calls table (.csv / .tsv).")
+    isp.add_argument("--min-kme", type=float, default=0.4,
+                     help="Minimum residual kME to another module (default: 0.4).")
+    isp.add_argument("--keep-tx-version", action="store_true", default=False)
+
+    # ------------------------------------------------------------------
+    # regress-covariates
+    # ------------------------------------------------------------------
+    rc = subs.add_parser("regress-covariates",
+                         help="Remove known sample covariates (batch, sex, ...) from every feature profile.")
+    rc.add_argument("--dataset", required=True, help="Expression matrix (features × samples).")
+    rc.add_argument("--covariates", required=True, help="TSV/CSV with one row per sample (index = sample ID).")
+    rc.add_argument("--columns", default=None, help="Comma list of covariate columns to use (default: all).")
+    rc.add_argument("--output", required=True, help="Corrected matrix (.tsv.gz / .csv).")
+
+    # ------------------------------------------------------------------
+    # module-quality
+    # ------------------------------------------------------------------
+    mq = subs.add_parser("module-quality",
+                         help="kME summaries, optional annotation enrichment and preservation in a second dataset.")
+    mq.add_argument("--modules", required=True, help="modules.csv (feature_id, module) from extract-modules.")
+    mq.add_argument("--expr", required=True, help="Expression matrix the modules were defined on (features × samples).")
+    mq.add_argument("--output-dir", required=True)
+    mq.add_argument("--test-expr", default=None,
+                    help="Second expression matrix (features × samples) to test module preservation in.")
+    mq.add_argument("--n-perm", type=int, default=200)
+    mq.add_argument("--annotations", default=None,
+                    help="GMT file (set name, description, members...) for per-module Fisher enrichment.")
+    mq.add_argument("--min-overlap", type=int, default=3)
 
     # ------------------------------------------------------------------
     # export-latents
@@ -322,6 +391,108 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
         logger.info("Leiden fallback modules saved.")
 
 
+def handle_isoform_specific(args, logger: logging.Logger) -> None:
+    import pandas as pd
+    from bsvae.utils.hierarchy import load_tx2gene
+    from bsvae.utils.isoform import isoform_specific_calls
+
+    expr = _read_table(args.dataset)
+    mods = pd.read_csv(args.modules)
+    fids = [str(f) for f in expr.index]
+    labels = mods.set_index(mods["feature_id"].astype(str))["module"].reindex(fids).fillna(-1).astype(int).values
+    tx2gene = load_tx2gene(path=args.tx2gene, feature_ids=fids, keep_version=args.keep_tx_version, logger=logger)
+    calls = isoform_specific_calls(expr, tx2gene, labels, fids, min_kme=args.min_kme, keep_version=args.keep_tx_version)
+    out = Path(args.output); out.parent.mkdir(parents=True, exist_ok=True)
+    calls.to_csv(out, sep="\t" if out.suffix == ".tsv" else ",")
+    logger.info("Isoform-specific calls written to %s (%d called)", out, int(calls["called"].sum()))
+
+
+def handle_regress_covariates(args, logger: logging.Logger) -> None:
+    from bsvae.utils.preprocess import regress_covariates
+
+    expr = _read_table(args.dataset)
+    cov = _read_table(args.covariates)
+    cols = [c.strip() for c in args.columns.split(",")] if args.columns else None
+    out_df = regress_covariates(expr, cov, columns=cols)
+    out = Path(args.output); out.parent.mkdir(parents=True, exist_ok=True)
+    sep = "\t" if ".tsv" in [s.lower() for s in out.suffixes] else ","
+    out_df.to_csv(out, sep=sep, compression="gzip" if out.suffix == ".gz" else None)
+    logger.info("Covariate-corrected matrix written to %s", out)
+
+
+def handle_module_quality(args, logger: logging.Logger) -> None:
+    import numpy as np
+    import pandas as pd
+    from bsvae.networks.quality import module_enrichment, module_preservation, module_quality
+
+    mods = pd.read_csv(args.modules)
+    fids = [str(f) for f in mods["feature_id"]]
+    labels = mods["module"].astype(int).values
+    expr = _read_table(args.expr)
+    out = Path(args.output_dir); out.mkdir(parents=True, exist_ok=True)
+    q = module_quality(expr, labels, fids)
+    q.to_csv(out / "module_quality.csv", index=False)
+    logger.info("Module quality for %d modules written to %s", len(q), out / "module_quality.csv")
+    if args.test_expr:
+        test = _read_table(args.test_expr)
+        pres = module_preservation(expr, test, labels, fids, n_perm=args.n_perm)
+        pres.to_csv(out / "module_preservation.csv", index=False)
+        logger.info("Preservation: %d/%d modules with Z_density > 2", int((pres["Z_density"] > 2).sum()), len(pres))
+    if args.annotations:
+        sets = {}
+        with open(args.annotations) as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 3:
+                    sets[parts[0]] = parts[2:]
+        enr = module_enrichment(labels, fids, sets, min_overlap=args.min_overlap)
+        enr.to_csv(out / "module_enrichment.csv", index=False)
+        logger.info("Enrichment: %d module-set pairs tested", len(enr))
+
+
+def handle_isoform_residuals(args, logger: logging.Logger) -> None:
+    from bsvae.utils.hierarchy import load_tx2gene
+    from bsvae.utils.isoform import isoform_residuals
+
+    expr = _read_table(args.dataset)
+    tx2gene = load_tx2gene(path=args.tx2gene, feature_ids=list(expr.index.astype(str)),
+                           keep_version=args.keep_tx_version, logger=logger)
+    resid, stats = isoform_residuals(expr, tx2gene, min_isoforms=args.min_isoforms,
+                                     keep_version=args.keep_tx_version)
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    sep = "\t" if ".tsv" in [s.lower() for s in out.suffixes] else ","
+    resid.to_csv(out, sep=sep, compression="gzip" if out.suffix == ".gz" else None)
+    logger.info("Residual matrix (%d × %d) written to %s", *resid.shape, out)
+    if args.stats:
+        stats.to_csv(args.stats, sep="\t" if args.stats.endswith((".tsv", ".tsv.gz")) else ",")
+        logger.info("Per-transcript statistics written to %s", args.stats)
+
+
+def handle_consensus_modules(args, logger: logging.Logger) -> None:
+    import numpy as np
+    import pandas as pd
+    from bsvae.networks.postprocess import consensus_assignments, save_consensus
+
+    if len(args.modules) < 2:
+        raise SystemExit("consensus-modules needs at least two modules.csv files")
+    frames = [pd.read_csv(p) for p in args.modules]
+    ids = [str(f) for f in frames[0]["feature_id"]]
+    runs = []
+    for p, df in zip(args.modules, frames):
+        s = df.set_index(df["feature_id"].astype(str))["module"].reindex(ids)
+        if s.isna().any():
+            raise SystemExit(f"{p} does not cover the same features as {args.modules[0]}")
+        runs.append(s.astype(int).values)
+    res = consensus_assignments(runs, min_agreement=args.min_agreement, min_module_size=args.min_module_size)
+    save_consensus(res, args.output_dir, ids)
+    logger.info(
+        "Consensus of %d runs: %d modules, %d grey, mean agreement %.3f, run ARI to consensus %s",
+        res.n_runs, len(set(res.labels[res.labels >= 0])), int((res.labels < 0).sum()),
+        float(res.agreement.mean()), [round(a, 3) for a in res.run_ari],
+    )
+
+
 def handle_export_latents(args, logger: logging.Logger) -> None:
     import numpy as np
     from bsvae.utils.modelIO import load_model
@@ -445,6 +616,16 @@ def cli(argv=None):
         handle_extract_networks(args, logger)
     elif args.command == "extract-modules":
         handle_extract_modules(args, logger)
+    elif args.command == "isoform-specific":
+        handle_isoform_specific(args, logger)
+    elif args.command == "regress-covariates":
+        handle_regress_covariates(args, logger)
+    elif args.command == "module-quality":
+        handle_module_quality(args, logger)
+    elif args.command == "isoform-residuals":
+        handle_isoform_residuals(args, logger)
+    elif args.command == "consensus-modules":
+        handle_consensus_modules(args, logger)
     elif args.command == "export-latents":
         handle_export_latents(args, logger)
     elif args.command == "latent-analysis":

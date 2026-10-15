@@ -22,6 +22,24 @@ New
 * Transcript-level simulation family `nb_isoform_modules` (variable isoforms per gene, switching with mixing weight, null genes) and simulator fixes (paired RNG streams, gene-specific batch confounding and nonlinearity, null features, overlap truth, YAML configs).
 * `bsvae-benchmark`: resumable BSVAE-vs-WGCNA harness with a packaged R runner; BSVAE is over-clustered (3x the expected module count) and merged back by post-processing, which recovers small modules that a K equal to the true count absorbs.
 
+Simulation normalisation
+
+* Simulated counts are normalised with median-of-ratios size factors instead of plain CPM. Under CPM, features without module signal co-varied with each other (|r| ≈ 0.35) against the large modules, so the benchmark's "null" features were not null and grey-detection metrics measured a compositional artefact.
+* Post-processing applies `--min-gamma` to the merged responsibilities (after eigengene merging). A training-time or inference-time "background" mixture component was evaluated and rejected: trained jointly it absorbs every feature; applied at inference it never fires because null features are not latent-space outliers.
+
+Consensus and isoform-specific modules
+
+* `bsvae-networks consensus-modules` and the `bsvae_consensus` benchmark method: runs are aligned by module overlap, features take the majority label, and the agreement fraction is a stability score.
+* `bsvae-networks isoform-specific` and the `bsvae_isoform` benchmark method: each isoform's profile is regressed on its gene aggregate and the residual's kME to other modules flags isoform-specific membership (6–9× enrichment of switched isoforms on the simulations); `isoform-residuals` writes the residual matrix. Clustering residuals alone was evaluated and found uninformative (switched isoforms are too few per module to form clusters).
+* Optional size-invariant neighbour-contrastive latent loss (`--contrastive-strength`).
+* Optional diagonal (per-dimension) component covariance in the GMM prior (`--diag-covariance`).
+* `bsvae-networks module-quality`: kME summaries, GMT enrichment with q-values, and preservation in a second dataset (permutation Z-density and kME correlation).
+* `bsvae-networks regress-covariates` removes known sample covariates before training; `bsvae_regressed` / `wgcna_regressed` benchmark methods.
+
+Performance
+
+* Network edge lists are built with vectorised NumPy instead of Python double loops; the hierarchical loss evaluates all isoform pairs of a batch in one pass; `--amp` enables a bfloat16 forward pass on CUDA.
+
 Default changes
 
 * `--bal-type` entropy; KL per element; `--collapse-min-usage` 0.002; sweep `--free-bits` 0.0; extract-modules post-processing on with `--merge-cut-height` 0.4; GTEx-calibrated simulation defaults.

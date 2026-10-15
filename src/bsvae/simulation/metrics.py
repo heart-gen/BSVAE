@@ -362,3 +362,49 @@ def gene_level_metrics(
         "split_detection_rate": split_ok / split_n if split_n else float("nan"),
     }
     return out
+
+
+def switched_isoform_metrics(
+    pred_tx: "Dict[str, int] | Sequence[int]",
+    tx_ids: Sequence[str],
+    switch_table: "pd.DataFrame",
+) -> Dict[str, float]:
+    """
+    Isoform-specific module recovery from residual-module labels.
+
+    ``pred_tx`` labels transcripts whose *isoform-specific* (gene-programme-
+    removed) profile falls in a module; everything else is grey.  Against the
+    simulator's switch table this gives
+
+    * ``switched_recall``: fraction of switched transcripts placed in a module,
+    * ``switched_precision``: fraction of module members that are switched,
+    * ``switched_ari``: ARI between residual-module labels and the true
+      transcript module, over switched transcripts placed in a module,
+    * ``n_switched_true`` / ``n_called``.
+    """
+    import pandas as pd
+
+    if isinstance(pred_tx, dict):
+        pred = {str(k): int(v) for k, v in pred_tx.items()}
+    else:
+        pred = {str(t): int(v) for t, v in zip(tx_ids, pred_tx)}
+    st = switch_table.set_index(switch_table["transcript_id"].astype(str))
+    tx = [t for t in st.index if t in pred]
+    is_sw = st.loc[tx, "is_switched"].values.astype(int) == 1
+    called = np.array([pred[t] != GREY for t in tx])
+    n_sw, n_called = int(is_sw.sum()), int(called.sum())
+    tp = int((is_sw & called).sum())
+    out = {
+        "n_switched_true": n_sw,
+        "n_called": n_called,
+        "switched_recall": tp / n_sw if n_sw else float("nan"),
+        "switched_precision": tp / n_called if n_called else float("nan"),
+    }
+    both = is_sw & called
+    if both.sum() >= 2:
+        truth = st.loc[np.array(tx)[both], "tx_module"].values.astype(int)
+        labels = np.array([pred[t] for t in np.array(tx)[both]])
+        out["switched_ari"] = compute_ari(truth, labels)
+    else:
+        out["switched_ari"] = float("nan")
+    return out

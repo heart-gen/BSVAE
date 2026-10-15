@@ -200,3 +200,47 @@ def test_run_bsvae_over_clusters_then_merges(tmp_path):
     m = evaluate_labels(gt, res.labels.reindex(expr.index).values)
     assert m["ari_assigned"] > 0.8
     assert m["n_modules_pred"] <= 6
+
+
+def test_switched_isoform_metrics_toy():
+    from bsvae.simulation.metrics import switched_isoform_metrics
+    st = pd.DataFrame({
+        "transcript_id": ["a", "b", "c", "d", "e"],
+        "is_switched": [1, 1, 0, 0, 1],
+        "tx_module": [2, 3, 0, 0, 2],
+    })
+    pred = {"a": 0, "b": 1, "c": -1, "d": 0, "e": 0}     # d is a false call; b wrongly separated? no: b→1, a,e→0
+    m = switched_isoform_metrics(pred, list(pred), st)
+    assert m["n_switched_true"] == 3 and m["n_called"] == 4
+    assert m["switched_recall"] == 1.0 and m["switched_precision"] == 0.75
+    assert m["switched_ari"] == pytest.approx(1.0)
+
+
+def test_run_grid_isoform_and_consensus_methods(tmp_path):
+    cfg = {
+        "base_seed": 1, "reps": 1,
+        "generator": dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=150, n_samples=30, n_modules=3, switch_rate=0.3),
+        "grid": {"alpha": [1.0]},
+        "outputs": {"emit_gnvae_folds": False},
+    }
+    bs = {"epochs": 6, "warmup_epochs": 2, "transition_epochs": 1, "hidden_dims": [16], "no_cuda": True}
+    df = run_grid(cfg, tmp_path, methods=("bsvae_isoform", "bsvae_consensus"), seeds=[0], bsvae_cfg=bs, consensus_runs=2)
+    assert set(df["method"]) == {"bsvae_isoform", "bsvae_consensus"}
+    assert (df["status"] == "ok").all()
+    res = df[df["method"] == "bsvae_isoform"].iloc[0]
+    assert np.isfinite(res["switched_recall"]) and "switched_precision" in df.columns
+    cons = df[df["method"] == "bsvae_consensus"].iloc[0]
+    assert cons["m_n_runs"] == 2 and np.isfinite(cons["ari_all"])
+
+
+def test_run_grid_regressed_method(tmp_path):
+    from bsvae.simulation.scenario import DEFAULT_CONFIG
+    cfg = {
+        "base_seed": 1, "reps": 1,
+        "generator": dict(DEFAULT_CONFIG["generator"], n_features=200, n_samples=40, n_modules=3,
+                          confounding="strong", overlap_rate=0.0),
+        "grid": {}, "outputs": {"emit_gnvae_folds": False},
+    }
+    bs = {"epochs": 6, "warmup_epochs": 2, "transition_epochs": 1, "hidden_dims": [16], "no_cuda": True}
+    df = run_grid(cfg, tmp_path, methods=("bsvae_regressed",), seeds=[0], bsvae_cfg=bs)
+    assert df["method"].tolist() == ["bsvae_regressed"] and (df["status"] == "ok").all()

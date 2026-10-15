@@ -443,3 +443,46 @@ def test_latent_corr_loss_is_shift_invariant():
     a = latent_corr_loss(x, mu)
     b = latent_corr_loss(x, mu + 10.0)   # shared offset must not change the loss
     assert torch.isclose(a, b, atol=1e-5)
+
+
+def test_neighbour_contrastive_loss_pulls_correlated_features_together():
+    from bsvae.models.losses import neighbour_contrastive_loss
+    torch.manual_seed(0)
+    f1, f2 = torch.randn(40), torch.randn(40)
+    x = torch.stack([f1 + 0.1 * torch.randn(40) for _ in range(4)] + [f2 + 0.1 * torch.randn(40) for _ in range(4)])
+    good = torch.tensor([[1.0, 0.0]] * 4 + [[0.0, 1.0]] * 4) + 0.01 * torch.randn(8, 2)
+    bad = torch.randn(8, 2)
+    assert neighbour_contrastive_loss(x, good, k_pos=3) < neighbour_contrastive_loss(x, bad, k_pos=3)
+    mu = torch.randn(8, 2, requires_grad=True)
+    neighbour_contrastive_loss(x, mu, k_pos=3).backward()
+    assert mu.grad is not None and torch.isfinite(mu.grad).all()
+    # No positives above the correlation floor → zero loss.
+    assert neighbour_contrastive_loss(torch.randn(8, 40), mu.detach(), min_corr=0.99).item() == 0.0
+
+
+def test_diag_covariance_prior_shapes_init_and_kl():
+    torch.manual_seed(0)
+    prior = GaussianMixturePrior(n_components=3, n_latent=4, diag_covariance=True)
+    assert prior.sigma2_raw.shape == (3, 4) and prior.sigma2_k.shape == (3, 4)
+    mu = torch.randn(10, 4); logvar = torch.zeros(10, 4)
+    gamma = prior.posterior_weights(mu, logvar)
+    assert gamma.shape == (10, 3) and torch.allclose(gamma.sum(1), torch.ones(10), atol=1e-5)
+    # With equal per-dimension variances the diagonal model matches the isotropic one.
+    iso = GaussianMixturePrior(n_components=3, n_latent=4, diag_covariance=False)
+    with torch.no_grad():
+        iso.mu_k.copy_(prior.mu_k)
+    assert torch.allclose(iso.expected_component_log_prob(mu, logvar), prior.expected_component_log_prob(mu, logvar), atol=1e-4)
+    kl = kl_vade(mu, logvar, gamma, prior.mu_k, prior.sigma2_k, prior.log_pi)
+    assert torch.isfinite(kl)
+    prior.kmeans_init_(torch.randn(50, 4) * torch.tensor([1.0, 0.1, 1.0, 0.1]))
+    s2 = prior.sigma2_k.detach()
+    assert (s2[:, 1] < s2[:, 0]).all()        # narrower dimensions learned narrower (floored at sigma_min²)
+    assert prior.sigma_k_scalar.shape == (3,) and prior.separation_loss().shape == ()
+
+
+def test_diag_covariance_model_roundtrip(tmp_path):
+    from bsvae.utils.modelIO import load_model, save_model
+    model = GMMModuleVAE(n_features=12, n_latent=4, n_modules=3, hidden_dims=[8], use_batch_norm=False, diag_covariance=True)
+    save_model(model, str(tmp_path))
+    loaded = load_model(str(tmp_path), is_gpu=False)
+    assert loaded.gmm_prior.diag_covariance and loaded.gmm_prior.sigma2_raw.shape == (3, 4)

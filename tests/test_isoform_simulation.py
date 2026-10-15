@@ -166,3 +166,23 @@ def test_generate_scenario_isoform_writes_truth_files(tmp_path):
     tr = pd.read_csv(run_dir / "gnvae" / "fold_0" / "X_train.tsv.gz", sep="\t", index_col=0)
     te = pd.read_csv(run_dir / "gnvae" / "fold_0" / "X_test.tsv.gz", sep="\t", index_col=0)
     assert tr.shape[0] == te.shape[0] and tr.shape[1] + te.shape[1] == 20
+
+
+def test_median_ratio_normalisation_removes_compositional_correlation():
+    from bsvae.simulation.scenario import normalize_counts
+    base = _nb_params(n_features=600, n_samples=80, null_fraction=0.15, signal_scale=2.5, overlap_rate=0.0)
+    def null_corr(method):
+        r = simulate_params(dict(base, normalization=method), seed=5)
+        X = r.expr_features_x_samples.values
+        null = r.modules_hard["module"].values == -1
+        Xz = (X - X.mean(1, keepdims=True)) / X.std(1, keepdims=True)
+        C = np.corrcoef(Xz[null])
+        return float(np.abs(C[np.triu_indices(null.sum(), 1)]).mean())
+    assert null_corr("median_ratio") < 0.5 * null_corr("cpm")
+    counts = np.random.default_rng(0).poisson(5, size=(10, 50)).astype(float)
+    counts[0] *= 4                      # one sample with a 4x larger library
+    out = normalize_counts(counts, "median_ratio")
+    assert out.shape == counts.shape and np.isfinite(out).all()
+    assert abs(out[0].mean() - out[1:].mean()) < 0.3    # library size removed
+    with pytest.raises(ValueError):
+        normalize_counts(counts, "tmm")

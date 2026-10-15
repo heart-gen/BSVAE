@@ -71,6 +71,9 @@ class Trainer:
     collapse_threshold : float or None
         Deprecated relative floor (threshold / K). Ignored with a warning;
         use ``collapse_min_usage``.
+    amp : bool
+        Mixed precision (bfloat16 autocast) for the forward pass on CUDA;
+        losses are computed in float32. Default: False.
     """
 
     def __init__(
@@ -92,6 +95,7 @@ class Trainer:
         seed: int = 0,
         collapse_threshold: Optional[float] = None,
         mu_buffer_size: Optional[int] = None,
+        amp: bool = False,
     ):
         self.device = device
         self.model = model.to(device)
@@ -108,6 +112,8 @@ class Trainer:
         self.collapse_min_usage = float(collapse_min_usage)
         self.collapse_noise_scale = collapse_noise_scale
         self.seed = int(seed)
+        self.amp = bool(amp) and device.type == "cuda"
+        self._scaler = torch.amp.GradScaler("cuda") if self.amp else None
         if collapse_threshold is not None:
             self.logger.warning(
                 "collapse_threshold is deprecated and ignored; use collapse_min_usage "
@@ -290,7 +296,7 @@ class Trainer:
             D = gmm.D
             for i, k in enumerate(dead):
                 best = live_sorted[i % len(live_sorted)]
-                sigma_best = float(gmm.sigma2_k[best].sqrt())
+                sigma_best = float(gmm.sigma_k_scalar[best])
                 noise = torch.randn(D, device=gmm.mu_k.device) * sigma_best * self.collapse_noise_scale
                 gmm.mu_k.data[k] = gmm.mu_k.data[best] + noise
                 gmm.sigma2_raw.data[k] = gmm.sigma2_raw.data[best]
@@ -399,7 +405,10 @@ class Trainer:
         return epoch_loss / max(len(data_loader), 1)
 
     def _train_iteration(self, x, storer, epoch, in_warmup, gmm_weight, feature_idx=None):
-        recon_x, mu, logvar, z, gamma = self.model(x)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=self.amp):
+            recon_x, mu, logvar, z, gamma = self.model(x)
+        if self.amp:   # losses in float32 for the KL / log-softmax terms
+            recon_x, mu, logvar, gamma = recon_x.float(), mu.float(), logvar.float(), gamma.float()
 
         # Soft usage is accumulated on device and reduced once per epoch
         # (γ from the untrained prior during warmup is not informative).
@@ -422,8 +431,13 @@ class Trainer:
             )
 
         self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+        if self._scaler is not None:
+            self._scaler.scale(loss).backward()
+            self._scaler.step(self.optimizer)
+            self._scaler.update()
+        else:
+            loss.backward()
+            self.optimizer.step()
         return loss.item()
 
     def _resolve_feature_idx(self, feat_ids, data_loader) -> torch.Tensor:

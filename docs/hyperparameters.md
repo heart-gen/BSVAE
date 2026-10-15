@@ -13,6 +13,7 @@ The active training workflow is configured through explicit CLI flags, primarily
 - `--sigma-min` default `0.3`
 - `--use-batch-norm` / `--no-batch-norm`
 - `--normalize-input`
+- `--diag-covariance`
 
 ## Optimization And Schedule
 
@@ -41,6 +42,7 @@ The active training workflow is configured through explicit CLI flags, primarily
 - `--pi-entropy-strength` default `0.0`
 - `--hier-strength` default `0.0`
 - `--hier-margin` default `1.0`, `--no-hier-corr-weight`
+- `--contrastive-strength` default `0.0`: size-invariant neighbour-contrastive alignment of the latent; on the reference scenarios values of 0.5–1 raised assigned-feature ARI by 0.03–0.04 but left more features unassigned, so it is off by default
 - `--corr-strength` default `0.0`
 - `--latent-corr-strength` default `0.0`
 - `--masked-recon`
