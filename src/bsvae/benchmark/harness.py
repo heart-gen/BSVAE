@@ -33,7 +33,7 @@ from bsvae.simulation.scenario import expand_scenarios, generate_scenario, load_
 logger = logging.getLogger(__name__)
 
 METHODS = ("bsvae", "wgcna")
-KNOWN_METHODS = ("bsvae", "wgcna", "wgcna_signed", "wgcna_unsigned")
+KNOWN_METHODS = ("bsvae", "bsvae_consensus", "wgcna", "wgcna_signed", "wgcna_unsigned")
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +128,7 @@ def run_one(
     postprocess: bool = True,
     device=None,
     over_cluster_factor: Optional[float] = None,
+    consensus_runs: int = 3,
 ) -> tuple[MethodResult, Dict]:
     truth = load_truth(run_dir)
     expr = pd.read_csv(truth["expr_path"], sep="\t", index_col=0)
@@ -151,6 +152,33 @@ def run_one(
             train_cfg={k: v for k, v in cfg.items() if not k.startswith("_")},
             post_cfg=post_cfg, device=device, postprocess=postprocess, **kwargs,
         )
+    elif method == "bsvae_consensus":
+        from bsvae.networks.postprocess import consensus_assignments
+        cfg = {k: v for k, v in (bsvae_cfg or {}).items() if not k.startswith("_")}
+        tx2gene = None
+        if "tx2gene" in truth:
+            tx2gene = pd.DataFrame(list(truth["tx2gene"].items()), columns=["transcript_id", "gene_id"])
+        kwargs = {"over_cluster_factor": over_cluster_factor} if over_cluster_factor is not None else {}
+        runs, t_total = [], 0.0
+        for i in range(int(consensus_runs)):
+            sub = run_bsvae(
+                expr, n_modules=n_modules, seed=seed * 1000 + i, workdir=out_dir / f"run_{i}",
+                tx2gene=tx2gene, train_cfg=cfg, post_cfg=post_cfg, device=device,
+                postprocess=postprocess, **kwargs,
+            )
+            t_total += sub.runtime_s
+            if sub.status == "ok":
+                runs.append(sub.labels.reindex(expr.index).fillna(-1).astype(int).values)
+        if len(runs) < 2:
+            result = MethodResult("bsvae_consensus", "failed", runtime_s=t_total, message="fewer than two successful runs")
+        else:
+            cons = consensus_assignments(runs, min_agreement=0.5, min_module_size=(post_cfg or {}).get("min_module_size", 10))
+            result = MethodResult(
+                "bsvae_consensus", "ok", labels=pd.Series(cons.labels, index=expr.index.astype(str), name="module"),
+                runtime_s=t_total,
+                params={"n_runs": cons.n_runs, "run_ari_to_consensus": cons.run_ari,
+                        "mean_agreement": float(cons.agreement.mean())},
+            )
     elif method in ("wgcna", "wgcna_unsigned", "wgcna_signed"):
         cfg = dict(WGCNA_DEFAULTS)
         cfg.update(wgcna_cfg or {})
@@ -191,6 +219,7 @@ def run_grid(
     scenario_ids: Optional[Sequence[str]] = None,
     device=None,
     over_cluster_factor: Optional[float] = None,
+    consensus_runs: int = 3,
 ) -> pd.DataFrame:
     """Run every (scenario, rep, method, seed) and return the tidy results table."""
     cfg = load_config(config) if not isinstance(config, dict) else config
@@ -232,7 +261,7 @@ def run_grid(
                     result, metrics = run_one(
                         run_dir, method, seed, k_mode=k_mode, bsvae_cfg=bsvae_cfg,
                         wgcna_cfg=wgcna_cfg, post_cfg=post_cfg, postprocess=postprocess, device=device,
-                        over_cluster_factor=over_cluster_factor,
+                        over_cluster_factor=over_cluster_factor, consensus_runs=consensus_runs,
                     )
                     row = {
                         "scenario_id": sid, "rep": rep, "method": method, "seed": seed,
@@ -244,7 +273,8 @@ def run_grid(
                     row.update(summary)
                     row.update(metrics)
                     row.update(_flatten_params({k: v for k, v in result.params.items()
-                                                if k in ("soft_power", "n_modules", "n_grey", "n_components_trained")}, prefix="m_"))
+                                                if k in ("soft_power", "n_modules", "n_grey", "n_components_trained",
+                                                         "n_runs", "mean_agreement")}, prefix="m_"))
                     _append_row(results_path, row)
                     done.add(key)
     df = pd.read_csv(results_path, sep="\t") if results_path.exists() else pd.DataFrame()

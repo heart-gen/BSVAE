@@ -5,6 +5,7 @@ Subcommands
 -----------
   extract-networks   Method A (μ cosine) or Method B (FAISS γ-kNN)
   extract-modules    GMM soft/hard assignments + soft-weighted eigengenes
+  consensus-modules  Consensus (majority vote) over several extract-modules runs
   export-latents     Save μ, logσ², γ as NPZ
   latent-analysis    UMAP, clustering, covariate correlation
 """
@@ -94,6 +95,19 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Aggregate isoform-level γ to gene level by averaging across "
                          "isoforms per gene. Saves gamma_gene.npz and "
                          "hard_assignments_gene.npz. Requires --tx2gene.")
+
+    # ------------------------------------------------------------------
+    # consensus-modules
+    # ------------------------------------------------------------------
+    cm = subs.add_parser("consensus-modules",
+                         help="Consensus of several extract-modules runs (e.g. different seeds).")
+    cm.add_argument("--modules", nargs="+", required=True,
+                    help="Two or more modules.csv files (feature_id, module) from extract-modules.")
+    cm.add_argument("--output-dir", required=True)
+    cm.add_argument("--min-agreement", type=float, default=0.5,
+                    help="Features whose consensus label is supported by fewer than this fraction "
+                         "of runs are unassigned (default: 0.5).")
+    cm.add_argument("--min-module-size", type=int, default=10)
 
     # ------------------------------------------------------------------
     # export-latents
@@ -322,6 +336,30 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
         logger.info("Leiden fallback modules saved.")
 
 
+def handle_consensus_modules(args, logger: logging.Logger) -> None:
+    import numpy as np
+    import pandas as pd
+    from bsvae.networks.postprocess import consensus_assignments, save_consensus
+
+    if len(args.modules) < 2:
+        raise SystemExit("consensus-modules needs at least two modules.csv files")
+    frames = [pd.read_csv(p) for p in args.modules]
+    ids = [str(f) for f in frames[0]["feature_id"]]
+    runs = []
+    for p, df in zip(args.modules, frames):
+        s = df.set_index(df["feature_id"].astype(str))["module"].reindex(ids)
+        if s.isna().any():
+            raise SystemExit(f"{p} does not cover the same features as {args.modules[0]}")
+        runs.append(s.astype(int).values)
+    res = consensus_assignments(runs, min_agreement=args.min_agreement, min_module_size=args.min_module_size)
+    save_consensus(res, args.output_dir, ids)
+    logger.info(
+        "Consensus of %d runs: %d modules, %d grey, mean agreement %.3f, run ARI to consensus %s",
+        res.n_runs, len(set(res.labels[res.labels >= 0])), int((res.labels < 0).sum()),
+        float(res.agreement.mean()), [round(a, 3) for a in res.run_ari],
+    )
+
+
 def handle_export_latents(args, logger: logging.Logger) -> None:
     import numpy as np
     from bsvae.utils.modelIO import load_model
@@ -445,6 +483,8 @@ def cli(argv=None):
         handle_extract_networks(args, logger)
     elif args.command == "extract-modules":
         handle_extract_modules(args, logger)
+    elif args.command == "consensus-modules":
+        handle_consensus_modules(args, logger)
     elif args.command == "export-latents":
         handle_export_latents(args, logger)
     elif args.command == "latent-analysis":

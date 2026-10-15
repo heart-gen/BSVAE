@@ -455,3 +455,132 @@ __all__ = [
     "save_postprocess",
     "labels_to_names",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Consensus over runs (seeds)
+# ---------------------------------------------------------------------------
+
+def align_labels(reference: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    """
+    Relabel ``labels`` so that its modules match ``reference`` modules by
+    maximum overlap (Hungarian assignment on the contingency table).  Modules
+    without a match keep fresh ids above the reference range; grey stays -1.
+    """
+    from scipy.optimize import linear_sum_assignment
+
+    reference = np.asarray(reference).astype(np.int64)
+    labels = np.asarray(labels).astype(np.int64)
+    ref_ids = sorted(int(k) for k in np.unique(reference) if k >= 0)
+    lab_ids = sorted(int(k) for k in np.unique(labels) if k >= 0)
+    out = np.full_like(labels, GREY)
+    if not ref_ids or not lab_ids:
+        if lab_ids:
+            for i, k in enumerate(lab_ids):
+                out[labels == k] = i
+        return out
+    table = np.zeros((len(lab_ids), len(ref_ids)), dtype=np.int64)
+    for i, a in enumerate(lab_ids):
+        la = labels == a
+        for j, b in enumerate(ref_ids):
+            table[i, j] = int((la & (reference == b)).sum())
+    rows, cols = linear_sum_assignment(-table)
+    mapping: Dict[int, int] = {}
+    for i, j in zip(rows, cols):
+        if table[i, j] > 0:
+            mapping[lab_ids[i]] = ref_ids[j]
+    next_id = (max(ref_ids) + 1) if ref_ids else 0
+    for a in lab_ids:
+        if a not in mapping:
+            mapping[a] = next_id
+            next_id += 1
+    for a, b in mapping.items():
+        out[labels == a] = b
+    return out
+
+
+@dataclass
+class ConsensusResult:
+    labels: np.ndarray            # (F,) int, -1 = grey (no majority)
+    agreement: np.ndarray         # (F,) fraction of runs agreeing with the consensus label
+    aligned: np.ndarray           # (R, F) runs after alignment
+    run_ari: List[float]          # ARI of each run against the consensus
+    n_runs: int
+
+
+def consensus_assignments(
+    label_runs: Sequence[np.ndarray],
+    min_agreement: float = 0.5,
+    min_module_size: int = 10,
+) -> ConsensusResult:
+    """
+    Consensus module assignment across several runs (e.g. seeds).
+
+    Runs are aligned one at a time to the running consensus by maximum
+    overlap, then each feature takes the label chosen by the most runs
+    (grey votes count).  Features whose winning label is supported by fewer
+    than ``min_agreement`` of the runs are grey, and modules that end up
+    smaller than ``min_module_size`` are dissolved to grey.  The per-feature
+    ``agreement`` doubles as a stability score.
+    """
+    from sklearn.metrics import adjusted_rand_score
+
+    runs = [np.asarray(r).astype(np.int64) for r in label_runs]
+    if not runs:
+        raise ValueError("consensus_assignments needs at least one run")
+    F = len(runs[0])
+    if any(len(r) != F for r in runs):
+        raise ValueError("all runs must have the same number of features")
+    aligned = [_relabel_compact(runs[0])[0]]
+    consensus = aligned[0].copy()
+    for r in runs[1:]:
+        a = align_labels(consensus, r)
+        aligned.append(a)
+        consensus = _vote(np.stack(aligned))[0]
+    A = np.stack(aligned)
+    labels, agreement = _vote(A)
+    labels[agreement < float(min_agreement)] = GREY
+    if min_module_size > 1:
+        for k in [k for k in np.unique(labels) if k >= 0]:
+            if (labels == k).sum() < int(min_module_size):
+                labels[labels == k] = GREY
+    labels, _ = _relabel_compact(labels)
+    run_ari = [float(adjusted_rand_score(labels, a)) for a in A]
+    return ConsensusResult(labels=labels, agreement=agreement, aligned=A, run_ari=run_ari, n_runs=len(runs))
+
+
+def _vote(aligned: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-feature majority label and the fraction of runs supporting it."""
+    R, F = aligned.shape
+    labels = np.full(F, GREY, dtype=np.int64)
+    agreement = np.zeros(F, dtype=np.float64)
+    for i in range(F):
+        vals, counts = np.unique(aligned[:, i], return_counts=True)
+        j = int(counts.argmax())
+        labels[i] = int(vals[j])
+        agreement[i] = counts[j] / R
+    return labels, agreement
+
+
+def save_consensus(result: ConsensusResult, output_dir: str | Path, feature_ids: Sequence[str]) -> None:
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "feature_id": [str(f) for f in feature_ids],
+            "module": result.labels.astype(int),
+            "module_label": labels_to_names(result.labels),
+            "agreement": np.round(result.agreement, 4),
+        }
+    ).to_csv(out / "consensus_modules.csv", index=False)
+    with open(out / "consensus_summary.json", "w") as f:
+        json.dump(
+            {"n_runs": result.n_runs, "run_ari_to_consensus": result.run_ari,
+             "n_modules": int(len(set(result.labels[result.labels >= 0]))),
+             "n_grey": int((result.labels == GREY).sum()),
+             "mean_agreement": float(result.agreement.mean())},
+            f, indent=2,
+        )
+
+
+__all__ += ["align_labels", "consensus_assignments", "ConsensusResult", "save_consensus"]
