@@ -201,7 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Sample counts per input as name=N for sqrt(N) weighting (default: equal weights).")
     tc.add_argument("--output", required=True)
     tc.add_argument("--alpha", type=float, default=0.05)
-    tc.add_argument("--min-kme", type=float, default=0.2, help="Mean |kME| across cohorts required for a call.")
+    tc.add_argument("--min-kme", type=float, default=0.25, help="Mean |kME| across cohorts required for a call.")
     tc.add_argument("--min-cohorts", type=int, default=2)
 
     # ------------------------------------------------------------------

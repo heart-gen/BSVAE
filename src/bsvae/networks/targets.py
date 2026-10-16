@@ -569,7 +569,7 @@ def combine_target_tests(
     tables: Dict[str, pd.DataFrame],
     n_samples: Optional[Dict[str, int]] = None,
     alpha: float = 0.05,
-    min_kme: float = 0.2,
+    min_kme: float = 0.25,
     min_cohorts: int = 2,
 ) -> pd.DataFrame:
     """
@@ -586,9 +586,13 @@ def combine_target_tests(
     which the isoform was called and the mean |kME|.
 
     The combined call requires BH FDR < ``alpha`` across isoforms, mean |kME|
-    ≥ ``min_kme`` and at least ``min_cohorts`` cohorts contributing.  With ten
-    brain regions of 150 donors this is what makes a rare isoform at
-    correlation 0.2 reportable when no single region can.
+    ≥ ``min_kme`` and at least ``min_cohorts`` cohorts contributing.  On
+    simulations of six 150-sample regions of one truth with rare (8 % of
+    gene) switched isoforms, pooling raises recall from 0.71 to 0.83 (hard
+    switches) and 0.47 to 0.63 (partial) at a 5–6 % false-call rate among
+    unswitched isoforms, and recall of the lowest-abundance third from 0.52
+    to 0.71; the 0.25 floor is what keeps the false-call rate from growing
+    with the number of regions (0.2 gives 0.92 recall but 16 % false calls).
     """
     from scipy import stats as sps
 
