@@ -32,6 +32,18 @@ Calibration
 * `isoform_specific_calls(loo_eigengene=True)` recomputes a module's eigengene without the tested gene's transcripts before scoring them (leave-one-gene-out), removing the selection bias of a transcript contributing to the eigengene it is tested against. `scripts/benchmark_calibration.py` checks the residual p-values under abundance-only null simulations (type-I error at 0.05, KS against uniform) with and without the correction, and the held-out replication of transcriptome-wide calls (labels from one half of the samples, calls validated on the other half). `summarize` reports percentile-bootstrap 95 % intervals over runs.
 * Simulated cohorts can differ in their switches (`switch_keep_frac`, `switch_extra_rate`) and share donors (`donor_seed`, `donor_effect_sd`: donor-level module-factor offsets common to every region). `target-genes-combine` applies Strube's correction for dependent cohorts by default (`--correlation empirical`, the between-cohort correlation of z-scores estimated on null-like isoforms) and accepts `--min-called`.
 
+Pooling under heterogeneity and shared donors (`scripts/benchmark_pooling.py`, six 150-sample regions, 2 seeds)
+
+* Shared switches: single region recall 0.75 at 7 % FPR; six regions pooled 0.82–0.83 at 3.6 % (Strube-corrected) to 5.1 % (uncorrected) FPR; with the same donors in every region the uncorrected FPR rises to 8.0 % and the correction brings it to 6.0 %. Observed PPV among calls (target set half switched) 0.72–0.77; projected to 5 % prevalence 0.45–0.62.
+* Partially shared switches: isoforms switched in 4–6 of 6 regions are recovered at 0.63–0.88 by pooling, those switched in one region at 0.04–0.14 (a single region recovers 0.14–0.24 of them); the corrected pooling is conservative here (recall 0.18 vs 0.30 uncorrected) because the between-region correlation estimate also absorbs partially shared true signal. Projected PPV at 5 % prevalence 0.22–0.27.
+* Region-specific switches: pooling does not help (recall 0.06–0.22) and per-region calls must be read alongside the pooled table (`n_called`, `modules` columns). Projected PPV at 5 % prevalence 0.11–0.18.
+
+Calibration (`scripts/benchmark_calibration.py`, 3 seeds)
+
+* Held-out replication: with modules learned on one half of the samples, 75–89 % of residual-scan calls on switched isoforms replicate on the other half with the same target module, against 70–78 % of calls on unswitched isoforms; the null call rate on the held-out half is 1.8–1.9 %.
+* PPV next to recall: at 1.2 % switch prevalence the transcriptome-wide scan has recall 0.53, FPR 3.6 % and PPV 0.15; at 4.1 % prevalence recall 0.71, FPR 3.4 %, PPV 0.48. False-positive rates must not be read as false-discovery rates when switches are rare.
+* [null type-I error with and without leave-one-gene-out eigengenes: see docs when the run completes]
+
 Cross-cohort targeted tests
 
 * `bsvae-networks target-genes-combine` pools `target-genes` tables across cohorts, tissues or regions with Stouffer's method (√n weights), reporting per-cohort modules and a combined FDR, so rare isoforms that no single 150-sample region can call become reportable.

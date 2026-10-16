@@ -97,7 +97,10 @@ def main(argv=None):
         for label, lab in (("raw", raw), ("coherent", coh)):
             for variant, loo in (("plain", False), ("leave_one_gene_out", True)):
                 calls = isoform_specific_calls(expr, t2g, lab, fids, loo_eigengene=loo)
-                rows.extend(null_rows(calls, label, seed, variant))
+                calls.to_csv(outdir / f"seed_{seed}" / f"null_calls_{label}_{variant}.tsv", sep="\t")
+                new_rows = null_rows(calls, label, seed, variant)
+                rows.extend(new_rows)
+                logger.info("null | %s | %s: %d strata", label, variant, len(new_rows))
         pd.DataFrame(rows).to_csv(outdir / "results.tsv", sep="\t", index=False)
         # ---- held-out replication and PPV at each switch prevalence ----
         for rate in rates:
