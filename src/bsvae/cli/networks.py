@@ -95,10 +95,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Reassign features by module membership (kME) after merging. Requires --expr.")
     mp.add_argument("--min-kme", type=float, default=0.3)
     mp.add_argument("--kme-margin", type=float, default=0.1)
-    mp.add_argument("--gene-coherence", action="store_true", default=False,
-                    help="After post-processing, move an isoform that sits in a module other than its gene's "
-                         "majority module back to the gene's module unless its gene-programme-removed residual "
-                         "supports the other membership (kME >= --min-kme, BH FDR < 0.05). Requires --expr and --tx2gene.")
+    mp.add_argument("--gene-coherence", action="store_true", default=True, help=argparse.SUPPRESS)
+    mp.add_argument("--no-gene-coherence", dest="gene_coherence", action="store_false",
+                    help="Disable the default gene-coherence annotation policy (applied whenever --expr and "
+                         "--tx2gene are given): an isoform that sits in a module other than its gene's majority "
+                         "module is moved back to the gene's module unless its gene-programme-removed residual "
+                         "supports the other membership (kME >= --min-kme, BH FDR < 0.05). The raw labels are "
+                         "always written to modules_raw.csv.")
+    mp.add_argument("--no-isoform-calls", action="store_true", default=False,
+                    help="Skip the isoform-specific membership scan (isoform_specific.csv) that runs on the raw "
+                         "labels whenever --expr and --tx2gene are given.")
     mp.add_argument("--tx2gene", type=str, default=None,
                     help="TSV (transcript_id, gene_id) for isoform-to-gene aggregation.")
     mp.add_argument("--aggregate-to-gene", action="store_true", default=False,
@@ -390,18 +396,33 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
             min_kme=args.min_kme,
             kme_margin=args.kme_margin,
         )
-        if args.gene_coherence:
-            if expr is None or not args.tx2gene:
-                logger.warning("--gene-coherence requires --expr and --tx2gene; skipping.")
-            else:
+        gene_aware = expr is not None and bool(args.tx2gene)
+        raw_labels = post.labels.copy()
+        if gene_aware:
+            import pandas as pd
+            from bsvae.utils.hierarchy import load_tx2gene
+            out_dir = Path(args.output_dir); out_dir.mkdir(parents=True, exist_ok=True)
+            t2g = load_tx2gene(path=args.tx2gene, feature_ids=feature_ids, logger=logger)
+            pd.DataFrame({"feature_id": feature_ids, "module": raw_labels,
+                          "module_label": ["grey" if m < 0 else f"M{m}" for m in raw_labels]}).to_csv(out_dir / "modules_raw.csv", index=False)
+            if not args.no_isoform_calls:
+                # Two-output workflow: the residual scan over every multi-isoform transcript runs on the raw
+                # labels, so the coherence policy below can never hide a candidate from it.
+                from bsvae.utils.isoform import isoform_specific_calls
+                calls = isoform_specific_calls(expr, t2g, raw_labels, feature_ids, min_kme=args.min_kme)
+                calls.to_csv(out_dir / "isoform_specific.csv")
+                logger.info("Isoform-specific scan: %d of %d multi-isoform transcripts called (isoform_specific.csv)",
+                            int(calls["called"].sum()), len(calls))
+            if args.gene_coherence:
                 from bsvae.networks.postprocess import enforce_gene_coherence
-                from bsvae.utils.hierarchy import load_tx2gene
-                t2g = load_tx2gene(path=args.tx2gene, feature_ids=feature_ids, logger=logger)
-                new_labels, table = enforce_gene_coherence(post.labels, expr, feature_ids, t2g, min_kme=args.min_kme)
+                new_labels, table = enforce_gene_coherence(raw_labels, expr, feature_ids, t2g, min_kme=args.min_kme)
                 post.labels = new_labels
                 post.n_grey = int((new_labels < 0).sum())
-                Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-                table.to_csv(Path(args.output_dir) / "gene_coherence.csv")
+                table.to_csv(out_dir / "gene_coherence.csv")
+                logger.info("Gene coherence: %d divergent isoforms tested, %d moved to their gene's module",
+                            len(table), int((~table["kept"]).sum()) if len(table) else 0)
+        elif args.gene_coherence and (args.tx2gene or expr is not None):
+            logger.warning("Gene coherence and the isoform-specific scan need both --expr and --tx2gene; skipped.")
         save_postprocess(post, args.output_dir, feature_ids)
         gamma_final = post.gamma
         labels_final = post.labels

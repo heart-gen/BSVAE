@@ -141,3 +141,24 @@ def test_linear_input_scale_sums_siblings_directly():
     np.testing.assert_allclose(resid.loc["t1"].values, ac - slope * sc, atol=1e-8)
     with pytest.raises(ValueError):
         isoform_residuals(expr, t2g, input_scale="counts")
+
+
+def test_calls_annotate_label_discordance_without_filtering():
+    """Every multi-isoform transcript is tested; discordant raw labels are an annotation."""
+    from bsvae.utils.isoform import isoform_specific_calls
+    p = dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=200, n_samples=60, n_modules=4, switch_rate=0.3, alpha=1.0,
+             signal_scale=3.0, null_fraction=0.0)
+    r = simulate_params(p, seed=9)
+    expr = r.expr_features_x_samples
+    t2g = dict(zip(r.extra_truth["tx2gene.tsv"]["transcript_id"], r.extra_truth["tx2gene.tsv"]["gene_id"]))
+    truth = r.modules_hard.set_index("feature_id")["module"].reindex(expr.index).values
+    st = r.extra_truth["switch_table.tsv.gz"].set_index("transcript_id")
+    n_multi = int((st["gene_id"].map(st.groupby("gene_id").size()) >= 2).sum())
+    calls = isoform_specific_calls(expr, t2g, truth, list(expr.index))
+    assert len(calls) == n_multi
+    assert {"isoform_module", "label_discordant"} <= set(calls.columns)
+    disc = calls["label_discordant"].values
+    sw = st.loc[calls.index, "is_switched"].values == 1
+    assert (disc == sw).mean() > 0.95                       # oracle labels: discordance == switched
+    # concordant transcripts are still tested and can be called
+    assert calls.loc[~disc, "p_value"].notna().all()

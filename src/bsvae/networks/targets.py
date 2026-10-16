@@ -461,6 +461,7 @@ def target_gene_tests(
         "zero_fraction": (expr.reindex(targets.index).values == 0).mean(axis=1),
         "gene_module": gm,
         "isoform_module": own,
+        "label_discordant": (own >= 0) & (gm >= 0) & (own != gm),
         "kme_gene_module": kme_own,
         "best_other_module": [cols[j] for j in best_j],
         "kme_residual": best,

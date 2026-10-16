@@ -34,8 +34,31 @@ from bsvae.simulation.scenario import expand_scenarios, generate_scenario, load_
 logger = logging.getLogger(__name__)
 
 METHODS = ("bsvae", "wgcna")
-KNOWN_METHODS = ("bsvae", "bsvae_consensus", "bsvae_isoform", "bsvae_regressed", "wgcna", "wgcna_signed", "wgcna_unsigned", "wgcna_regressed",
-                 "bsvae_coherent", "bsvae_hier", "usage_network", "ica", "nmf", "acorde", "twn")
+KNOWN_METHODS = ("bsvae", "bsvae_raw", "bsvae_coherent", "bsvae_hier", "bsvae_consensus", "bsvae_isoform", "bsvae_regressed",
+                 "wgcna", "wgcna_raw", "wgcna_coherent", "wgcna_signed", "wgcna_unsigned", "wgcna_regressed",
+                 "usage_network", "ica", "nmf", "acorde", "twn")
+# Gene coherence is the default annotation policy whenever the scenario has transcript structure:
+# ``bsvae`` / ``wgcna`` apply it, ``bsvae_raw`` / ``wgcna_raw`` do not, ``*_coherent`` are explicit aliases.
+COHERENT_DEFAULT = {"bsvae": True, "bsvae_raw": False, "bsvae_coherent": True, "bsvae_regressed": True,
+                    "wgcna": True, "wgcna_raw": False, "wgcna_coherent": True, "wgcna_signed": True,
+                    "wgcna_unsigned": True, "wgcna_regressed": True}
+
+
+def _apply_coherence(result: MethodResult, expr: pd.DataFrame, truth: Dict, post_cfg: Optional[Dict], out_dir: Path) -> MethodResult:
+    """Gene-coherence annotation policy on a label result (raw labels kept in modules_raw.csv)."""
+    from bsvae.networks.postprocess import enforce_gene_coherence
+    if result.status != "ok" or result.labels is None or "tx2gene" not in truth:
+        return result
+    fids = [str(f) for f in expr.index]
+    lab = result.labels.reindex(fids).fillna(-1).astype(int).values
+    pd.DataFrame({"feature_id": fids, "module": lab}).to_csv(out_dir / "modules_raw.csv", index=False)
+    new_lab, table = enforce_gene_coherence(lab, expr, fids, truth["tx2gene"],
+                                            min_kme=float((post_cfg or {}).get("isoform_min_kme", 0.3)))
+    table.to_csv(out_dir / "gene_coherence.csv")
+    result.labels = pd.Series(new_lab, index=fids, name="module")
+    result.params = {**result.params, "gene_coherence": True, "n_divergent_tested": int(len(table)),
+                     "n_divergent_kept": int(table["kept"].sum()) if len(table) else 0}
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -170,13 +193,15 @@ def run_one(
         # Known technical covariate only (batch); condition is biology.
         expr = regress_covariates(expr, cov, columns=["batch"])
         method_base = method[: -len("_regressed")]
+    elif method in ("bsvae_raw", "wgcna_raw"):
+        method_base = method[: -len("_raw")]
     else:
         method_base = method
     out_dir = run_dir / "methods" / method / f"seed_{seed}"
     out_dir.mkdir(parents=True, exist_ok=True)
     n_modules = int(truth["metadata"]["summary"].get("n_modules", truth["metadata"]["parameters"].get("n_modules", 20)))
 
-    if method_base == "bsvae":
+    if method_base in ("bsvae", "bsvae_coherent"):
         cfg = dict(bsvae_cfg or {})
         if k_mode == "sweep":
             cfg.setdefault("_k_mode", "sweep")
@@ -191,27 +216,16 @@ def run_one(
             train_cfg={k: v for k, v in cfg.items() if not k.startswith("_")},
             post_cfg=post_cfg, device=device, postprocess=postprocess, **kwargs,
         )
-    elif method in ("bsvae_coherent", "bsvae_hier"):
-        from bsvae.networks.postprocess import enforce_gene_coherence
+    elif method == "bsvae_hier":
         if "tx2gene" not in truth:
             result = MethodResult(method, "skipped", message="scenario has no transcript structure")
         else:
             cfg = {k: v for k, v in (bsvae_cfg or {}).items() if not k.startswith("_")}
-            if method == "bsvae_hier":
-                cfg = dict(cfg, hier_strength=cfg.get("hier_strength", 0.05), isoform_stratified=True)
+            cfg = dict(cfg, hier_strength=cfg.get("hier_strength", 0.05), isoform_stratified=True)
             tx2gene = pd.DataFrame(list(truth["tx2gene"].items()), columns=["transcript_id", "gene_id"])
             kwargs = {"over_cluster_factor": over_cluster_factor} if over_cluster_factor is not None else {}
-            sub = run_bsvae(expr, n_modules=n_modules, seed=seed, workdir=out_dir, tx2gene=tx2gene, train_cfg=cfg,
-                            post_cfg=post_cfg, device=device, postprocess=postprocess, **kwargs)
-            if sub.status == "ok" and method == "bsvae_coherent":
-                fids = [str(f) for f in expr.index]
-                lab = sub.labels.reindex(fids).fillna(-1).astype(int).values
-                new_lab, table = enforce_gene_coherence(lab, expr, fids, truth["tx2gene"],
-                                                        min_kme=float((post_cfg or {}).get("isoform_min_kme", 0.3)))
-                table.to_csv(out_dir / "gene_coherence.csv")
-                sub.labels = pd.Series(new_lab, index=fids, name="module")
-                sub.params = {**sub.params, "n_divergent_tested": int(len(table)), "n_divergent_kept": int(table["kept"].sum()) if len(table) else 0}
-            result = sub
+            result = run_bsvae(expr, n_modules=n_modules, seed=seed, workdir=out_dir, tx2gene=tx2gene, train_cfg=cfg,
+                               post_cfg=post_cfg, device=device, postprocess=postprocess, **kwargs)
             result.method = method
     elif method == "bsvae_consensus":
         from bsvae.networks.postprocess import consensus_assignments
@@ -284,7 +298,7 @@ def run_one(
             result = MethodResult("twn", "skipped", message="scenario has no transcript structure")
         else:
             result = run_twn(expr, truth["tx2gene"], workdir=out_dir)
-    elif method_base in ("wgcna", "wgcna_unsigned", "wgcna_signed"):
+    elif method_base in ("wgcna", "wgcna_unsigned", "wgcna_signed", "wgcna_coherent"):
         cfg = dict(WGCNA_DEFAULTS)
         cfg.update(wgcna_cfg or {})
         if method_base == "wgcna_unsigned":
@@ -296,6 +310,8 @@ def run_one(
         raise ValueError(f"Unknown method: {method}")
 
     result.method = method
+    if COHERENT_DEFAULT.get(method, False):
+        result = _apply_coherence(result, expr, truth, post_cfg, out_dir)
     metrics = evaluate_run(truth, result) if result.status == "ok" else {}
     if result.labels is not None:
         pd.DataFrame({"feature_id": result.labels.index, "module": result.labels.values}).to_csv(

@@ -196,9 +196,14 @@ def isoform_specific_calls(
     0.3 with the residualised eigengenes keeps precision above the previous
     0.4 default on the isoform simulations.
 
+    Every multi-isoform transcript is tested, whatever its own module label:
+    the residual test is the primary evidence for isoform-specific
+    membership, and ``label_discordant`` (the transcript's own label differs
+    from its gene's majority module) is an annotation, not a filter.
+
     Returns a table indexed by transcript with gene_id, gene_module,
-    best_other_module, kme_residual, p_value, q_value, r2_gene, n_isoforms,
-    mean_expr and ``called``.
+    isoform_module, label_discordant, best_other_module, kme_residual,
+    p_value, q_value, r2_gene, n_isoforms, mean_expr and ``called``.
     """
     from collections import Counter
 
@@ -214,8 +219,8 @@ def isoform_specific_calls(
     eigengenes = eigengenes.dropna(axis=1, how="any")
     resid, stats = isoform_residuals(expr, tx2gene, keep_version=keep_version, leave_one_out=leave_one_out,
                                      input_scale=input_scale)
-    columns = ["gene_id", "gene_module", "best_other_module", "kme_residual", "p_value", "q_value",
-               "r2_gene", "n_isoforms", "mean_expr", "called"]
+    columns = ["gene_id", "gene_module", "isoform_module", "label_discordant", "best_other_module", "kme_residual",
+               "p_value", "q_value", "r2_gene", "n_isoforms", "mean_expr", "called"]
     if eigengenes.shape[1] == 0 or len(resid) == 0:
         return pd.DataFrame(columns=columns)
     tx_gene = map_transcripts_to_genes(fids, tx2gene, keep_version)
@@ -249,9 +254,12 @@ def isoform_specific_calls(
     called = np.abs(best) >= float(min_kme)
     if alpha is not None:
         called &= q < float(alpha)
+    own = lab.reindex(resid.index).fillna(-1).astype(int).values
     out = pd.DataFrame({
         "gene_id": stats["gene_id"].values,
         "gene_module": gm_per_tx,
+        "isoform_module": own,
+        "label_discordant": (own >= 0) & (gm_per_tx >= 0) & (own != gm_per_tx),
         "best_other_module": [cols[j] for j in best_j],
         "kme_residual": best,
         "p_value": p,
