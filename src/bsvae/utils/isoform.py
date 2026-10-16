@@ -476,7 +476,7 @@ def isoform_specific_calls(
     if max_target_corr is not None:
         # Modules whose eigengene correlates with the gene's module above the threshold are the same
         # programme split by the clustering, not a divergence target; exclude them per gene module.
-        Ec = np.corrcoef(eigengenes.values.T.astype(np.float64))
+        Ec = np.atleast_2d(np.nan_to_num(np.corrcoef(eigengenes.values.T.astype(np.float64))))
         for gm in np.unique(gm_per_tx):
             if gm not in cols:
                 continue
