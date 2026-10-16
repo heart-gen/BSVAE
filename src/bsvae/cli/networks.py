@@ -8,6 +8,7 @@ Subcommands
   consensus-modules  Consensus (majority vote) over several extract-modules runs
   isoform-residuals  Gene-programme-removed transcript matrix (residuals)
   isoform-specific   Call isoforms whose residual belongs to another module
+  target-genes       Test isoforms of candidate genes / GWAS loci against the module solution
   module-quality     kME summaries, enrichment, preservation in a second dataset
   regress-covariates Remove known sample covariates before training
   export-latents     Save μ, logσ², γ as NPZ
@@ -148,6 +149,41 @@ def build_parser() -> argparse.ArgumentParser:
     isp.add_argument("--no-leave-one-out", action="store_true", default=False,
                      help="Regress each isoform on the full gene aggregate (including itself) instead of its siblings.")
     isp.add_argument("--keep-tx-version", action="store_true", default=False)
+
+    # ------------------------------------------------------------------
+    # target-genes
+    # ------------------------------------------------------------------
+    tg = subs.add_parser("target-genes",
+                         help="Test isoforms of candidate genes or GWAS loci for module membership against a "
+                              "transcriptome-wide module solution.")
+    tg.add_argument("--dataset", required=True, help="Transcript matrix (transcripts × samples, log scale).")
+    tg.add_argument("--tx2gene", required=True)
+    tg.add_argument("--modules", required=True, help="modules.csv from extract-modules on the same matrix.")
+    tg.add_argument("--output-dir", required=True)
+    tg.add_argument("--genes", default=None, help="Gene list (one Ensembl ID or symbol per line).")
+    tg.add_argument("--transcripts", default=None, help="Transcript list (one ID per line).")
+    tg.add_argument("--bed", default=None, help="BED file of loci (index SNPs or credible-set intervals).")
+    tg.add_argument("--annotation", default=None,
+                    help="Gene annotation (GTF/GFF, or BED-like chrom start end gene_id [gene_name] [strand]); "
+                         "required with --bed, optional with --genes to resolve symbols.")
+    tg.add_argument("--rule", choices=["overlap", "window", "closest"], default="window",
+                    help="Locus-to-gene rule for --bed (default: window).")
+    tg.add_argument("--window", type=int, default=500_000, help="Window (bp) on each side of a locus (default: 500000).")
+    tg.add_argument("--n-closest", type=int, default=3, help="Genes per locus for --rule closest (default: 3).")
+    tg.add_argument("--null", choices=["permutation", "matched", "analytic"], default="permutation")
+    tg.add_argument("--n-perm", type=int, default=1000)
+    tg.add_argument("--n-matched", type=int, default=200)
+    tg.add_argument("--min-kme", type=float, default=0.2,
+                    help="Effect-size floor (default 0.2; 0.3 reproduces the transcriptome-wide caller).")
+    tg.add_argument("--alpha", type=float, default=0.05, help="BH FDR within the target set.")
+    tg.add_argument("--counts", default=None, help="Raw count matrix (same features × samples) for reliability-corrected kME.")
+    tg.add_argument("--covariates", default=None, help="Sample table (samples × columns) for --condition.")
+    tg.add_argument("--condition", default=None, help="Two-level column of --covariates for a case/control interaction test.")
+    tg.add_argument("--n-neighbours", type=int, default=20)
+    tg.add_argument("--no-residualize-eigengenes", action="store_true", default=False)
+    tg.add_argument("--no-leave-one-out", action="store_true", default=False)
+    tg.add_argument("--keep-tx-version", action="store_true", default=False)
+    tg.add_argument("--seed", type=int, default=0)
 
     # ------------------------------------------------------------------
     # regress-covariates
@@ -422,6 +458,67 @@ def handle_isoform_specific(args, logger: logging.Logger) -> None:
     logger.info("Isoform-specific calls written to %s (%d called)", out, int(calls["called"].sum()))
 
 
+def handle_target_genes(args, logger: logging.Logger) -> None:
+    import pandas as pd
+    from bsvae.networks.targets import (
+        loci_to_genes, locus_summary, read_bed, read_gene_annotation, read_id_list,
+        resolve_target_transcripts, target_gene_tests,
+    )
+    from bsvae.utils.hierarchy import load_tx2gene
+    from bsvae.utils.isoform import map_transcripts_to_genes
+
+    if not (args.genes or args.transcripts or args.bed):
+        raise SystemExit("target-genes needs at least one of --genes, --transcripts, --bed")
+    if args.bed and not args.annotation:
+        raise SystemExit("--bed requires --annotation (GTF or BED-like gene table)")
+    expr = _read_table(args.dataset)
+    mods = pd.read_csv(args.modules)
+    fids = [str(f) for f in expr.index]
+    labels = mods.set_index(mods["feature_id"].astype(str))["module"].reindex(fids).fillna(-1).astype(int).values
+    tx2gene = load_tx2gene(path=args.tx2gene, feature_ids=fids, keep_version=args.keep_tx_version, logger=logger)
+    tx_gene = map_transcripts_to_genes(fids, tx2gene, args.keep_tx_version)
+    out_dir = Path(args.output_dir); out_dir.mkdir(parents=True, exist_ok=True)
+
+    annotation = read_gene_annotation(args.annotation, args.keep_tx_version) if args.annotation else None
+    genes = read_id_list(args.genes, args.keep_tx_version) if args.genes else []
+    loci_genes = None
+    if args.bed:
+        loci = read_bed(args.bed)
+        loci_genes = loci_to_genes(loci, annotation, rule=args.rule, window=args.window, n_closest=args.n_closest)
+        loci_genes.to_csv(out_dir / "loci_genes.tsv", sep="\t", index=False)
+        logger.info("%d loci → %d genes (rule=%s)", loci["locus"].nunique(), loci_genes["gene_id"].nunique(), args.rule)
+        genes = list(dict.fromkeys(genes + loci_genes["gene_id"].tolist()))
+    transcripts = read_id_list(args.transcripts, args.keep_tx_version) if args.transcripts else []
+    targets, unmatched = resolve_target_transcripts(tx_gene, genes, transcripts, annotation, args.keep_tx_version)
+    if unmatched:
+        logger.warning("%d target identifiers not found in the expression matrix / tx2gene: %s%s",
+                       len(unmatched), ", ".join(unmatched[:10]), " ..." if len(unmatched) > 10 else "")
+    if len(targets) == 0:
+        raise SystemExit("No target transcripts present in the expression matrix")
+    logger.info("Testing %d isoforms of %d target genes", len(targets), targets.nunique())
+
+    counts = _read_table(args.counts) if args.counts else None
+    condition = None
+    if args.condition:
+        if not args.covariates:
+            raise SystemExit("--condition requires --covariates")
+        cov = _read_table(args.covariates)
+        condition = cov[args.condition]
+    res = target_gene_tests(
+        expr, tx2gene, labels, fids, targets, null=args.null, n_perm=args.n_perm, n_matched=args.n_matched,
+        min_kme=args.min_kme, alpha=args.alpha, counts=counts, condition=condition, n_neighbours=args.n_neighbours,
+        residualize_eigengenes=not args.no_residualize_eigengenes, leave_one_out=not args.no_leave_one_out,
+        keep_version=args.keep_tx_version, seed=args.seed,
+    )
+    res["isoforms"].to_csv(out_dir / "target_isoforms.tsv", sep="\t")
+    res["genes"].to_csv(out_dir / "target_genes.tsv", sep="\t")
+    res["neighbours"].to_csv(out_dir / "target_neighbours.tsv", sep="\t", index=False)
+    if loci_genes is not None:
+        locus_summary(res["isoforms"], loci_genes, labels).to_csv(out_dir / "target_loci.tsv", sep="\t", index=False)
+    logger.info("Targeted-gene results written to %s (%d of %d isoforms called)",
+                out_dir, int(res["isoforms"]["called"].sum()), len(res["isoforms"]))
+
+
 def handle_regress_covariates(args, logger: logging.Logger) -> None:
     from bsvae.utils.preprocess import regress_covariates
 
@@ -633,6 +730,8 @@ def cli(argv=None):
         handle_extract_modules(args, logger)
     elif args.command == "isoform-specific":
         handle_isoform_specific(args, logger)
+    elif args.command == "target-genes":
+        handle_target_genes(args, logger)
     elif args.command == "regress-covariates":
         handle_regress_covariates(args, logger)
     elif args.command == "module-quality":

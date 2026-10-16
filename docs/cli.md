@@ -230,6 +230,46 @@ Output columns: `gene_id, gene_module, best_other_module, kme_residual, p_value,
 
 Rare transcripts: a low-abundance isoform has an attenuated correlation with every eigengene, so its achievable kME is bounded by its sampling noise rather than by biology. On simulations where minor isoforms carry about a tenth of their gene, the lowest-expressed third of switched isoforms is called about a third of the time at 150 samples and the true target module is ranked first about 70 % of the time even with the true module factors, so more samples (or deeper quantification) is the lever, not a lower threshold. Removing zeros from the reconstruction loss (`--masked-recon`), filtering low-expression features before training, and training on negative-binomial Pearson residuals of the raw counts (`bsvae.utils.preprocess.pearson_residuals`) were all evaluated: the first two reduce recovery of switched isoforms, and Pearson residuals leave rare-isoform recovery unchanged (caller recall +0.04) while lowering transcript-level ARI by 0.05 on the isoform scenarios (unchanged on gene-level data), so log-normalised input remains the default. Simulated scenarios now also write `expr/counts_features_x_samples.tsv.gz` for count-aware methods.
 
+### `target-genes`
+
+Targeted-gene mode: test the isoforms of candidate genes or GWAS loci for module membership against a transcriptome-wide module solution, without re-training. Only the target isoforms are tested, so multiplicity is controlled within the target set and rare isoforms whose correlations are too weak for a transcriptome-wide call become reportable. The modules, eigengenes and neighbours all come from the full run; a target gene is never clustered on its own.
+
+```bash
+# candidate genes (Ensembl IDs, or symbols with --annotation)
+bsvae-networks target-genes --dataset data/transcripts.tsv.gz --tx2gene data/tx2gene.tsv \
+  --modules results/run/modules/modules.csv --genes candidates.txt --output-dir results/run/targets
+
+# GWAS loci: index SNPs or credible-set intervals in BED, genes within 500 kb
+bsvae-networks target-genes --dataset data/transcripts.tsv.gz --tx2gene data/tx2gene.tsv \
+  --modules results/run/modules/modules.csv --bed scz_loci.bed --annotation gencode.v44.annotation.gtf.gz \
+  --rule window --window 500000 --counts data/transcript_counts.tsv.gz \
+  --covariates data/samples.tsv --condition dx --output-dir results/run/scz_loci
+```
+
+Targets (combine freely):
+
+- `--genes` one Ensembl gene ID or symbol per line (symbols need `--annotation`)
+- `--transcripts` one transcript ID per line
+- `--bed` loci (`chrom start end [name]`, 0-based) with `--annotation` (GTF/GFF `gene` records, or a BED-like `chrom start end gene_id [gene_name] [strand]` table); genes are chosen per locus by `--rule overlap` (gene body overlaps the locus), `window` (default; locus extended by `--window` bp on each side, so a one-base BED of index SNPs means "within 500 kb of the SNP") or `closest` (`--n-closest` genes by TSS distance). The mapping is written to `loci_genes.tsv` with distances.
+
+Test, per target isoform:
+
+1. the residual after regressing the isoform on its sibling isoforms (single-isoform genes use their own centred profile);
+2. kME to every module eigengene, each residualised on the gene's own module eigengene;
+3. the best module other than the gene's own, against a null: `--null permutation` (default; the residual is permuted over samples `--n-perm` times and the maximum |kME| over the other modules forms the null, which handles best-module selection and sparse, non-Gaussian profiles), `matched` (observed best-other |kME| of the `--n-matched` non-target isoforms that sit in their gene's own module, closest in mean expression and zero fraction, which also absorbs residual leakage) or `analytic` (t-test);
+4. BH within the target set (`--alpha`, default 0.05) plus the effect-size floor `--min-kme` (default 0.2, lower than the transcriptome-wide caller's 0.3 because the calibrated test should decide once samples are plentiful: on simulations with rare switched isoforms and 500 samples, the floor at 0.2 raises recall of switched isoforms from 0.58 to 0.71 for hard switches and 0.33 to 0.57 for partial switches, with under 10 % false calls among unswitched isoforms; at 150 samples the test itself is the binding constraint and results match the transcriptome-wide caller);
+5. with `--counts`, a reliability estimate from the negative-binomial sampling noise of each profile and a disattenuated kME (`kme_residual / sqrt(reliability)`), so rare isoforms are ranked by the correlation they would have without sampling noise;
+6. with `--covariates` and a two-level `--condition`, the best-other kME per group and a Fisher-z interaction test (`p_interaction`): does membership differ between cases and controls.
+
+Outputs in `--output-dir`:
+
+- `target_isoforms.tsv`: `gene_id, n_isoforms, single_isoform, mean_expr, zero_fraction, gene_module, isoform_module, kme_gene_module, best_other_module, kme_residual, p_value, q_value, r2_gene, called` plus `reliability, kme_disattenuated` and the condition columns when requested
+- `target_genes.tsv`: per gene, the modules its isoforms occupy, `divergent` (isoforms in two or more modules, or any isoform called), best isoform and minimum q
+- `target_neighbours.tsv`: for each called isoform, the `--n-neighbours` members of its target module most correlated with the residual, with their kME (hub status)
+- `target_loci.tsv` (with `--bed`): per locus, genes and isoforms tested, isoforms called, modules hit and a binomial p-value for concentration in the most frequent module
+
+What it cannot do: it needs a transcriptome-wide `extract-modules` run first, it cannot rescue transcripts that quantification dropped, and it does not move the noise ceiling of a rare isoform (see `isoform-specific`); it lowers the multiplicity burden and reports calibrated evidence for exactly the genes you care about.
+
 ### `isoform-residuals`
 
 Write the gene-programme-removed residual matrix itself (what `isoform-specific` correlates with the eigengenes), for custom downstream analysis. Clustering the residuals alone does **not** recover isoform-specific modules: switched isoforms are too few per module to form clusters of their own, so the membership test above is the recommended route.
