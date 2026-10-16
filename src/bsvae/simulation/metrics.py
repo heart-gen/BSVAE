@@ -225,6 +225,40 @@ def grey_metrics(labels_true, labels_pred) -> Dict[str, float]:
     }
 
 
+COVERAGE_GREY_FRACS = (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50)
+
+
+def coverage_metrics(labels_true, labels_pred, score, grey_fracs=COVERAGE_GREY_FRACS) -> Dict[str, float]:
+    """
+    Assigned-only ARI as a function of coverage: the lowest-``score`` assigned
+    features are abstained on until the unassigned fraction reaches each target
+    in ``grey_fracs``, and ARI is recomputed on what remains.  ``score`` is a
+    per-feature confidence (own-module kME in the harness).  Methods that abstain
+    on a fixed subset (acorde) are a single point on this curve, so a method that
+    assigns everything can be compared with them at equal coverage; targets below
+    the method's own grey fraction are NaN.  Keys ``ari_at_grey_<pct>``.
+    """
+    t = normalize_labels(labels_true)
+    p = normalize_labels(labels_pred)
+    s = np.asarray(score, dtype=float)
+    assigned = p != GREY
+    n = len(p)
+    out: Dict[str, float] = {}
+    order = np.argsort(np.where(assigned, np.nan_to_num(s, nan=-np.inf), np.inf), kind="stable")
+    for g in grey_fracs:
+        key = f"ari_at_grey_{int(round(g * 100)):02d}"
+        n_target = int(round(g * n))
+        n_drop = n_target - int((~assigned).sum())
+        if n_drop < 0:
+            out[key] = float("nan")
+            continue
+        keep = assigned.copy()
+        keep[order[:n_drop]] = False
+        keep &= t != GREY
+        out[key] = compute_ari(t[keep], p[keep]) if keep.sum() >= 2 else float("nan")
+    return out
+
+
 def best_match_metrics(labels_true, labels_pred) -> Dict[str, float]:
     """
     Per-true-module best-match Jaccard / precision / recall / F1 (grey excluded),

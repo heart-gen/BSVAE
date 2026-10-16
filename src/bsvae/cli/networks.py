@@ -24,6 +24,8 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from bsvae.cli._common import add_sample_subset_args
+
 
 def _read_table(path: str, index_col: int = 0):
     """Read a CSV/TSV (optionally gzipped) table with the separator inferred from the suffixes."""
@@ -105,10 +107,13 @@ def build_parser() -> argparse.ArgumentParser:
     mp.add_argument("--no-isoform-calls", action="store_true", default=False,
                     help="Skip the isoform-specific membership scan (isoform_specific.csv) that runs on the raw "
                          "labels whenever --expr and --tx2gene are given.")
+    mp.add_argument("--covariates", default=None, help="Sample-level covariates to regress out of the residuals and eigengenes before the test (table with sample ids in the first column, e.g. log library size, RIN, batch dummies). Technical axes that the sibling regression does not remove otherwise produce reproducible false calls.")
+    mp.add_argument("--max-target-corr", type=float, default=None, help="Exclude as targets the modules whose eigengene correlates with the gene's own module above this (default: none; 0.4 removes split components of one programme and brings the null type-I error to nominal at a ~0.02 recall cost).")
     mp.add_argument("--loo-eigengene", choices=["approx", "exact", "off"], default="approx",
                     help="Leave-one-gene-out eigengene in the residual test: 'approx' (default; first-order downdate removing the tested gene's transcripts from the module eigengene), 'exact' (recompute the PCA per gene; slower) or 'off'. Removes the self-contribution of a transcript to the eigengene it is tested against.")
     mp.add_argument("--tx2gene", type=str, default=None,
                     help="TSV (transcript_id, gene_id) for isoform-to-gene aggregation.")
+    add_sample_subset_args(mp)
     mp.add_argument("--aggregate-to-gene", action="store_true", default=False,
                     help="Aggregate isoform-level γ to gene level by averaging across "
                          "isoforms per gene. Saves gamma_gene.npz and "
@@ -149,7 +154,16 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Call isoforms whose gene-programme-removed profile belongs to another module.")
     isp.add_argument("--dataset", required=True, help="Transcript matrix (transcripts × samples).")
     isp.add_argument("--tx2gene", required=True)
-    isp.add_argument("--modules", required=True, help="modules.csv from extract-modules on the same matrix.")
+    isp.add_argument("--modules", required=True, nargs="+",
+                     help="modules.csv from extract-modules on the same matrix. With --folds, one file per fold: "
+                          "file f holds the labels of a model trained on every sample except fold f.")
+    isp.add_argument("--folds", default=None,
+                     help="Cross-fitting: TSV (sample_id, fold) assigning every sample to a fold 0..k-1. Each fold "
+                          "is scored against the labels that did not see it and the folds are combined with "
+                          "Stouffer's method, which removes the selection bias of testing a transcript against "
+                          "modules learned on the same samples.")
+    isp.add_argument("--no-module-agreement", action="store_true", default=False,
+                     help="With --folds, call a transcript even when its target module differs between folds.")
     isp.add_argument("--output", required=True, help="Calls table (.csv / .tsv).")
     isp.add_argument("--min-kme", type=float, default=0.3,
                      help="Minimum residual kME to another module (default: 0.3).")
@@ -161,6 +175,8 @@ def build_parser() -> argparse.ArgumentParser:
                           "on the gene's own module (more false calls among unswitched isoforms).")
     isp.add_argument("--no-leave-one-out", action="store_true", default=False,
                      help="Regress each isoform on the full gene aggregate (including itself) instead of its siblings.")
+    isp.add_argument("--covariates", default=None, help="Sample-level covariates to regress out of the residuals and eigengenes before the test (table with sample ids in the first column, e.g. log library size, RIN, batch dummies). Technical axes that the sibling regression does not remove otherwise produce reproducible false calls.")
+    isp.add_argument("--max-target-corr", type=float, default=None, help="Exclude as targets the modules whose eigengene correlates with the gene's own module above this (default: none; 0.4 removes split components of one programme and brings the null type-I error to nominal at a ~0.02 recall cost).")
     isp.add_argument("--loo-eigengene", choices=["approx", "exact", "off"], default="approx",
                      help="Leave-one-gene-out eigengene in the residual test: 'approx' (default; first-order downdate removing the tested gene's transcripts from the module eigengene), 'exact' (recompute the PCA per gene; slower) or 'off'. Removes the self-contribution of a transcript to the eigengene it is tested against.")
     isp.add_argument("--keep-tx-version", action="store_true", default=False)
@@ -367,8 +383,8 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
     )
 
     model = load_model(args.model_path, is_gpu=not args.no_cuda)
-    dataloader, feature_ids, _ = create_dataloader_from_expression(
-        args.dataset, batch_size=args.batch_size
+    dataloader, feature_ids, sample_ids = create_dataloader_from_expression(
+        args.dataset, batch_size=args.batch_size, samples=args.samples, exclude_samples=args.exclude_samples
     )
     result = extract_gmm_modules(
         model=model,
@@ -385,6 +401,9 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
     if args.expr:
         expr = _read_table(args.expr)
         expr.index = expr.index.astype(str)
+        if args.samples or args.exclude_samples:
+            keep = set(map(str, sample_ids))
+            expr = expr.loc[:, [c for c in expr.columns if str(c) in keep]]
 
     gamma_final = result["gamma"]
     labels_final = None
@@ -418,7 +437,9 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
                 # labels, so the coherence policy below can never hide a candidate from it.
                 from bsvae.utils.isoform import isoform_specific_calls
                 calls = isoform_specific_calls(expr, t2g, raw_labels, feature_ids, min_kme=args.min_kme,
-                                               loo_eigengene=_loo_choice(args.loo_eigengene))
+                                               loo_eigengene=_loo_choice(args.loo_eigengene),
+                                               covariates=read_covariates(args.covariates, list(expr.columns)),
+                                               max_target_corr=args.max_target_corr)
                 calls.to_csv(out_dir / "isoform_specific.csv")
                 logger.info("Isoform-specific scan: %d of %d multi-isoform transcripts called (isoform_specific.csv)",
                             int(calls["called"].sum()), len(calls))
@@ -498,6 +519,42 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
         logger.info("Leiden fallback modules saved.")
 
 
+def read_covariates(path: "str | None", sample_ids: "list[str]"):
+    """Read a samples × covariates table (first column = sample id) aligned to ``sample_ids``; None when no path."""
+    if not path:
+        return None
+    import pandas as pd
+
+    df = _read_table(path)
+    df.index = df.index.astype(str)
+    df = df.apply(pd.to_numeric, errors="coerce")
+    missing = [s for s in sample_ids if s not in df.index]
+    if missing:
+        raise SystemExit(f"--covariates lacks {len(missing)} samples of the matrix (e.g. {missing[:3]})")
+    df = df.reindex(sample_ids)
+    if df.isna().any().any():
+        raise SystemExit("--covariates has non-numeric or missing values")
+    return df
+
+
+def read_folds(path: str, sample_ids: "list[str]") -> "np.ndarray":
+    """Read a (sample_id, fold) table (header optional) and return the fold of every column of the matrix."""
+    import numpy as np
+    import pandas as pd
+
+    df = pd.read_csv(path, sep=None, engine="python", header=None, dtype=str)
+    if df.shape[1] < 2:
+        raise SystemExit("--folds needs two columns: sample_id, fold")
+    df = df.iloc[:, :2]; df.columns = ["sample_id", "fold"]
+    if not df["fold"].iloc[0].strip().lstrip("-").isdigit():
+        df = df.iloc[1:]
+    fold = dict(zip(df["sample_id"].str.strip(), df["fold"].astype(int)))
+    missing = [s for s in sample_ids if s not in fold]
+    if missing:
+        raise SystemExit(f"--folds lacks {len(missing)} samples of the matrix (e.g. {missing[:3]})")
+    return np.asarray([fold[s] for s in sample_ids])
+
+
 def _loo_choice(value: str) -> "bool | str":
     """Map the --loo-eigengene CLI choice onto the isoform_specific_calls argument."""
     return False if value == "off" else value
@@ -509,17 +566,31 @@ def handle_isoform_specific(args, logger: logging.Logger) -> None:
     from bsvae.utils.isoform import isoform_specific_calls
 
     expr = _read_table(args.dataset)
-    mods = pd.read_csv(args.modules)
     fids = [str(f) for f in expr.index]
-    labels = mods.set_index(mods["feature_id"].astype(str))["module"].reindex(fids).fillna(-1).astype(int).values
+
+    def _labels(path: str) -> "np.ndarray":
+        mods = pd.read_csv(path)
+        return mods.set_index(mods["feature_id"].astype(str))["module"].reindex(fids).fillna(-1).astype(int).values
+
     tx2gene = load_tx2gene(path=args.tx2gene, feature_ids=fids, keep_version=args.keep_tx_version, logger=logger)
-    calls = isoform_specific_calls(
-        expr, tx2gene, labels, fids, min_kme=args.min_kme, keep_version=args.keep_tx_version,
-        alpha=args.alpha if args.alpha > 0 else None,
-        residualize_eigengenes=not args.no_residualize_eigengenes,
-        leave_one_out=not args.no_leave_one_out,
-        loo_eigengene=_loo_choice(args.loo_eigengene),
-    )
+    common = dict(min_kme=args.min_kme, keep_version=args.keep_tx_version,
+                  alpha=args.alpha if args.alpha > 0 else None,
+                  residualize_eigengenes=not args.no_residualize_eigengenes,
+                  leave_one_out=not args.no_leave_one_out,
+                  loo_eigengene=_loo_choice(args.loo_eigengene),
+                  covariates=read_covariates(args.covariates, [str(c) for c in expr.columns]),
+                  max_target_corr=args.max_target_corr)
+    if args.folds:
+        from bsvae.utils.isoform import cross_fit_calls
+        folds = read_folds(args.folds, [str(c) for c in expr.columns])
+        if len(args.modules) != len(set(folds)):
+            raise SystemExit(f"--folds has {len(set(folds))} folds but {len(args.modules)} --modules files were given")
+        calls = cross_fit_calls(expr, tx2gene, [_labels(m) for m in args.modules], folds, fids,
+                                require_module_agreement=not args.no_module_agreement, **common)
+    else:
+        if len(args.modules) != 1:
+            raise SystemExit("Several --modules files need --folds")
+        calls = isoform_specific_calls(expr, tx2gene, _labels(args.modules[0]), fids, **common)
     out = Path(args.output); out.parent.mkdir(parents=True, exist_ok=True)
     calls.to_csv(out, sep="\t" if out.suffix == ".tsv" else ",")
     logger.info("Isoform-specific calls written to %s (%d called)", out, int(calls["called"].sum()))

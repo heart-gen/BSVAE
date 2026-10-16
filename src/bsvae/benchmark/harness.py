@@ -28,7 +28,7 @@ from bsvae.benchmark.runners import (
     wgcna_available,
 )
 from bsvae.benchmark.edges import edge_metrics, edges_from_labels
-from bsvae.simulation.metrics import evaluate_labels, gene_level_metrics, normalize_labels, switched_isoform_metrics
+from bsvae.simulation.metrics import coverage_metrics, evaluate_labels, gene_level_metrics, normalize_labels, switched_isoform_metrics
 from bsvae.simulation.scenario import expand_scenarios, generate_scenario, load_config
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,36 @@ def load_truth(run_dir: str | Path) -> Dict:
     return out
 
 
+def libsize_covariate(truth: Dict, sample_ids) -> Optional[pd.DataFrame]:
+    """Log library size per sample from the scenario's raw counts (None when no counts were written)."""
+    path = truth.get("counts_path")
+    if path is None or not Path(path).exists():
+        return None
+    counts = pd.read_csv(path, sep="\t", index_col=0)
+    counts.columns = counts.columns.astype(str)
+    ls = np.log(counts.sum(axis=0).reindex([str(s) for s in sample_ids]).values.astype(float) + 1.0)
+    return pd.DataFrame({"log_libsize": ls}, index=[str(s) for s in sample_ids])
+
+
+def _own_module_kme(expr: pd.DataFrame, labels: pd.Series) -> np.ndarray:
+    """Each feature's kME to the eigengene of its own predicted module (NaN when grey)."""
+    from bsvae.networks.postprocess import compute_kme, module_eigengenes
+
+    fids = [str(f) for f in labels.index]
+    e = expr.copy(); e.index = e.index.astype(str); e = e.reindex(fids)
+    lab = normalize_labels(labels.values)
+    eig = module_eigengenes(e, lab, fids)
+    kme = compute_kme(e, eig, fids)
+    cols = {str(c): i for i, c in enumerate(kme.columns)}
+    k = kme.values
+    out = np.full(len(fids), np.nan)
+    for i, m in enumerate(lab):
+        j = cols.get(str(int(m)))
+        if m >= 0 and j is not None:
+            out[i] = k[i, j]
+    return out
+
+
 def evaluate_run(truth: Dict, result: MethodResult) -> Dict[str, float]:
     """Score a MethodResult against loaded truth; NaN metrics when not ok."""
     if result.status != "ok":
@@ -119,6 +149,11 @@ def evaluate_run(truth: Dict, result: MethodResult) -> Dict[str, float]:
     t = truth_labels.loc[common].values
     p = normalize_labels(pred.loc[common].values)
     metrics = evaluate_labels(t, p)
+    if "expr" in truth and truth["expr"] is not None:
+        try:
+            metrics.update(coverage_metrics(t, p, _own_module_kme(truth["expr"], pred.loc[common])))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("coverage metrics failed: %s", exc)
     if "tx2gene" in truth:
         metrics.update(
             gene_level_metrics(
@@ -267,7 +302,9 @@ def run_one(
                 fids = [str(f) for f in expr.index]
                 lab = sub.labels.reindex(fids).fillna(-1).astype(int).values
                 min_kme = float((post_cfg or {}).get("isoform_min_kme", 0.3))
-                calls = isoform_specific_calls(expr, truth["tx2gene"], lab, fids, min_kme=min_kme, eigengenes=sub.eigengenes)
+                calls = isoform_specific_calls(expr, truth["tx2gene"], lab, fids, min_kme=min_kme, eigengenes=sub.eigengenes,
+                                               covariates=libsize_covariate(truth, expr.columns),
+                                               max_target_corr=(post_cfg or {}).get("isoform_max_target_corr"))
                 labels = pd.Series(-1, index=fids, name="module")
                 called = calls[calls["called"]]
                 labels.loc[called.index] = called["best_other_module"].astype(int).values
@@ -330,6 +367,7 @@ def run_grid(
     *,
     methods: Sequence[str] = METHODS,
     reps: Optional[int] = None,
+    rep_ids: Optional[Sequence[int]] = None,
     seeds: Optional[Iterable[int]] = None,
     k_mode: str = "oracle",
     bsvae_cfg: Optional[Dict] = None,
@@ -365,7 +403,7 @@ def run_grid(
         logger.warning("WGCNA (Rscript + WGCNA package) not available; its rows will be marked skipped")
 
     for sid, params in scenarios:
-        for rep in range(n_reps):
+        for rep in (range(n_reps) if rep_ids is None else [int(r) for r in rep_ids]):
             run_dir = outdir / "scenarios" / sid / f"rep_{rep:03d}"
             if not (run_dir / "metadata.json").exists():
                 generate_scenario(cfg, sid, rep=rep, outdir=outdir)
@@ -420,16 +458,22 @@ def summarize(
     ci: bool = True,
     n_boot: int = 2000,
     seed: int = 0,
+    metrics: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
     """
-    Mean ± sd per group for the headline metrics (ok rows only) and, with
+    Mean ± sd per group for the headline metrics (ok rows only; ``metrics``
+    overrides the default list, which also includes every ``ari_at_grey_*``
+    coverage column) and, with
     ``ci``, a percentile bootstrap 95 % interval over the runs of each group
     (``*_ci_lo`` / ``*_ci_hi``; NaN with fewer than three runs).  Runs are the
     unit of replication, so with several seeds per independently generated
     dataset (``rep``) the interval reflects both sources of variation.
     """
     ok = df[df["status"] == "ok"] if "status" in df else df
-    cols = [c for c in SUMMARY_METRICS if c in ok.columns]
+    if metrics is None:
+        cols = [c for c in SUMMARY_METRICS if c in ok.columns] + sorted(c for c in ok.columns if c.startswith("ari_at_grey_"))
+    else:
+        cols = [c for c in metrics if c in ok.columns]
     if ok.empty or not cols:
         return pd.DataFrame(columns=list(by))
     g = ok.groupby(list(by), dropna=False)[cols]

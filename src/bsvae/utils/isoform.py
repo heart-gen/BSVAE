@@ -12,7 +12,7 @@ ordinary BSVAE pipeline to obtain *isoform-specific modules*.
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -143,6 +143,136 @@ def _standardize_cols_np(E: np.ndarray) -> np.ndarray:
     return Ec / np.where(sd == 0, 1.0, sd)
 
 
+def _module_map(reference: np.ndarray, labels: np.ndarray) -> Dict[int, int]:
+    """Module id in ``labels`` → id in ``reference``'s system, by maximum overlap."""
+    from bsvae.networks.postprocess import align_labels
+
+    aligned = align_labels(reference, labels)
+    out: Dict[int, int] = {}
+    for m in np.unique(labels):
+        if m < 0:
+            continue
+        vals, counts = np.unique(aligned[labels == m], return_counts=True)
+        out[int(m)] = int(vals[counts.argmax()])
+    return out
+
+
+def cross_fit_calls(
+    expr: pd.DataFrame,
+    tx2gene: "pd.Series | Dict[str, str]",
+    labels_by_fold: Sequence[np.ndarray],
+    fold_of_sample: Sequence[int],
+    feature_ids: Sequence[str],
+    min_kme: float = 0.3,
+    alpha: Optional[float] = 0.05,
+    require_module_agreement: bool = False,
+    **kwargs,
+) -> pd.DataFrame:
+    """
+    Cross-fitted isoform-specific calls.
+
+    ``labels_by_fold[f]`` are module labels learned on every sample *except*
+    those with ``fold_of_sample == f``; each fold's samples are then scored
+    with :func:`isoform_specific_calls` against labels that never saw them, so
+    the selection of a transcript into a module by the clustering cannot
+    inflate its own test (the residual winner's curse that the leave-one-
+    gene-out eigengene does not remove).  Module ids of every fold are mapped
+    onto fold 0's by maximum overlap.  For each transcript and each module the
+    per-fold residual kME are turned into signed z-scores and combined with
+    Stouffer's method (weights ``sqrt(n_f)``); the best module other than the
+    gene's is then chosen on the *combined* statistic, Bonferroni-corrected
+    over modules and BH-adjusted over transcripts.  Combining before
+    selecting matters: selecting the best module in each fold and combining
+    those maxima is anti-conservative.
+
+    Returns one row per multi-isoform transcript with ``kme_residual`` (the
+    sample-weighted mean of the chosen module's per-fold kME),
+    ``z_combined``, ``p_value``, ``q_value``, ``best_other_module`` (fold-0
+    ids), ``modules_agree`` (every fold's own best module is the combined
+    one), ``label_discordant`` (the transcript's raw label differs from its
+    gene's in any fold), per-fold ``kme_fold<f>`` columns and ``called``.
+    ``require_module_agreement`` additionally demands ``modules_agree`` for a
+    call (an annotation by default).
+    """
+    from scipy import stats as sps
+
+    fold_of_sample = np.asarray(fold_of_sample)
+    folds = sorted(int(f) for f in np.unique(fold_of_sample))
+    if len(folds) != len(labels_by_fold):
+        raise ValueError(f"{len(labels_by_fold)} label sets for {len(folds)} folds")
+    kw = dict(kwargs); kw.pop("alpha", None); kw.pop("min_kme", None); kw.pop("return_kme", None)
+    ref = np.asarray(labels_by_fold[0]).astype(np.int64)
+    per_fold: List[pd.DataFrame] = []; kmes: List[pd.DataFrame] = []; n_per_fold: List[int] = []
+    for f, lab in zip(folds, labels_by_fold):
+        mask = fold_of_sample == f
+        lab = np.asarray(lab).astype(np.int64)
+        calls, k = isoform_specific_calls(expr.loc[:, mask], tx2gene, lab, feature_ids, min_kme=0.0, alpha=None,
+                                          return_kme=True, **kw)
+        mp = _module_map(ref, lab)           # injective (Hungarian; unmatched modules get fresh ids)
+        k = k.copy(); k.columns = [mp.get(int(c), int(c)) for c in k.columns]
+        calls = calls.copy(); calls["best_other_module"] = [mp.get(int(b), int(b)) for b in calls["best_other_module"].values]
+        per_fold.append(calls); kmes.append(k); n_per_fold.append(int(mask.sum()))
+    idx = per_fold[0].index
+    for c in per_fold[1:]:
+        idx = idx.intersection(c.index)
+    cols = sorted(set().union(*[set(int(c) for c in k.columns) for k in kmes]))
+    Z = np.zeros((len(idx), len(cols))); W = np.zeros((len(idx), len(cols)))
+    KW = np.zeros((len(idx), len(cols))); NW = np.zeros((len(idx), len(cols)))
+    fold_best: List[np.ndarray] = []; kme_cols: Dict[str, np.ndarray] = {}
+    discordant = np.zeros(len(idx), bool)
+    for f, (calls, k, n_f) in enumerate(zip(per_fold, kmes, n_per_fold)):
+        k = k.reindex(index=idx, columns=cols)
+        present = k.notna().values
+        r = np.nan_to_num(k.values.astype(float))
+        r2 = np.minimum(r ** 2, 1.0 - 1e-12)
+        tval = np.abs(r) * np.sqrt(max(n_f - 2, 1) / (1.0 - r2))
+        p_un = np.clip(2.0 * sps.t.sf(tval, max(n_f - 2, 1)), 1e-300, 1.0 - 1e-15)
+        z = np.sign(r) * sps.norm.isf(p_un / 2.0)
+        w = np.sqrt(n_f)
+        Z += np.where(present, w * z, 0.0); W += np.where(present, w ** 2, 0.0)
+        KW += np.where(present, n_f * r, 0.0); NW += np.where(present, n_f, 0.0)
+        c = calls.reindex(idx)
+        fold_best.append(np.array([cols.index(int(b)) if int(b) in cols else -1 for b in c["best_other_module"].values]))
+        discordant |= c["label_discordant"].values.astype(bool)
+    Zc = np.where(W > 0, Z / np.sqrt(np.maximum(W, 1e-12)), 0.0)
+    best_j = np.abs(Zc).argmax(axis=1)
+    rows = np.arange(len(idx))
+    z_best = Zc[rows, best_j]
+    n_mod = max(1, len(cols))
+    p = np.minimum(2.0 * sps.norm.sf(np.abs(z_best)) * n_mod, 1.0)
+    q = _bh_adjust(p)
+    kme = KW[rows, best_j] / np.maximum(NW[rows, best_j], 1.0)
+    agree = np.all(np.vstack(fold_best) == best_j[None, :], axis=0)
+    called = np.abs(kme) >= float(min_kme)
+    if alpha is not None:
+        called &= q < float(alpha)
+    if require_module_agreement:
+        called &= agree
+    c0 = per_fold[0].reindex(idx)
+    for f, k in enumerate(kmes):
+        kme_cols[f"kme_fold{f}"] = k.reindex(index=idx, columns=cols).values[rows, best_j]
+    out = pd.DataFrame({
+        "gene_id": c0["gene_id"].values,
+        "gene_module": c0["gene_module"].values,
+        "best_other_module": [cols[j] for j in best_j],
+        "kme_residual": kme,
+        "z_combined": z_best,
+        "p_value": p,
+        "q_value": q,
+        "n_folds": len(folds),
+        "modules_agree": agree,
+        "label_discordant": discordant,
+        "n_isoforms": c0["n_isoforms"].values,
+        "mean_expr": expr.reindex(idx).mean(axis=1).values,
+        **kme_cols,
+        "called": called,
+    }, index=idx)
+    out.index.name = "feature_id"
+    logger.info("Cross-fitted isoform-specific calls over %d folds: %d of %d transcripts called",
+                len(folds), int(called.sum()), len(out))
+    return out
+
+
 def _bh_adjust(p: np.ndarray) -> np.ndarray:
     """Benjamini–Hochberg adjusted p-values."""
     p = np.asarray(p, dtype=np.float64)
@@ -184,7 +314,10 @@ def isoform_specific_calls(
     input_scale: str = "log2",
     loo_eigengene: "bool | str" = "approx",
     labels_for_eigengenes: Optional[np.ndarray] = None,
-) -> pd.DataFrame:
+    return_kme: bool = False,
+    covariates: Optional[pd.DataFrame] = None,
+    max_target_corr: Optional[float] = None,
+) -> "pd.DataFrame | Tuple[pd.DataFrame, pd.DataFrame]":
     """
     Call isoforms whose *gene-programme-removed* profile belongs to a module
     other than their gene's ("isoform-specific membership").
@@ -262,6 +395,17 @@ def isoform_specific_calls(
     cols = [int(c) for c in eigengenes.columns]
     gm_per_tx = np.array([gene_mod.get(g, -1) for g in stats["gene_id"].values])
 
+    if covariates is not None and covariates.shape[1] > 0:
+        # Sample-level covariates (library size, RIN, batch) that the sibling regression does not remove
+        # are regressed out of both the residuals and the eigengenes before any correlation.
+        Cv = covariates.reindex(expr.columns).values.astype(np.float64)
+        if np.isnan(Cv).any():
+            raise ValueError("covariates must be given for every sample of expr")
+        Cv = np.column_stack([np.ones(len(Cv)), Cv])
+        P = np.linalg.pinv(Cv)
+        R = resid.values.astype(np.float64); resid = pd.DataFrame(R - (R @ P.T) @ Cv.T, index=resid.index, columns=resid.columns)
+        Ev = eigengenes.values.astype(np.float64); eigengenes = pd.DataFrame(Ev - Cv @ (P @ Ev), index=eigengenes.index, columns=eigengenes.columns)
+
     kme = np.zeros((len(resid), len(cols)), dtype=np.float64)
     if residualize_eigengenes:
         for gm in np.unique(gm_per_tx):
@@ -329,6 +473,16 @@ def isoform_specific_calls(
     for i, gm in enumerate(gm_per_tx):
         if gm in cols:
             kme[i, cols.index(int(gm))] = 0.0
+    if max_target_corr is not None:
+        # Modules whose eigengene correlates with the gene's module above the threshold are the same
+        # programme split by the clustering, not a divergence target; exclude them per gene module.
+        Ec = np.corrcoef(eigengenes.values.T.astype(np.float64))
+        for gm in np.unique(gm_per_tx):
+            if gm not in cols:
+                continue
+            j = cols.index(int(gm))
+            excl = np.where(np.abs(Ec[j]) > float(max_target_corr))[0]
+            kme[np.ix_(np.where(gm_per_tx == gm)[0], excl)] = 0.0
     best_j = np.abs(kme).argmax(axis=1)
     best = kme[np.arange(len(resid)), best_j]
     n = expr.shape[1]
@@ -357,6 +511,8 @@ def isoform_specific_calls(
     out.index.name = "feature_id"
     logger.info("Isoform-specific calls: %d of %d multi-isoform transcripts (kME ≥ %.2f%s)",
                 int(out["called"].sum()), len(out), min_kme, f", FDR < {alpha}" if alpha is not None else "")
+    if return_kme:
+        return out, pd.DataFrame(kme, index=resid.index, columns=cols)
     return out
 
 

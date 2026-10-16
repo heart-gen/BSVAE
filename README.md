@@ -95,7 +95,7 @@ bsvae-networks extract-modules \
   --soft-eigengenes
 ```
 
-With transcript-level data, pass `--tx2gene` as well. `extract-modules` then produces two independent outputs: module assignments annotated by the gene-coherence policy (default; `--no-gene-coherence` to disable) and the isoform-specific residual scan (`--no-isoform-calls` to skip, `--loo-eigengene` to change the leave-one-gene-out eigengene correction). A transcript's module label never decides whether it is tested.
+With transcript-level data, pass `--tx2gene` as well. `extract-modules` then produces two independent outputs: module assignments annotated by the gene-coherence policy (default; `--no-gene-coherence` to disable) and the isoform-specific residual scan (`--no-isoform-calls` to skip, `--loo-eigengene` to change the leave-one-gene-out eigengene correction). A transcript's module label never decides whether it is tested. For calibrated calls, pass technical covariates (`--covariates`) and, where modules were learned on the same samples, cross-fit over sample folds (`isoform-specific --folds`).
 
 ```bash
 bsvae-networks extract-modules \

@@ -338,13 +338,20 @@ def create_dataloader_from_expression(
     path: str,
     batch_size: int = 128,
     shuffle: bool = False,
+    samples: Optional[str] = None,
+    exclude_samples: Optional[str] = None,
 ) -> Tuple:
     """
     Create a DataLoader from an expression matrix for inference.
 
-    Returns (dataloader, feature_ids, sample_ids).
+    ``samples`` / ``exclude_samples`` restrict the columns to the subset the
+    model was trained on (id files, one per line).  Returns (dataloader,
+    feature_ids, sample_ids).
     """
     from bsvae.utils.datasets import OmicsDataset
     dataset = OmicsDataset(path)
+    if samples or exclude_samples:
+        from bsvae.cli._common import subset_samples
+        dataset = subset_samples(dataset, samples, exclude_samples)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
     return loader, dataset.feature_ids, dataset.sample_ids

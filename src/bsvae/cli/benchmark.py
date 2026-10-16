@@ -27,6 +27,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--outdir", required=True)
     r.add_argument("--methods", default="bsvae,wgcna", help="Comma list (default: bsvae,wgcna).")
     r.add_argument("--reps", type=int, default=None, help="Replicates per scenario (default: config reps).")
+    r.add_argument("--rep-ids", default=None,
+                   help="Comma list of replicate indices to run (e.g. one per SLURM task); overrides --reps.")
     r.add_argument("--seeds", default="0", help="Comma list of method seeds (default: 0).")
     r.add_argument("--scenario-ids", default=None, help="Comma list to restrict scenarios.")
     r.add_argument("--k-mode", choices=["oracle", "sweep"], default="oracle")
@@ -96,6 +98,7 @@ def handle_run(args, logger):
         args.config, args.outdir,
         methods=[m.strip() for m in args.methods.split(",") if m.strip()],
         reps=args.reps,
+        rep_ids=[int(x) for x in args.rep_ids.split(",")] if args.rep_ids else None,
         seeds=[int(s) for s in args.seeds.split(",") if s.strip()],
         k_mode=args.k_mode,
         bsvae_cfg=bsvae_cfg, wgcna_cfg=wgcna_cfg, post_cfg=post_cfg,

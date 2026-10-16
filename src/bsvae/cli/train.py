@@ -14,6 +14,8 @@ from os.path import join
 from torch import optim
 
 from bsvae.cli._common import (
+    add_sample_subset_args,
+    subset_samples,
     add_general_args,
     add_loss_args,
     add_model_args,
@@ -42,6 +44,7 @@ def parse_args(cli_args=None):
     )
     p.add_argument("name", type=str, help="Experiment name (output subdirectory).")
     p.add_argument("--dataset", required=True, help="Expression matrix (features × samples). CSV/TSV/HDF5/h5ad.")
+    add_sample_subset_args(p)
     p.add_argument("--epochs", type=int, default=100)
     add_general_args(p)
     add_schedule_args(p, checkpoint_default=10)
@@ -61,6 +64,7 @@ def main(args):
 
     # --- Data ---
     dataset = OmicsDataset(args.dataset, logger=logger, return_index=True)
+    dataset = subset_samples(dataset, args.samples, args.exclude_samples, logger)
     n_features = dataset.n_samples   # profile length = number of samples
     feature_ids = dataset.feature_ids
     logger.info("Dataset: %d features × %d samples", len(feature_ids), n_features)

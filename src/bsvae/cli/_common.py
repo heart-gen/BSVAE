@@ -23,6 +23,47 @@ from bsvae.utils.datasets import OmicsDataset
 from bsvae.utils.training import Trainer
 
 
+def add_sample_subset_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--samples", default=None,
+                   help="Use these samples only (file with one sample id per line); for cross-fitting, train "
+                        "one model per fold on the other folds' samples and extract its modules with the same subset.")
+    p.add_argument("--exclude-samples", default=None,
+                   help="Use every sample except these (file with one sample id per line).")
+
+
+def read_id_file(path: str) -> set:
+    with open(path) as fh:
+        return {line.strip() for line in fh if line.strip()}
+
+
+def sample_mask(sample_ids: Sequence[str], keep_path: Optional[str], drop_path: Optional[str]):
+    """Boolean mask over ``sample_ids`` from keep and/or drop id files (None, None → all True)."""
+    import numpy as np
+
+    ids = [str(s) for s in sample_ids]
+    mask = np.ones(len(ids), dtype=bool)
+    if keep_path:
+        keep = read_id_file(keep_path); mask &= np.array([s in keep for s in ids])
+    if drop_path:
+        drop = read_id_file(drop_path); mask &= np.array([s not in drop for s in ids])
+    if mask.sum() < 3:
+        raise ValueError(f"Sample subset leaves {int(mask.sum())} samples")
+    return mask
+
+
+def subset_samples(dataset: OmicsDataset, keep_path: Optional[str], drop_path: Optional[str], logger=None) -> OmicsDataset:
+    """Restrict an OmicsDataset to a sample subset given by id lists (keep and/or drop)."""
+    if keep_path is None and drop_path is None:
+        return dataset
+    mask = sample_mask(dataset.sample_ids, keep_path, drop_path)
+    ids = [str(s) for s in dataset.sample_ids]
+    data = dataset.data.numpy()[:, mask]
+    if logger is not None:
+        logger.info("Sample subset: %d of %d samples kept", int(mask.sum()), len(ids))
+    return OmicsDataset(data=data, feature_ids=dataset.feature_ids, sample_ids=[s for s, m in zip(ids, mask) if m],
+                        logger=logger, return_index=dataset.return_index)
+
+
 def ast_eval(val):
     try:
         return ast.literal_eval(val)

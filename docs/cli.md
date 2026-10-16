@@ -14,6 +14,7 @@ Required:
 
 - `NAME`: experiment name
 - `--dataset`: expression matrix path
+- `--samples` / `--exclude-samples`: id files (one sample per line) restricting training to a sample subset; used for cross-fitting (train one model per fold on the other folds' samples) and pass the same subset to `extract-modules`
 
 Common options:
 
@@ -175,6 +176,8 @@ Options:
 - Gene coherence is the default annotation policy when `--expr` and `--tx2gene` are given (`--no-gene-coherence` disables it; raw labels are always written to `modules_raw.csv`): an isoform assigned to a module other than its gene's majority module is moved back to the gene's module unless its sibling-residual kME to that other module reaches `--min-kme` at BH FDR 0.05. In the same run the isoform-specific residual scan over every multi-isoform transcript is written to `isoform_specific.csv` from the raw labels (`--no-isoform-calls` to skip), so module membership and isoform-specific divergence are two independent outputs: the residual test is the primary evidence for divergence and raw-label discordance is an annotation (`label_discordant`). This removes divergence driven by abundance noise alone. On the abundance-confounding simulations (`scripts/benchmark_confounding.py`, 600 genes × 150 samples) raw BSVAE spreads the isoforms of 28–46 % of unswitched genes over two or more modules (WGCNA 22–34 %), most often for rare isoforms; with `--gene-coherence` that false-split rate falls to 11–19 % and transcript-level ARI rises by about 0.1 (for example 0.73 to 0.87 with no switching), while detection of true switches falls from 0.89 to 0.63 for abundance switches (WGCNA 0.73) and from 0.72 to 0.40 for compensated usage shifts at unit strength (WGCNA 0.48). The decision is made by the FDR test; the kME floor is not binding below 0.3. Use it when false divergence matters more than recall of switches; the hierarchical loss (`--hier-strength 0.05 --isoform-stratified`) sits between the two (false splits 25–35 %, switch detection 0.81). Writes `gene_coherence.csv`.
 - `--min-kme` default `0.3`
 - `--loo-eigengene` default `approx` (leave-one-gene-out eigengene in the residual scan; `exact` or `off`; see `isoform-specific`)
+- `--covariates`, `--max-target-corr`: passed to the residual scan (see `isoform-specific`)
+- `--samples` / `--exclude-samples`: the sample subset the model was trained on (a model encodes profiles over its training samples, so a fold model needs the same subset here)
 - `--kme-margin` default `0.1`
 - `--no-postprocess` write raw `argmax(γ)` only
 - `--soft-eigengenes`
@@ -227,10 +230,23 @@ Options:
 - `--min-kme` default `0.3` (effect-size floor; with the residualised eigengenes this keeps precision at or above the previous `0.4` default while catching about 10 % more switched isoforms on the isoform simulations)
 - `--alpha` default `0.05` (BH false-discovery rate for the residual correlation, Bonferroni-corrected over modules per transcript; `0` disables it). At 150 samples the kME floor dominates; with several hundred samples the test is what keeps weak-but-significant correlations from flooding the calls.
 - `--loo-eigengene` default `approx`: recompute each module's eigengene without the tested gene's transcripts before scoring them (first-order downdate; `exact` recomputes the PCA per gene at higher cost; `off` disables). This removes the self-contribution of a transcript to the eigengene it is tested against; see the calibration note below
+- `--covariates FILE`: samples × covariates table (first column sample id; log library size, RIN, batch dummies) regressed out of the residuals and the eigengenes before the test. Technical axes that the sibling regression does not remove otherwise produce *reproducible* false calls; on the simulations, log library size alone lowers the null type-I error from 0.10 to 0.07 and the false-positive rate from 3.5 % to 2.7 % at unchanged recall (0.71 → 0.70), raising PPV from 0.47 to 0.53
+- `--max-target-corr R`: exclude as targets the modules whose eigengene correlates with the gene's own module above `R` (default none). Components into which the clustering split one programme are not divergence targets, and false calls concentrate on them (null type-I error 0.82 for targets correlated above 0.6 with the gene's module, 0.47 at 0.4–0.6, 0.20 below 0.2); `0.4` brings the overall null type-I error to nominal (0.05 under cross-fitting) at a recall cost of about 0.02
+- `--folds FILE` with one `--modules` file per fold: cross-fitting (see below)
+- `--no-module-agreement`: with `--folds`, do not require the target module to agree across folds
 - `--no-residualize-eigengenes`, `--no-leave-one-out` restore the previous behaviour
 - `--keep-tx-version`
 
 Output columns: `gene_id, gene_module, isoform_module, label_discordant, best_other_module, kme_residual, p_value, q_value, r2_gene, n_isoforms, mean_expr, called`.
+
+Cross-fitting: a transcript tested against modules learned on the same samples carries a selection bias that no eigengene correction removes. `--folds` (TSV `sample_id, fold`) with one `modules.csv` per fold scores every fold's samples against the labels of a model that did not see them (train each fold model with `bsvae-train --exclude-samples fold_f.txt` and extract its modules with the same `--exclude-samples`), turns the per-fold residual kME of every module into signed z-scores, combines them with Stouffer's method (weights √n), and only then picks the best module (combining per-fold maxima instead is anti-conservative). Output adds `z_combined`, `modules_agree` and `kme_fold<f>`. On the simulations two-fold cross-fitting costs 0.05 recall (0.71 → 0.66 at 4 % switch prevalence) and leaves the label-concordant stratum at the nominal type-I error (0.064), but it does **not** remove the inflation among label-discordant transcripts (0.25), which turned out to be reproducible structure rather than selection: split components of one programme (`--max-target-corr`) and library-size signal (`--covariates`). With both, the cross-fitted null type-I error is 0.05 overall.
+
+```bash
+bsvae-networks isoform-specific \
+  --dataset data/transcripts.tsv.gz --tx2gene data/tx2gene.tsv \
+  --modules fold0/modules/modules_raw.csv fold1/modules/modules_raw.csv --folds folds.tsv \
+  --covariates data/sample_covariates.tsv --output results/isoform_specific_crossfit.tsv
+```
 
 Calibration: the residual p-values are close to nominal for transcripts whose raw module label is not the module they are tested against (type-I error 0.06 at 0.05 on abundance-only simulations). For transcripts whose raw label *is* the tested module, the module eigengene is recomputed without the gene's transcripts by default (leave-one-gene-out, approximate; `loo_eigengene="exact"` in the API recomputes the PCA), which lowers their type-I error from 0.50 to 0.29; the rest is selection by the clustering on the same data, so for those transcripts (`label_discordant`) treat the p-value as a ranking and confirm on held-out samples or an independent region (`target-genes-combine`).
 
@@ -458,6 +474,7 @@ Head-to-head benchmark of BSVAE and WGCNA on a scenario grid. WGCNA runs through
 ```bash
 bsvae-benchmark check-env
 bsvae-benchmark run --config iso.yaml --outdir results/bench --methods bsvae,wgcna --seeds 0,1,2 --reps 3
+bsvae-benchmark run --config iso.yaml --outdir results/bench_rep7 --methods bsvae --rep-ids 7   # one replicate (e.g. per SLURM task)
 bsvae-benchmark summarize --results results/bench/results.tsv
 ```
 
