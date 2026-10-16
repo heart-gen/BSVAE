@@ -29,7 +29,7 @@ Simulation normalisation
 
 Calibration
 
-* `isoform_specific_calls(loo_eigengene=True)` recomputes a module's eigengene without the tested gene's transcripts before scoring them (leave-one-gene-out), removing the selection bias of a transcript contributing to the eigengene it is tested against. `scripts/benchmark_calibration.py` checks the residual p-values under abundance-only null simulations (type-I error at 0.05, KS against uniform) with and without the correction, and the held-out replication of transcriptome-wide calls (labels from one half of the samples, calls validated on the other half). `summarize` reports percentile-bootstrap 95 % intervals over runs.
+* `isoform_specific_calls(loo_eigengene="approx" | "exact" | False)` removes the tested gene's transcripts from a module's eigengene before scoring them (leave-one-gene-out; approximate first-order downdate by default, exact PCA recomputation optional), removing the self-contribution of a transcript to the eigengene it is tested against. `scripts/benchmark_calibration.py` checks the residual p-values under abundance-only null simulations (type-I error at 0.05, KS against uniform) with and without the correction, and the held-out replication of transcriptome-wide calls (labels from one half of the samples, calls validated on the other half). `summarize` reports percentile-bootstrap 95 % intervals over runs.
 * Simulated cohorts can differ in their switches (`switch_keep_frac`, `switch_extra_rate`) and share donors (`donor_seed`, `donor_effect_sd`: donor-level module-factor offsets common to every region). `target-genes-combine` applies Strube's correction for dependent cohorts by default (`--correlation empirical`, the between-cohort correlation of z-scores estimated on null-like isoforms) and accepts `--min-called`.
 
 Pooling under heterogeneity and shared donors (`scripts/benchmark_pooling.py`, six 150-sample regions, 2 seeds)
@@ -44,7 +44,7 @@ Calibration (`scripts/benchmark_calibration.py`, 3 seeds)
 
 * Held-out replication: with modules learned on one half of the samples, 75–89 % of residual-scan calls on switched isoforms replicate on the other half with the same target module, against 70–78 % of calls on unswitched isoforms; the null call rate on the held-out half is 1.8–1.9 %.
 * PPV next to recall: at 1.2 % switch prevalence the transcriptome-wide scan has recall 0.53, FPR 3.6 % and PPV 0.15; at 4.1 % prevalence recall 0.71, FPR 3.4 %, PPV 0.48. False-positive rates must not be read as false-discovery rates when switches are rare.
-* [null type-I error with and without leave-one-gene-out eigengenes: see docs when the run completes]
+* Null calibration (abundance-only simulations, raw labels): for transcripts whose raw label is not the tested module (80 %), the residual test's type-I error is 0.06 at α = 0.05 and 0.023 at 0.01. For transcripts whose raw label *is* the module they are tested against it is 0.50 without correction, 0.29 with the approximate and 0.26 with the exact leave-one-gene-out eigengene; the approximate correction (a first-order downdate of the eigengene, 2.3× the cost of the plain scan) is now the default, and the remaining inflation is selection by the clustering on the same data, which only held-out validation removes. After gene coherence the surviving discordant transcripts are, by construction, those that passed the same test (type-I 0.98 uncorrected), which is why the scan runs on the raw labels.
 
 Cross-cohort targeted tests
 

@@ -8,8 +8,8 @@ Three checks on the transcript-level simulator:
               membership, so the caller's p-values should be uniform.  Reports the
               type-I error at 0.05 and 0.01, the Kolmogorov–Smirnov distance from
               uniform, and the fraction called at the default thresholds, for
-              labels from a trained BSVAE (raw and after gene coherence), with and
-              without the leave-one-gene-out eigengene, and stratified by whether
+              labels from a trained BSVAE (raw and after gene coherence), without,
+              with the approximate and with the exact leave-one-gene-out eigengene, and stratified by whether
               the transcript's raw label is the module it is tested against (the
               selection-bias case).
   heldout     samples are split in half: modules are learned on half A and the
@@ -95,7 +95,7 @@ def main(argv=None):
         raw = train_labels(expr, seed, outdir / f"seed_{seed}" / "null", args.epochs)
         coh, _ = enforce_gene_coherence(raw, expr, fids, t2g)
         for label, lab in (("raw", raw), ("coherent", coh)):
-            for variant, loo in (("plain", False), ("leave_one_gene_out", True)):
+            for variant, loo in (("plain", False), ("loo_approx", "approx"), ("loo_exact", "exact")):
                 calls = isoform_specific_calls(expr, t2g, lab, fids, loo_eigengene=loo)
                 calls.to_csv(outdir / f"seed_{seed}" / f"null_calls_{label}_{variant}.tsv", sep="\t")
                 new_rows = null_rows(calls, label, seed, variant)
@@ -114,8 +114,8 @@ def main(argv=None):
             A, B = expr.iloc[:, cols[:half]], expr.iloc[:, cols[half:]]
             logger.info("seed %d | switch %.2f: training on half A", seed, rate)
             labA = train_labels(A, seed, outdir / f"seed_{seed}" / f"heldout_{rate}", args.epochs)
-            cA = isoform_specific_calls(A, t2g, labA, fids, loo_eigengene=True)
-            cB = isoform_specific_calls(B, t2g, labA, fids, loo_eigengene=True)
+            cA = isoform_specific_calls(A, t2g, labA, fids)
+            cB = isoform_specific_calls(B, t2g, labA, fids)
             sw = st.loc[cA.index, "is_switched"].values == 1
             a_called = cA["called"].values; b_called = cB["called"].reindex(cA.index).fillna(False).values
             same_module = (cA["best_other_module"].values == cB["best_other_module"].reindex(cA.index).values)
@@ -126,7 +126,7 @@ def main(argv=None):
             # full-data PPV
             logger.info("seed %d | switch %.2f: training on all samples", seed, rate)
             lab = train_labels(expr, seed, outdir / f"seed_{seed}" / f"full_{rate}", args.epochs)
-            calls = isoform_specific_calls(expr, t2g, lab, fids, loo_eigengene=True)
+            calls = isoform_specific_calls(expr, t2g, lab, fids)
             sw = st.loc[calls.index, "is_switched"].values == 1
             c = calls["called"].values
             rows.append({"check": "ppv", "seed": seed, "switch_rate": rate, "prevalence": float(sw.mean()),

@@ -164,7 +164,8 @@ def test_calls_annotate_label_discordance_without_filtering():
     assert calls.loc[~disc, "p_value"].notna().all()
 
 
-def test_loo_eigengene_removes_self_contribution():
+@pytest.mark.parametrize("mode", ["exact", "approx"])
+def test_loo_eigengene_removes_self_contribution(mode):
     """A transcript labelled in the module it is tested against inflates its own kME through the
     eigengene; the leave-one-gene-out eigengene removes that contribution."""
     from bsvae.utils.isoform import isoform_specific_calls
@@ -182,8 +183,10 @@ def test_loo_eigengene_removes_self_contribution():
     lab = truth.copy()
     for i in bad:
         lab[i] = rng.choice([m for m in range(4) if m != truth[i]])
-    plain = isoform_specific_calls(expr, t2g, lab, list(expr.index), alpha=None, min_kme=0.0)
-    loo = isoform_specific_calls(expr, t2g, lab, list(expr.index), alpha=None, min_kme=0.0, loo_eigengene=True)
+    plain = isoform_specific_calls(expr, t2g, lab, list(expr.index), alpha=None, min_kme=0.0, loo_eigengene=False)
+    loo = isoform_specific_calls(expr, t2g, lab, list(expr.index), alpha=None, min_kme=0.0, loo_eigengene=mode)
+    with pytest.raises(ValueError):
+        isoform_specific_calls(expr, t2g, lab, list(expr.index), loo_eigengene="bogus")
     ids = [expr.index[i] for i in bad]
     # for the mislabelled transcripts the plain kME to their (wrong) own module is inflated
     own_plain = np.array([plain.loc[t, "kme_residual"] if plain.loc[t, "best_other_module"] == lab[i] else np.nan for t, i in zip(ids, bad)])
