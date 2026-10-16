@@ -27,13 +27,38 @@ from bsvae.benchmark.runners import (
     run_wgcna,
     wgcna_available,
 )
+from bsvae.benchmark.edges import edge_metrics, edges_from_labels
 from bsvae.simulation.metrics import evaluate_labels, gene_level_metrics, normalize_labels, switched_isoform_metrics
 from bsvae.simulation.scenario import expand_scenarios, generate_scenario, load_config
 
 logger = logging.getLogger(__name__)
 
 METHODS = ("bsvae", "wgcna")
-KNOWN_METHODS = ("bsvae", "bsvae_consensus", "bsvae_isoform", "bsvae_regressed", "wgcna", "wgcna_signed", "wgcna_unsigned", "wgcna_regressed")
+KNOWN_METHODS = ("bsvae", "bsvae_raw", "bsvae_coherent", "bsvae_hier", "bsvae_consensus", "bsvae_isoform", "bsvae_regressed",
+                 "wgcna", "wgcna_raw", "wgcna_coherent", "wgcna_signed", "wgcna_unsigned", "wgcna_regressed",
+                 "usage_network", "ica", "nmf", "acorde", "twn")
+# Gene coherence is the default annotation policy whenever the scenario has transcript structure:
+# ``bsvae`` / ``wgcna`` apply it, ``bsvae_raw`` / ``wgcna_raw`` do not, ``*_coherent`` are explicit aliases.
+COHERENT_DEFAULT = {"bsvae": True, "bsvae_raw": False, "bsvae_coherent": True, "bsvae_regressed": True,
+                    "wgcna": True, "wgcna_raw": False, "wgcna_coherent": True, "wgcna_signed": True,
+                    "wgcna_unsigned": True, "wgcna_regressed": True}
+
+
+def _apply_coherence(result: MethodResult, expr: pd.DataFrame, truth: Dict, post_cfg: Optional[Dict], out_dir: Path) -> MethodResult:
+    """Gene-coherence annotation policy on a label result (raw labels kept in modules_raw.csv)."""
+    from bsvae.networks.postprocess import enforce_gene_coherence
+    if result.status != "ok" or result.labels is None or "tx2gene" not in truth:
+        return result
+    fids = [str(f) for f in expr.index]
+    lab = result.labels.reindex(fids).fillna(-1).astype(int).values
+    pd.DataFrame({"feature_id": fids, "module": lab}).to_csv(out_dir / "modules_raw.csv", index=False)
+    new_lab, table = enforce_gene_coherence(lab, expr, fids, truth["tx2gene"],
+                                            min_kme=float((post_cfg or {}).get("isoform_min_kme", 0.3)))
+    table.to_csv(out_dir / "gene_coherence.csv")
+    result.labels = pd.Series(new_lab, index=fids, name="module")
+    result.params = {**result.params, "gene_coherence": True, "n_divergent_tested": int(len(table)),
+                     "n_divergent_kept": int(table["kept"].sum()) if len(table) else 0}
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -61,12 +86,22 @@ def load_truth(run_dir: str | Path) -> Dict:
     sw = truth / "switch_table.tsv.gz"
     if sw.exists():
         out["switch_table"] = pd.read_csv(sw, sep="\t")
+    el = truth / "edge_list.tsv.gz"
+    if el.exists():
+        out["edge_list"] = pd.read_csv(el, sep="\t")
     return out
 
 
 def evaluate_run(truth: Dict, result: MethodResult) -> Dict[str, float]:
     """Score a MethodResult against loaded truth; NaN metrics when not ok."""
-    if result.status != "ok" or result.labels is None:
+    if result.status != "ok":
+        return {}
+    if result.edges is not None and result.labels is None:
+        if "truth_gene" not in truth:
+            return {}
+        return {f"edge_{k}": v for k, v in edge_metrics(
+            result.edges, truth["truth_gene"], truth.get("switch_table"), truth.get("edge_list"), truth.get("tx2gene")).items()}
+    if result.labels is None:
         return {}
     if result.method == "bsvae_isoform":
         if "switch_table" not in truth:
@@ -91,6 +126,13 @@ def evaluate_run(truth: Dict, result: MethodResult) -> Dict[str, float]:
                 truth_tx=dict(zip(truth_labels.index, truth_labels.values)),
             )
         )
+        if "expr" in truth and truth["expr"] is not None:
+            try:
+                e = edges_from_labels(truth["expr"], pred, truth["tx2gene"])
+                metrics.update({f"edge_{k}": v for k, v in edge_metrics(
+                    e, truth["truth_gene"], None, truth.get("edge_list"), truth.get("tx2gene")).items()})
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("edge metrics from labels failed: %s", exc)
     return metrics
 
 
@@ -143,19 +185,23 @@ def run_one(
     truth = load_truth(run_dir)
     expr = pd.read_csv(truth["expr_path"], sep="\t", index_col=0)
     expr.index = expr.index.astype(str)
+    truth["expr"] = expr
+    expr.index = expr.index.astype(str)
     if method.endswith("_regressed"):
         from bsvae.utils.preprocess import regress_covariates
         cov = pd.read_csv(truth["covariates_path"], sep="\t", index_col=0)
         # Known technical covariate only (batch); condition is biology.
         expr = regress_covariates(expr, cov, columns=["batch"])
         method_base = method[: -len("_regressed")]
+    elif method in ("bsvae_raw", "wgcna_raw"):
+        method_base = method[: -len("_raw")]
     else:
         method_base = method
     out_dir = run_dir / "methods" / method / f"seed_{seed}"
     out_dir.mkdir(parents=True, exist_ok=True)
     n_modules = int(truth["metadata"]["summary"].get("n_modules", truth["metadata"]["parameters"].get("n_modules", 20)))
 
-    if method_base == "bsvae":
+    if method_base in ("bsvae", "bsvae_coherent"):
         cfg = dict(bsvae_cfg or {})
         if k_mode == "sweep":
             cfg.setdefault("_k_mode", "sweep")
@@ -170,6 +216,17 @@ def run_one(
             train_cfg={k: v for k, v in cfg.items() if not k.startswith("_")},
             post_cfg=post_cfg, device=device, postprocess=postprocess, **kwargs,
         )
+    elif method == "bsvae_hier":
+        if "tx2gene" not in truth:
+            result = MethodResult(method, "skipped", message="scenario has no transcript structure")
+        else:
+            cfg = {k: v for k, v in (bsvae_cfg or {}).items() if not k.startswith("_")}
+            cfg = dict(cfg, hier_strength=cfg.get("hier_strength", 0.05), isoform_stratified=True)
+            tx2gene = pd.DataFrame(list(truth["tx2gene"].items()), columns=["transcript_id", "gene_id"])
+            kwargs = {"over_cluster_factor": over_cluster_factor} if over_cluster_factor is not None else {}
+            result = run_bsvae(expr, n_modules=n_modules, seed=seed, workdir=out_dir, tx2gene=tx2gene, train_cfg=cfg,
+                               post_cfg=post_cfg, device=device, postprocess=postprocess, **kwargs)
+            result.method = method
     elif method == "bsvae_consensus":
         from bsvae.networks.postprocess import consensus_assignments
         cfg = {k: v for k, v in (bsvae_cfg or {}).items() if not k.startswith("_")}
@@ -219,7 +276,29 @@ def run_one(
                                       params={**sub.params, "isoform_min_kme": min_kme, "n_called": int(len(called))})
             else:
                 result = MethodResult("bsvae_isoform", sub.status, runtime_s=sub.runtime_s, message=sub.message)
-    elif method_base in ("wgcna", "wgcna_unsigned", "wgcna_signed"):
+    elif method == "usage_network":
+        from bsvae.benchmark.methods import run_usage_network
+        if "tx2gene" not in truth:
+            result = MethodResult("usage_network", "skipped", message="scenario has no transcript structure")
+        else:
+            result = run_usage_network(expr, truth["tx2gene"], workdir=out_dir, seed=seed, wgcna_cfg=wgcna_cfg)
+    elif method in ("ica", "nmf"):
+        from bsvae.benchmark.methods import run_ica, run_nmf
+        from bsvae.benchmark.runners import over_cluster_k
+        k = over_cluster_k(n_modules, over_cluster_factor, n_features=expr.shape[0]) if over_cluster_factor else n_modules
+        fn = run_ica if method == "ica" else run_nmf
+        result = fn(expr, n_components=k, workdir=out_dir, seed=seed,
+                    min_module_size=(post_cfg or {}).get("min_module_size", 10))
+    elif method == "acorde":
+        from bsvae.benchmark.methods import run_acorde
+        result = run_acorde(expr, workdir=out_dir, seed=seed)
+    elif method == "twn":
+        from bsvae.benchmark.methods import run_twn
+        if "tx2gene" not in truth:
+            result = MethodResult("twn", "skipped", message="scenario has no transcript structure")
+        else:
+            result = run_twn(expr, truth["tx2gene"], workdir=out_dir)
+    elif method_base in ("wgcna", "wgcna_unsigned", "wgcna_signed", "wgcna_coherent"):
         cfg = dict(WGCNA_DEFAULTS)
         cfg.update(wgcna_cfg or {})
         if method_base == "wgcna_unsigned":
@@ -231,6 +310,8 @@ def run_one(
         raise ValueError(f"Unknown method: {method}")
 
     result.method = method
+    if COHERENT_DEFAULT.get(method, False):
+        result = _apply_coherence(result, expr, truth, post_cfg, out_dir)
     metrics = evaluate_run(truth, result) if result.status == "ok" else {}
     if result.labels is not None:
         pd.DataFrame({"feature_id": result.labels.index, "module": result.labels.values}).to_csv(
@@ -326,22 +407,52 @@ def run_grid(
 SUMMARY_METRICS = [
     "ari_all", "nmi_all", "ari_assigned", "nmi_assigned", "mean_best_match_jaccard",
     "module_recovery_50", "frac_pred_grey", "grey_recall", "grey_precision", "K_ratio",
-    "gene_ari", "split_detection_rate", "isoform_gene_agreement",
-    "switched_recall", "switched_precision", "switched_ari", "runtime_s",
+    "gene_ari", "split_detection_rate", "false_split_rate", "isoform_gene_agreement",
+    "switched_recall", "switched_precision", "switched_ari",
+    "edge_tt_precision", "edge_tt_recall", "edge_ti_switched_precision", "edge_ti_switched_recall",
+    "edge_ti_unswitched_false_rate", "runtime_s",
 ]
 
 
-def summarize(df: pd.DataFrame, by: Sequence[str] = ("scenario_id", "method")) -> pd.DataFrame:
-    """Mean ± sd per group for the headline metrics (ok rows only)."""
+def summarize(
+    df: pd.DataFrame,
+    by: Sequence[str] = ("scenario_id", "method"),
+    ci: bool = True,
+    n_boot: int = 2000,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """
+    Mean ± sd per group for the headline metrics (ok rows only) and, with
+    ``ci``, a percentile bootstrap 95 % interval over the runs of each group
+    (``*_ci_lo`` / ``*_ci_hi``; NaN with fewer than three runs).  Runs are the
+    unit of replication, so with several seeds per independently generated
+    dataset (``rep``) the interval reflects both sources of variation.
+    """
     ok = df[df["status"] == "ok"] if "status" in df else df
     cols = [c for c in SUMMARY_METRICS if c in ok.columns]
     if ok.empty or not cols:
         return pd.DataFrame(columns=list(by))
-    g = ok.groupby(list(by))[cols]
+    g = ok.groupby(list(by), dropna=False)[cols]
     mean = g.mean().add_suffix("_mean")
     sd = g.std(ddof=0).add_suffix("_sd")
     n = g.size().rename("n_runs")
-    return pd.concat([n, mean, sd], axis=1).reset_index()
+    parts = [n, mean, sd]
+    if ci:
+        rng = np.random.default_rng(int(seed))
+        lo_rows, hi_rows, idx = [], [], []
+        for key, sub in ok.groupby(list(by), dropna=False):
+            lo, hi = {}, {}
+            for c in cols:
+                v = sub[c].dropna().values.astype(float)
+                if len(v) < 3:
+                    lo[f"{c}_ci_lo"] = np.nan; hi[f"{c}_ci_hi"] = np.nan
+                    continue
+                boots = rng.choice(v, size=(int(n_boot), len(v)), replace=True).mean(axis=1)
+                lo[f"{c}_ci_lo"] = float(np.percentile(boots, 2.5)); hi[f"{c}_ci_hi"] = float(np.percentile(boots, 97.5))
+            lo_rows.append(lo); hi_rows.append(hi); idx.append(key)
+        index = pd.MultiIndex.from_tuples(idx, names=list(by)) if len(by) > 1 else pd.Index([k[0] if isinstance(k, tuple) else k for k in idx], name=by[0])
+        parts += [pd.DataFrame(lo_rows, index=index), pd.DataFrame(hi_rows, index=index)]
+    return pd.concat(parts, axis=1).reset_index()
 
 
 __all__ = ["run_grid", "run_one", "evaluate_run", "load_truth", "summarize", "METHODS"]

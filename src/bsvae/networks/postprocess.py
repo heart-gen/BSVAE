@@ -20,7 +20,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Tuple, Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -316,6 +316,86 @@ def _merge_gamma(gamma: np.ndarray, module_map: Dict[int, int], n_final: int) ->
     return out
 
 
+def enforce_gene_coherence(
+    labels: np.ndarray,
+    expr: pd.DataFrame,
+    feature_ids: Sequence[str],
+    tx2gene: "pd.Series | Dict[str, str]",
+    *,
+    min_kme: float = 0.3,
+    alpha: float = 0.05,
+    keep_version: bool = False,
+) -> Tuple[np.ndarray, pd.DataFrame]:
+    """
+    Keep an isoform in a module different from its gene's majority module only
+    when its gene-programme-removed residual supports that membership.
+
+    Isoforms of one gene share the gene's expression programme, so a noisy or
+    low-abundance isoform often lands in a neighbouring module by abundance
+    alone (abundance confounding).  For every assigned isoform whose label
+    differs from its gene's majority label, the sibling-residual kME to its
+    own module (eigengene residualised on the gene's module eigengene, as in
+    :func:`bsvae.utils.isoform.isoform_specific_calls`) is tested; isoforms
+    whose |kME| is below ``min_kme`` or not significant at BH FDR ``alpha``
+    are moved to the gene's majority module.  Grey isoforms are untouched.
+
+    Returns the corrected labels and a table of the candidates with
+    ``gene_id, gene_module, module, kme_residual, p_value, q_value, kept``.
+    """
+    from collections import Counter
+
+    from scipy import stats as sps
+
+    from bsvae.utils.isoform import (
+        _bh_adjust, _residualize_eigengenes, isoform_residuals, map_transcripts_to_genes,
+    )
+
+    fids = [str(f) for f in feature_ids]
+    labels = np.asarray(labels).astype(np.int64).copy()
+    expr = expr.copy(); expr.index = expr.index.astype(str)
+    tx_gene = map_transcripts_to_genes(fids, tx2gene, keep_version)
+    lab = pd.Series(labels, index=fids)
+    gene_mod: Dict[str, int] = {}
+    for g, idx in tx_gene.dropna().groupby(tx_gene.dropna()).groups.items():
+        votes = [int(v) for v in lab.loc[list(idx)] if v >= 0]
+        gene_mod[g] = Counter(votes).most_common(1)[0][0] if votes else -1
+    gm = np.array([gene_mod.get(g, -1) if isinstance(g, str) else -1 for g in tx_gene.values])
+    cand = np.where((labels >= 0) & (gm >= 0) & (labels != gm))[0]
+    columns = ["gene_id", "gene_module", "module", "kme_residual", "p_value", "q_value", "kept"]
+    if cand.size == 0:
+        return labels, pd.DataFrame(columns=columns)
+    eig = module_eigengenes(expr, labels, fids).dropna(axis=1, how="any")
+    cols = [int(c) for c in eig.columns]
+    resid, _ = isoform_residuals(expr, tx2gene, keep_version=keep_version)
+    S = expr.shape[1]
+    kme = np.full(cand.size, np.nan)
+    for g in np.unique(gm[cand]):
+        rows = cand[gm[cand] == g]
+        E = _residualize_eigengenes(eig, cols.index(int(g))) if g in cols else eig
+        ids = [fids[i] for i in rows]
+        have = [t for t in ids if t in resid.index]
+        if not have:
+            continue
+        K = compute_kme(resid, E, have)
+        for i, t in zip(rows, ids):
+            if t in K.index and labels[i] in cols:
+                kme[np.where(cand == i)[0][0]] = float(K.loc[t, E.columns[cols.index(int(labels[i]))]])
+    r2 = np.minimum(np.nan_to_num(kme) ** 2, 1 - 1e-12)
+    tval = np.abs(np.nan_to_num(kme)) * np.sqrt(max(S - 2, 1) / (1 - r2))
+    p = np.minimum(2.0 * sps.t.sf(tval, max(S - 2, 1)) * max(len(cols) - 1, 1), 1.0)
+    p[np.isnan(kme)] = 1.0
+    q = _bh_adjust(p)
+    kept = (np.abs(np.nan_to_num(kme)) >= float(min_kme)) & (q < float(alpha))
+    out = pd.DataFrame({"gene_id": tx_gene.values[cand], "gene_module": gm[cand], "module": labels[cand],
+                        "kme_residual": kme, "p_value": p, "q_value": q, "kept": kept},
+                       index=[fids[i] for i in cand])
+    out.index.name = "feature_id"
+    labels[cand[~kept]] = gm[cand[~kept]]
+    logger.info("Gene coherence: %d divergent isoforms tested, %d kept, %d moved to their gene's module",
+                cand.size, int(kept.sum()), int((~kept).sum()))
+    return labels, out
+
+
 def postprocess_assignments(
     gamma: np.ndarray,
     feature_ids: Sequence[str],
@@ -442,7 +522,7 @@ def save_postprocess(result: PostprocessResult, output_dir: str | Path, feature_
     logger.info("Saved post-processed modules to %s", out)
 
 
-__all__ = [
+__all__ = ["enforce_gene_coherence", 
     "GREY",
     "PostprocessResult",
     "assign_with_confidence",

@@ -88,6 +88,7 @@ class MethodResult:
     runtime_s: float = 0.0
     params: Dict = field(default_factory=dict)
     message: str = ""
+    edges: Optional[pd.DataFrame] = None         # node1, node2, edge_type, weight (edge-list methods)
 
 
 # ---------------------------------------------------------------------------

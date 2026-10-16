@@ -215,3 +215,36 @@ def test_consensus_cli_roundtrip(tmp_path):
     from bsvae.simulation.metrics import compute_ari
     assert compute_ari(truth, out["module"].values) == pytest.approx(1.0)
     assert json.load(open(tmp_path / "out" / "consensus_summary.json"))["n_runs"] == 3
+
+
+
+def test_gene_coherence_moves_unsupported_divergence_and_keeps_switches():
+    """Unswitched isoforms placed apart from their gene by abundance noise return to the gene's
+    module; a truly switched isoform (residual tracks the other module) stays."""
+    from bsvae.networks.postprocess import enforce_gene_coherence
+    from bsvae.simulation.scenario import ISOFORM_GENERATOR_DEFAULTS, simulate_params
+    p = dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=300, n_samples=120, n_modules=4, switch_rate=0.3,
+             alpha=1.0, signal_scale=3.0, null_fraction=0.0)
+    r = simulate_params(p, seed=8)
+    expr = r.expr_features_x_samples; expr.index = expr.index.astype(str)
+    t2g = dict(zip(r.extra_truth["tx2gene.tsv"]["transcript_id"].astype(str), r.extra_truth["tx2gene.tsv"]["gene_id"].astype(str)))
+    st = r.extra_truth["switch_table.tsv.gz"].set_index("transcript_id")
+    truth = r.modules_hard.set_index("feature_id")["module"].reindex(expr.index).values.copy()
+    # corrupt: move 40 unswitched minor isoforms to a random other module
+    rng = np.random.default_rng(0)
+    minor = np.where((st.loc[expr.index, "isoform_rank"].values > 0) & (st.loc[expr.index, "is_switched"].values == 0))[0]
+    bad = rng.choice(minor, size=40, replace=False)
+    corrupted = truth.copy()
+    for i in bad:
+        corrupted[i] = rng.choice([m for m in range(4) if m != truth[i]])
+    fixed, table = enforce_gene_coherence(corrupted, expr, list(expr.index), t2g)
+    assert set(table.columns) == {"gene_id", "gene_module", "module", "kme_residual", "p_value", "q_value", "kept"}
+    assert (fixed[bad] == truth[bad]).mean() > 0.8          # noise-driven divergence undone
+    sw = np.where(st.loc[expr.index, "is_switched"].values == 1)[0]
+    assert (fixed[sw] == truth[sw]).mean() > 0.7            # real switches survive
+    # labels never become grey and non-candidates are untouched
+    untouched = np.setdiff1d(np.arange(len(truth)), np.concatenate([bad, sw]))
+    assert (fixed[untouched] == corrupted[untouched]).all()
+    # no candidates → unchanged
+    same, tab = enforce_gene_coherence(truth[truth >= 0][:0], expr.iloc[:0], [], t2g)
+    assert len(tab) == 0

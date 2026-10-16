@@ -9,6 +9,7 @@ Subcommands
   isoform-residuals  Gene-programme-removed transcript matrix (residuals)
   isoform-specific   Call isoforms whose residual belongs to another module
   target-genes       Test isoforms of candidate genes / GWAS loci against the module solution
+  target-genes-combine  Combine target-genes tables across cohorts / regions (Stouffer)
   module-quality     kME summaries, enrichment, preservation in a second dataset
   regress-covariates Remove known sample covariates before training
   export-latents     Save μ, logσ², γ as NPZ
@@ -94,6 +95,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Reassign features by module membership (kME) after merging. Requires --expr.")
     mp.add_argument("--min-kme", type=float, default=0.3)
     mp.add_argument("--kme-margin", type=float, default=0.1)
+    mp.add_argument("--gene-coherence", action="store_true", default=True, help=argparse.SUPPRESS)
+    mp.add_argument("--no-gene-coherence", dest="gene_coherence", action="store_false",
+                    help="Disable the default gene-coherence annotation policy (applied whenever --expr and "
+                         "--tx2gene are given): an isoform that sits in a module other than its gene's majority "
+                         "module is moved back to the gene's module unless its gene-programme-removed residual "
+                         "supports the other membership (kME >= --min-kme, BH FDR < 0.05). The raw labels are "
+                         "always written to modules_raw.csv.")
+    mp.add_argument("--no-isoform-calls", action="store_true", default=False,
+                    help="Skip the isoform-specific membership scan (isoform_specific.csv) that runs on the raw "
+                         "labels whenever --expr and --tx2gene are given.")
     mp.add_argument("--tx2gene", type=str, default=None,
                     help="TSV (transcript_id, gene_id) for isoform-to-gene aggregation.")
     mp.add_argument("--aggregate-to-gene", action="store_true", default=False,
@@ -184,6 +195,24 @@ def build_parser() -> argparse.ArgumentParser:
     tg.add_argument("--no-leave-one-out", action="store_true", default=False)
     tg.add_argument("--keep-tx-version", action="store_true", default=False)
     tg.add_argument("--seed", type=int, default=0)
+
+    # ------------------------------------------------------------------
+    # target-genes-combine
+    # ------------------------------------------------------------------
+    tc = subs.add_parser("target-genes-combine",
+                         help="Combine target-genes results from several cohorts/tissues/regions (Stouffer).")
+    tc.add_argument("--inputs", nargs="+", required=True,
+                    help="target_isoforms.tsv files, optionally as name=path (name defaults to the parent directory).")
+    tc.add_argument("--n-samples", nargs="*", default=None,
+                    help="Sample counts per input as name=N for sqrt(N) weighting (default: equal weights).")
+    tc.add_argument("--output", required=True)
+    tc.add_argument("--alpha", type=float, default=0.05)
+    tc.add_argument("--min-kme", type=float, default=0.25, help="Mean |kME| across cohorts required for a call.")
+    tc.add_argument("--min-cohorts", type=int, default=2)
+    tc.add_argument("--min-called", type=int, default=0, help="Single-cohort calls required in addition.")
+    tc.add_argument("--correlation", choices=["none", "empirical"], default="empirical",
+                    help="Strube correction for dependent cohorts (shared donors across regions), estimated from "
+                         "the correlation of per-isoform z-scores between cohorts (default: empirical).")
 
     # ------------------------------------------------------------------
     # regress-covariates
@@ -371,6 +400,33 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
             min_kme=args.min_kme,
             kme_margin=args.kme_margin,
         )
+        gene_aware = expr is not None and bool(args.tx2gene)
+        raw_labels = post.labels.copy()
+        if gene_aware:
+            import pandas as pd
+            from bsvae.utils.hierarchy import load_tx2gene
+            out_dir = Path(args.output_dir); out_dir.mkdir(parents=True, exist_ok=True)
+            t2g = load_tx2gene(path=args.tx2gene, feature_ids=feature_ids, logger=logger)
+            pd.DataFrame({"feature_id": feature_ids, "module": raw_labels,
+                          "module_label": ["grey" if m < 0 else f"M{m}" for m in raw_labels]}).to_csv(out_dir / "modules_raw.csv", index=False)
+            if not args.no_isoform_calls:
+                # Two-output workflow: the residual scan over every multi-isoform transcript runs on the raw
+                # labels, so the coherence policy below can never hide a candidate from it.
+                from bsvae.utils.isoform import isoform_specific_calls
+                calls = isoform_specific_calls(expr, t2g, raw_labels, feature_ids, min_kme=args.min_kme)
+                calls.to_csv(out_dir / "isoform_specific.csv")
+                logger.info("Isoform-specific scan: %d of %d multi-isoform transcripts called (isoform_specific.csv)",
+                            int(calls["called"].sum()), len(calls))
+            if args.gene_coherence:
+                from bsvae.networks.postprocess import enforce_gene_coherence
+                new_labels, table = enforce_gene_coherence(raw_labels, expr, feature_ids, t2g, min_kme=args.min_kme)
+                post.labels = new_labels
+                post.n_grey = int((new_labels < 0).sum())
+                table.to_csv(out_dir / "gene_coherence.csv")
+                logger.info("Gene coherence: %d divergent isoforms tested, %d moved to their gene's module",
+                            len(table), int((~table["kept"]).sum()) if len(table) else 0)
+        elif args.gene_coherence and (args.tx2gene or expr is not None):
+            logger.warning("Gene coherence and the isoform-specific scan need both --expr and --tx2gene; skipped.")
         save_postprocess(post, args.output_dir, feature_ids)
         gamma_final = post.gamma
         labels_final = post.labels
@@ -517,6 +573,31 @@ def handle_target_genes(args, logger: logging.Logger) -> None:
         locus_summary(res["isoforms"], loci_genes, labels).to_csv(out_dir / "target_loci.tsv", sep="\t", index=False)
     logger.info("Targeted-gene results written to %s (%d of %d isoforms called)",
                 out_dir, int(res["isoforms"]["called"].sum()), len(res["isoforms"]))
+
+
+def handle_target_genes_combine(args, logger: logging.Logger) -> None:
+    import numpy as np
+    import pandas as pd
+    from bsvae.networks.targets import combine_target_tests
+
+    tables = {}
+    for item in args.inputs:
+        name, _, path = item.rpartition("=") if "=" in item else ("", "", item)
+        name = name or Path(path).resolve().parent.name
+        tables[name] = pd.read_csv(path, sep="\t", index_col=0)
+    n_samples = None
+    if args.n_samples:
+        n_samples = {k: int(v) for k, v in (x.split("=", 1) for x in args.n_samples)}
+    out = combine_target_tests(tables, n_samples=n_samples, alpha=args.alpha, min_kme=args.min_kme, min_cohorts=args.min_cohorts,
+                               correlation=args.correlation, min_called=args.min_called)
+    rho = out.attrs.get("cohort_z_correlation")
+    if rho is not None and len(tables) > 1:
+        off = rho.values[np.triu_indices(len(rho), 1)]
+        logger.info("Between-cohort z correlation: mean %.2f, max %.2f", float(np.mean(off)), float(np.max(off)))
+    p = Path(args.output); p.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(p, sep="\t")
+    logger.info("Combined %d cohorts: %d isoforms, %d called (FDR < %.2f, mean |kME| >= %.2f, >= %d cohorts)",
+                len(tables), len(out), int(out["called"].sum()), args.alpha, args.min_kme, args.min_cohorts)
 
 
 def handle_regress_covariates(args, logger: logging.Logger) -> None:
@@ -732,6 +813,8 @@ def cli(argv=None):
         handle_isoform_specific(args, logger)
     elif args.command == "target-genes":
         handle_target_genes(args, logger)
+    elif args.command == "target-genes-combine":
+        handle_target_genes_combine(args, logger)
     elif args.command == "regress-covariates":
         handle_regress_covariates(args, logger)
     elif args.command == "module-quality":

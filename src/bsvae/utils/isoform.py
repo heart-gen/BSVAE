@@ -131,6 +131,18 @@ def isoform_residuals(
 __all__ = ["map_transcripts_to_genes", "gene_aggregate", "isoform_residuals"]
 
 
+def _zscore_rows_np(X: np.ndarray) -> np.ndarray:
+    Xc = X - X.mean(axis=1, keepdims=True)
+    sd = Xc.std(axis=1, ddof=1, keepdims=True)
+    return Xc / np.where(sd == 0, 1.0, sd)
+
+
+def _standardize_cols_np(E: np.ndarray) -> np.ndarray:
+    Ec = E - E.mean(axis=0, keepdims=True)
+    sd = Ec.std(axis=0, ddof=1, keepdims=True)
+    return Ec / np.where(sd == 0, 1.0, sd)
+
+
 def _bh_adjust(p: np.ndarray) -> np.ndarray:
     """Benjamini–Hochberg adjusted p-values."""
     p = np.asarray(p, dtype=np.float64)
@@ -170,10 +182,28 @@ def isoform_specific_calls(
     residualize_eigengenes: bool = True,
     leave_one_out: bool = True,
     input_scale: str = "log2",
+    loo_eigengene: "bool | str" = "approx",
+    labels_for_eigengenes: Optional[np.ndarray] = None,
 ) -> pd.DataFrame:
     """
     Call isoforms whose *gene-programme-removed* profile belongs to a module
     other than their gene's ("isoform-specific membership").
+
+    ``loo_eigengene`` guards against self-contribution: a transcript whose own
+    raw label is the module it is tested against contributed to that module's
+    eigengene, which inflates its kME.  ``"approx"`` (default) removes the
+    gene's transcripts from the eigengene by a first-order downdate of the
+    first principal component (the gene's loading-weighted profiles are
+    subtracted from the eigengene scores; the loading vector itself is kept),
+    which costs one matrix product per module.  ``"exact"`` (or ``True``)
+    recomputes the module's PCA without the gene for every (gene, module)
+    pair with a member, which is exact but slow transcriptome-wide.
+    ``False`` disables the correction.  On abundance-only null simulations
+    the type-I error at 0.05 for transcripts whose raw label is the tested
+    module is 0.50 without the correction and 0.26 with the exact one; for
+    the other transcripts it is 0.06 either way.  The remaining inflation is
+    selection on the same data by the clustering and is removed only by
+    held-out validation (see ``scripts/benchmark_calibration.py``).
 
     For every multi-isoform transcript the residual (see
     :func:`isoform_residuals`, leave-one-out by default) is correlated with
@@ -196,9 +226,14 @@ def isoform_specific_calls(
     0.3 with the residualised eigengenes keeps precision above the previous
     0.4 default on the isoform simulations.
 
+    Every multi-isoform transcript is tested, whatever its own module label:
+    the residual test is the primary evidence for isoform-specific
+    membership, and ``label_discordant`` (the transcript's own label differs
+    from its gene's majority module) is an annotation, not a filter.
+
     Returns a table indexed by transcript with gene_id, gene_module,
-    best_other_module, kme_residual, p_value, q_value, r2_gene, n_isoforms,
-    mean_expr and ``called``.
+    isoform_module, label_discordant, best_other_module, kme_residual,
+    p_value, q_value, r2_gene, n_isoforms, mean_expr and ``called``.
     """
     from collections import Counter
 
@@ -214,8 +249,8 @@ def isoform_specific_calls(
     eigengenes = eigengenes.dropna(axis=1, how="any")
     resid, stats = isoform_residuals(expr, tx2gene, keep_version=keep_version, leave_one_out=leave_one_out,
                                      input_scale=input_scale)
-    columns = ["gene_id", "gene_module", "best_other_module", "kme_residual", "p_value", "q_value",
-               "r2_gene", "n_isoforms", "mean_expr", "called"]
+    columns = ["gene_id", "gene_module", "isoform_module", "label_discordant", "best_other_module", "kme_residual",
+               "p_value", "q_value", "r2_gene", "n_isoforms", "mean_expr", "called"]
     if eigengenes.shape[1] == 0 or len(resid) == 0:
         return pd.DataFrame(columns=columns)
     tx_gene = map_transcripts_to_genes(fids, tx2gene, keep_version)
@@ -235,6 +270,61 @@ def isoform_specific_calls(
             kme[rows_idx] = compute_kme(resid.iloc[rows_idx], E, list(resid.index[rows_idx])).values
     else:
         kme = compute_kme(resid, eigengenes, list(resid.index)).values
+    mode = {True: "exact", False: "off"}.get(loo_eigengene, loo_eigengene)
+    if mode not in ("exact", "approx", "off"):
+        raise ValueError("loo_eigengene must be True/False, 'exact' or 'approx'")
+    if mode == "approx":
+        lab_e = labels if labels_for_eigengenes is None else np.asarray(labels_for_eigengenes).astype(np.int64)
+        gene_of = stats["gene_id"].values
+        Xz = _zscore_rows_np(expr.reindex(fids).values.astype(np.float64))
+        S_ = expr.shape[1]
+        for m in cols:
+            members = np.where(lab_e == m)[0]
+            if members.size < 3:
+                continue
+            Zm = Xz[members]                                   # members × samples, standardised rows
+            # PC1 of the member profiles: Zm = U S V^T ; eigengene scores ∝ V[:, 0] = Zm^T u / s
+            try:
+                U, Sv, Vt = np.linalg.svd(Zm, full_matrices=False)
+            except np.linalg.LinAlgError:
+                continue
+            u = U[:, 0]; e_full = Zm.T @ u                      # samples
+            sign = 1.0 if np.corrcoef(e_full, Zm.mean(axis=0))[0, 1] >= 0 else -1.0
+            member_gene = np.array([tx_gene.get(fids[i]) for i in members], dtype=object)
+            for g in np.unique(gene_of):
+                rows_idx = np.where(gene_of == g)[0]
+                in_mod = np.where(member_gene == g)[0]
+                if in_mod.size == 0:
+                    continue
+                e_loo = sign * (e_full - Zm[in_mod].T @ u[in_mod])
+                e_loo = (e_loo - e_loo.mean()) / (e_loo.std(ddof=1) or 1.0)
+                gm = int(gm_per_tx[rows_idx[0]])
+                if residualize_eigengenes and gm in cols and gm != m:
+                    eg = eigengenes.values[:, cols.index(gm)].astype(np.float64); eg = eg - eg.mean()
+                    e_loo = e_loo - eg * float((e_loo * eg).sum() / max((eg ** 2).sum(), 1e-12))
+                    e_loo = (e_loo - e_loo.mean()) / (e_loo.std(ddof=1) or 1.0)
+                Zr = _zscore_rows_np(resid.iloc[rows_idx].values.astype(np.float64))
+                kme[rows_idx, cols.index(m)] = Zr @ e_loo / (S_ - 1)
+    if mode == "exact":
+        lab_e = labels if labels_for_eigengenes is None else np.asarray(labels_for_eigengenes).astype(np.int64)
+        lab_e_s = pd.Series(lab_e, index=fids)
+        gene_of = stats["gene_id"].values
+        for g in np.unique(gene_of):
+            rows_idx = np.where(gene_of == g)[0]
+            members_g = [t for t in tx_gene.index[tx_gene.values == g]]
+            mods_g = {int(m) for m in lab_e_s.reindex(members_g).dropna().values if m >= 0 and int(m) in cols}
+            gm = int(gm_per_tx[rows_idx[0]])
+            for m in mods_g:
+                sub_lab = lab_e.copy()
+                sub_lab[np.isin(fids, members_g)] = -1
+                e_m = module_eigengenes(expr, np.where(sub_lab == m, m, -1), fids).dropna(axis=1, how="any")
+                if e_m.shape[1] == 0:
+                    continue
+                E_full = eigengenes.copy(); E_full.iloc[:, cols.index(m)] = e_m.iloc[:, 0].values
+                if residualize_eigengenes and gm in cols:
+                    E_full = _residualize_eigengenes(E_full, cols.index(gm))
+                k = compute_kme(resid.iloc[rows_idx], E_full, list(resid.index[rows_idx])).values[:, cols.index(m)]
+                kme[rows_idx, cols.index(m)] = k
     kme = np.nan_to_num(kme)
     for i, gm in enumerate(gm_per_tx):
         if gm in cols:
@@ -249,9 +339,12 @@ def isoform_specific_calls(
     called = np.abs(best) >= float(min_kme)
     if alpha is not None:
         called &= q < float(alpha)
+    own = lab.reindex(resid.index).fillna(-1).astype(int).values
     out = pd.DataFrame({
         "gene_id": stats["gene_id"].values,
         "gene_module": gm_per_tx,
+        "isoform_module": own,
+        "label_discordant": (own >= 0) & (gm_per_tx >= 0) & (own != gm_per_tx),
         "best_other_module": [cols[j] for j in best_j],
         "kme_residual": best,
         "p_value": p,

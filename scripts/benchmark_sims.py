@@ -56,7 +56,7 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--outdir", default="results/bench_sims")
     p.add_argument("--scenarios", default=",".join(SCENARIOS), help="Comma list of scenario names.")
-    p.add_argument("--methods", default="bsvae,wgcna")
+    p.add_argument("--methods", default="bsvae_raw,bsvae,wgcna_raw,wgcna")
     p.add_argument("--seeds", default="0,1,2")
     p.add_argument("--reps", type=int, default=1, help="Data replicates per scenario.")
     p.add_argument("--epochs", type=int, default=150)

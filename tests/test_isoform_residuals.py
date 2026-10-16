@@ -141,3 +141,58 @@ def test_linear_input_scale_sums_siblings_directly():
     np.testing.assert_allclose(resid.loc["t1"].values, ac - slope * sc, atol=1e-8)
     with pytest.raises(ValueError):
         isoform_residuals(expr, t2g, input_scale="counts")
+
+
+def test_calls_annotate_label_discordance_without_filtering():
+    """Every multi-isoform transcript is tested; discordant raw labels are an annotation."""
+    from bsvae.utils.isoform import isoform_specific_calls
+    p = dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=200, n_samples=60, n_modules=4, switch_rate=0.3, alpha=1.0,
+             signal_scale=3.0, null_fraction=0.0)
+    r = simulate_params(p, seed=9)
+    expr = r.expr_features_x_samples
+    t2g = dict(zip(r.extra_truth["tx2gene.tsv"]["transcript_id"], r.extra_truth["tx2gene.tsv"]["gene_id"]))
+    truth = r.modules_hard.set_index("feature_id")["module"].reindex(expr.index).values
+    st = r.extra_truth["switch_table.tsv.gz"].set_index("transcript_id")
+    n_multi = int((st["gene_id"].map(st.groupby("gene_id").size()) >= 2).sum())
+    calls = isoform_specific_calls(expr, t2g, truth, list(expr.index))
+    assert len(calls) == n_multi
+    assert {"isoform_module", "label_discordant"} <= set(calls.columns)
+    disc = calls["label_discordant"].values
+    sw = st.loc[calls.index, "is_switched"].values == 1
+    assert (disc == sw).mean() > 0.95                       # oracle labels: discordance == switched
+    # concordant transcripts are still tested and can be called
+    assert calls.loc[~disc, "p_value"].notna().all()
+
+
+@pytest.mark.parametrize("mode", ["exact", "approx"])
+def test_loo_eigengene_removes_self_contribution(mode):
+    """A transcript labelled in the module it is tested against inflates its own kME through the
+    eigengene; the leave-one-gene-out eigengene removes that contribution."""
+    from bsvae.utils.isoform import isoform_specific_calls
+    p = dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=200, n_samples=60, n_modules=4, switch_rate=0.0,
+             signal_scale=1.0, null_fraction=0.0)
+    r = simulate_params(p, seed=12)
+    expr = r.expr_features_x_samples
+    t2g = dict(zip(r.extra_truth["tx2gene.tsv"]["transcript_id"], r.extra_truth["tx2gene.tsv"]["gene_id"]))
+    truth = r.modules_hard.set_index("feature_id")["module"].reindex(expr.index).values.copy()
+    st = r.extra_truth["switch_table.tsv.gz"].set_index("transcript_id")
+    # mislabel 30 unswitched minor isoforms into another module (as a noisy clustering would)
+    rng = np.random.default_rng(1)
+    minor = np.where(st.loc[expr.index, "isoform_rank"].values > 0)[0]
+    bad = rng.choice(minor, size=30, replace=False)
+    lab = truth.copy()
+    for i in bad:
+        lab[i] = rng.choice([m for m in range(4) if m != truth[i]])
+    plain = isoform_specific_calls(expr, t2g, lab, list(expr.index), alpha=None, min_kme=0.0, loo_eigengene=False)
+    loo = isoform_specific_calls(expr, t2g, lab, list(expr.index), alpha=None, min_kme=0.0, loo_eigengene=mode)
+    with pytest.raises(ValueError):
+        isoform_specific_calls(expr, t2g, lab, list(expr.index), loo_eigengene="bogus")
+    ids = [expr.index[i] for i in bad]
+    # for the mislabelled transcripts the plain kME to their (wrong) own module is inflated
+    own_plain = np.array([plain.loc[t, "kme_residual"] if plain.loc[t, "best_other_module"] == lab[i] else np.nan for t, i in zip(ids, bad)])
+    own_loo = np.array([loo.loc[t, "kme_residual"] if loo.loc[t, "best_other_module"] == lab[i] else np.nan for t, i in zip(ids, bad)])
+    both = ~np.isnan(own_plain) & ~np.isnan(own_loo)
+    assert both.sum() >= 5
+    assert np.nanmean(np.abs(own_loo[both])) < np.nanmean(np.abs(own_plain[both]))
+    # p-values for the mislabelled set are less extreme with the leave-one-gene-out eigengene
+    assert loo.loc[ids, "p_value"].median() >= plain.loc[ids, "p_value"].median()
