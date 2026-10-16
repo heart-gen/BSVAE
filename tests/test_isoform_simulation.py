@@ -227,3 +227,21 @@ def test_usage_from_null_and_switch_exclusive():
     assert not (set(usage["gene_id"]) & sw_genes)
     with pytest.raises(ValueError):
         simulate_params(dict(p, usage_from="bogus"), seed=1)
+
+
+def test_sample_seed_gives_new_cohort_of_same_truth_and_tissue_shift_changes_modules():
+    from bsvae.simulation.scenario import ISOFORM_GENERATOR_DEFAULTS, simulate_params
+    p = dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=200, n_samples=40, n_modules=4)
+    a = simulate_params(p, seed=1)
+    b = simulate_params(dict(p, sample_seed=7), seed=1)
+    c = simulate_params(dict(p, sample_seed=7, tissue_shift=0.25), seed=1)
+    ga, gb, gc = (r.extra_truth["modules_gene.csv"] for r in (a, b, c))
+    assert (ga["module"].values == gb["module"].values).all()
+    assert not np.allclose(a.expr_features_x_samples.values, b.expr_features_x_samples.values)
+    sa, sb = (r.extra_truth["switch_table.tsv.gz"] for r in (a, b))
+    assert (sa["is_switched"].values == sb["is_switched"].values).all()
+    n_signal = int((ga["module"] >= 0).sum())
+    assert gc["tissue_shifted"].sum() == round(0.25 * n_signal)
+    changed = ga["module"].values != gc["module"].values
+    assert changed.sum() == gc["tissue_shifted"].sum() and (gc.loc[changed, "tissue_shifted"] == 1).all()
+    assert c.metadata["n_tissue_shifted_genes"] == int(gc["tissue_shifted"].sum())

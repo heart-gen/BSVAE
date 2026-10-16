@@ -98,6 +98,14 @@ def simulate_isoform_counts(params: Dict, seed: int) -> ScenarioResult:
     """Generate transcript-level NB data with gene-level modules and isoform switching."""
     streams = spawn_streams(seed)
     rs, rf, rl, rb, ra, rn = (streams[n] for n in STREAM_NAMES)
+    # A second cohort of the same truth: ``sample_seed`` re-seeds the sample-level streams
+    # (factors, arm effects, counting noise) while structure, loadings and baselines are kept.
+    sample_seed = params.get("sample_seed", None)
+    rt = None
+    if sample_seed is not None:
+        cohort = spawn_streams(int(sample_seed))
+        rf, ra, rn = cohort["factors"], cohort["arm"], cohort["noise"]
+        rt = cohort["struct"]
 
     n_samples = int(params.get("n_samples", 300))
     K = int(params.get("n_modules", 16))
@@ -125,6 +133,17 @@ def simulate_isoform_counts(params: Dict, seed: int) -> ScenarioResult:
     assigned = np.concatenate([np.full(sz, k, dtype=int) for k, sz in enumerate(sizes)])
     rs.shuffle(assigned)
     gene_modules[signal_genes] = assigned
+
+    # Tissue shift: in a second cohort a fraction of signal genes change module (cohort-specific
+    # stream), so module preservation statistics can be checked against a known partial change.
+    tissue_shift = float(params.get("tissue_shift", 0.0))
+    shifted_genes = np.zeros(n_genes, dtype=bool)
+    if tissue_shift > 0.0 and K > 1:
+        r_shift = rt if rt is not None else rs
+        n_shift = int(round(tissue_shift * len(signal_genes)))
+        for g in r_shift.choice(signal_genes, size=n_shift, replace=False):
+            gene_modules[g] = int(r_shift.choice([m for m in range(K) if m != gene_modules[g]]))
+            shifted_genes[g] = True
 
     # Transcript modules with switching.
     tx_modules = gene_modules[gene_of_tx].copy()
@@ -246,7 +265,8 @@ def simulate_isoform_counts(params: Dict, seed: int) -> ScenarioResult:
     modules_hard = pd.DataFrame(
         {"feature_id": tx_ids, "module": tx_modules.astype(int), "is_null": (tx_modules < 0).astype(int)}
     )
-    modules_gene = pd.DataFrame({"gene_id": gene_ids, "module": gene_modules.astype(int)})
+    modules_gene = pd.DataFrame({"gene_id": gene_ids, "module": gene_modules.astype(int),
+                                 "tissue_shifted": shifted_genes.astype(int)})
     tx2gene = pd.DataFrame({"transcript_id": tx_ids, "gene_id": [gene_ids[g] for g in gene_of_tx]})
     switch_table = pd.DataFrame(
         {
@@ -316,6 +336,9 @@ def simulate_isoform_counts(params: Dict, seed: int) -> ScenarioResult:
         "usage_strength": usage_strength,
         "usage_from": usage_from,
         "n_usage_transcripts": int(is_usage.sum()),
+        "sample_seed": sample_seed,
+        "tissue_shift": tissue_shift,
+        "n_tissue_shifted_genes": int(shifted_genes.sum()),
         "frac_switched_actual": float(is_switched.mean()),
         "null_fraction": null_fraction,
         "n_null_genes": int(n_null),

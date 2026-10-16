@@ -27,6 +27,10 @@ Simulation normalisation
 * Simulated counts are normalised with median-of-ratios size factors instead of plain CPM. Under CPM, features without module signal co-varied with each other (|r| ≈ 0.35) against the large modules, so the benchmark's "null" features were not null and grey-detection metrics measured a compositional artefact.
 * Post-processing applies `--min-gamma` to the merged responsibilities (after eigengene merging). A training-time or inference-time "background" mixture component was evaluated and rejected: trained jointly it absorbs every feature; applied at inference it never fires because null features are not latent-space outliers.
 
+Preservation and reproducibility
+
+* `nb_isoform_modules` gains `sample_seed` (an independent cohort of the same truth) and `tissue_shift` (a fraction of signal genes change module in that cohort; `modules_gene.csv` flags them). `scripts/benchmark_preservation.py` evaluates random initialisations, donor bootstraps, cross-cohort and cross-tissue agreement (ARI, `module_preservation` Z_density / cor_kME against the fraction of shifted members) and the reproducibility of isoform-specific divergence for switched versus unswitched genes.
+
 Comparison methods
 
 * Benchmark methods `usage_network` (WGCNA on logit isoform usage), `ica`, `nmf`, `acorde` (acorde pipeline re-implemented with dynamicTreeCut; its single-cell correlation filter and forced expansion off by default on bulk data) and `twn` (transcriptome-wide network with the Saha et al. penalty structure solved by R glasso, scored with edge-level metrics: gene–gene precision/recall and isoform-ratio edges of switched vs unswitched isoforms). Module methods report the same gene-level edge metrics from their labels.
