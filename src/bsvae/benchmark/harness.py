@@ -27,12 +27,13 @@ from bsvae.benchmark.runners import (
     run_wgcna,
     wgcna_available,
 )
-from bsvae.simulation.metrics import evaluate_labels, gene_level_metrics, normalize_labels
+from bsvae.simulation.metrics import evaluate_labels, gene_level_metrics, normalize_labels, switched_isoform_metrics
 from bsvae.simulation.scenario import expand_scenarios, generate_scenario, load_config
 
 logger = logging.getLogger(__name__)
 
 METHODS = ("bsvae", "wgcna")
+KNOWN_METHODS = ("bsvae", "bsvae_consensus", "bsvae_isoform", "bsvae_regressed", "wgcna", "wgcna_signed", "wgcna_unsigned", "wgcna_regressed")
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +48,7 @@ def load_truth(run_dir: str | Path) -> Dict:
     out: Dict = {
         "labels": pd.Series(hard["module"].astype(int).values, index=hard["feature_id"].astype(str)),
         "expr_path": run_dir / "expr" / "features_x_samples.tsv.gz",
+        "covariates_path": run_dir / "covariates.tsv.gz",
         "metadata": json.loads((run_dir / "metadata.json").read_text()),
     }
     tx2gene_path = truth / "tx2gene.tsv"
@@ -55,6 +57,9 @@ def load_truth(run_dir: str | Path) -> Dict:
         out["tx2gene"] = dict(zip(t["transcript_id"].astype(str), t["gene_id"].astype(str)))
         g = pd.read_csv(truth / "modules_gene.csv")
         out["truth_gene"] = dict(zip(g["gene_id"].astype(str), g["module"].astype(int)))
+    sw = truth / "switch_table.tsv.gz"
+    if sw.exists():
+        out["switch_table"] = pd.read_csv(sw, sep="\t")
     return out
 
 
@@ -62,6 +67,11 @@ def evaluate_run(truth: Dict, result: MethodResult) -> Dict[str, float]:
     """Score a MethodResult against loaded truth; NaN metrics when not ok."""
     if result.status != "ok" or result.labels is None:
         return {}
+    if result.method == "bsvae_isoform":
+        if "switch_table" not in truth:
+            return {}
+        pred = result.labels.copy(); pred.index = pred.index.astype(str)
+        return switched_isoform_metrics(dict(zip(pred.index, normalize_labels(pred.values))), list(pred.index), truth["switch_table"])
     truth_labels: pd.Series = truth["labels"]
     pred = result.labels.copy()
     pred.index = pred.index.astype(str)
@@ -127,15 +137,24 @@ def run_one(
     postprocess: bool = True,
     device=None,
     over_cluster_factor: Optional[float] = None,
+    consensus_runs: int = 3,
 ) -> tuple[MethodResult, Dict]:
     truth = load_truth(run_dir)
     expr = pd.read_csv(truth["expr_path"], sep="\t", index_col=0)
     expr.index = expr.index.astype(str)
+    if method.endswith("_regressed"):
+        from bsvae.utils.preprocess import regress_covariates
+        cov = pd.read_csv(truth["covariates_path"], sep="\t", index_col=0)
+        # Known technical covariate only (batch); condition is biology.
+        expr = regress_covariates(expr, cov, columns=["batch"])
+        method_base = method[: -len("_regressed")]
+    else:
+        method_base = method
     out_dir = run_dir / "methods" / method / f"seed_{seed}"
     out_dir.mkdir(parents=True, exist_ok=True)
     n_modules = int(truth["metadata"]["summary"].get("n_modules", truth["metadata"]["parameters"].get("n_modules", 20)))
 
-    if method == "bsvae":
+    if method_base == "bsvae":
         cfg = dict(bsvae_cfg or {})
         if k_mode == "sweep":
             cfg.setdefault("_k_mode", "sweep")
@@ -150,13 +169,67 @@ def run_one(
             train_cfg={k: v for k, v in cfg.items() if not k.startswith("_")},
             post_cfg=post_cfg, device=device, postprocess=postprocess, **kwargs,
         )
-    elif method == "wgcna":
+    elif method == "bsvae_consensus":
+        from bsvae.networks.postprocess import consensus_assignments
+        cfg = {k: v for k, v in (bsvae_cfg or {}).items() if not k.startswith("_")}
+        tx2gene = None
+        if "tx2gene" in truth:
+            tx2gene = pd.DataFrame(list(truth["tx2gene"].items()), columns=["transcript_id", "gene_id"])
+        kwargs = {"over_cluster_factor": over_cluster_factor} if over_cluster_factor is not None else {}
+        runs, t_total = [], 0.0
+        for i in range(int(consensus_runs)):
+            sub = run_bsvae(
+                expr, n_modules=n_modules, seed=seed * 1000 + i, workdir=out_dir / f"run_{i}",
+                tx2gene=tx2gene, train_cfg=cfg, post_cfg=post_cfg, device=device,
+                postprocess=postprocess, **kwargs,
+            )
+            t_total += sub.runtime_s
+            if sub.status == "ok":
+                runs.append(sub.labels.reindex(expr.index).fillna(-1).astype(int).values)
+        if len(runs) < 2:
+            result = MethodResult("bsvae_consensus", "failed", runtime_s=t_total, message="fewer than two successful runs")
+        else:
+            cons = consensus_assignments(runs, min_agreement=0.5, min_module_size=(post_cfg or {}).get("min_module_size", 10))
+            result = MethodResult(
+                "bsvae_consensus", "ok", labels=pd.Series(cons.labels, index=expr.index.astype(str), name="module"),
+                runtime_s=t_total,
+                params={"n_runs": cons.n_runs, "run_ari_to_consensus": cons.run_ari,
+                        "mean_agreement": float(cons.agreement.mean())},
+            )
+    elif method == "bsvae_isoform":
+        from bsvae.utils.isoform import isoform_specific_calls
+        if "tx2gene" not in truth:
+            result = MethodResult("bsvae_isoform", "skipped", message="scenario has no transcript structure")
+        else:
+            cfg = {k: v for k, v in (bsvae_cfg or {}).items() if not k.startswith("_")}
+            kwargs = {"over_cluster_factor": over_cluster_factor} if over_cluster_factor is not None else {}
+            sub = run_bsvae(expr, n_modules=n_modules, seed=seed, workdir=out_dir, train_cfg=cfg,
+                            post_cfg=post_cfg, device=device, postprocess=postprocess, **kwargs)
+            if sub.status == "ok":
+                fids = [str(f) for f in expr.index]
+                lab = sub.labels.reindex(fids).fillna(-1).astype(int).values
+                min_kme = float((post_cfg or {}).get("isoform_min_kme", 0.4))
+                calls = isoform_specific_calls(expr, truth["tx2gene"], lab, fids, min_kme=min_kme, eigengenes=sub.eigengenes)
+                labels = pd.Series(-1, index=fids, name="module")
+                called = calls[calls["called"]]
+                labels.loc[called.index] = called["best_other_module"].astype(int).values
+                calls.to_csv(out_dir / "isoform_specific_calls.csv")
+                result = MethodResult("bsvae_isoform", "ok", labels=labels, runtime_s=sub.runtime_s,
+                                      params={**sub.params, "isoform_min_kme": min_kme, "n_called": int(len(called))})
+            else:
+                result = MethodResult("bsvae_isoform", sub.status, runtime_s=sub.runtime_s, message=sub.message)
+    elif method_base in ("wgcna", "wgcna_unsigned", "wgcna_signed"):
         cfg = dict(WGCNA_DEFAULTS)
         cfg.update(wgcna_cfg or {})
+        if method_base == "wgcna_unsigned":
+            cfg["network_type"] = "unsigned"
+        elif method_base == "wgcna_signed":
+            cfg["network_type"] = "signed"
         result = run_wgcna(expr, workdir=out_dir, seed=seed, **cfg)
     else:
         raise ValueError(f"Unknown method: {method}")
 
+    result.method = method
     metrics = evaluate_run(truth, result) if result.status == "ok" else {}
     if result.labels is not None:
         pd.DataFrame({"feature_id": result.labels.index, "module": result.labels.values}).to_csv(
@@ -185,6 +258,7 @@ def run_grid(
     scenario_ids: Optional[Sequence[str]] = None,
     device=None,
     over_cluster_factor: Optional[float] = None,
+    consensus_runs: int = 3,
 ) -> pd.DataFrame:
     """Run every (scenario, rep, method, seed) and return the tidy results table."""
     cfg = load_config(config) if not isinstance(config, dict) else config
@@ -202,7 +276,10 @@ def run_grid(
     n_reps = int(cfg.get("reps", 1) if reps is None else reps)
     seed_list = list(seeds) if seeds is not None else [0]
     methods = [m for m in methods]
-    if "wgcna" in methods and not wgcna_available():
+    unknown = [m for m in methods if m not in KNOWN_METHODS]
+    if unknown:
+        raise ValueError(f"Unknown method(s): {unknown}; choose from {KNOWN_METHODS}")
+    if any(m.startswith("wgcna") for m in methods) and not wgcna_available():
         logger.warning("WGCNA (Rscript + WGCNA package) not available; its rows will be marked skipped")
 
     for sid, params in scenarios:
@@ -223,7 +300,7 @@ def run_grid(
                     result, metrics = run_one(
                         run_dir, method, seed, k_mode=k_mode, bsvae_cfg=bsvae_cfg,
                         wgcna_cfg=wgcna_cfg, post_cfg=post_cfg, postprocess=postprocess, device=device,
-                        over_cluster_factor=over_cluster_factor,
+                        over_cluster_factor=over_cluster_factor, consensus_runs=consensus_runs,
                     )
                     row = {
                         "scenario_id": sid, "rep": rep, "method": method, "seed": seed,
@@ -235,7 +312,8 @@ def run_grid(
                     row.update(summary)
                     row.update(metrics)
                     row.update(_flatten_params({k: v for k, v in result.params.items()
-                                                if k in ("soft_power", "n_modules", "n_grey", "n_components_trained")}, prefix="m_"))
+                                                if k in ("soft_power", "n_modules", "n_grey", "n_components_trained",
+                                                         "n_runs", "mean_agreement")}, prefix="m_"))
                     _append_row(results_path, row)
                     done.add(key)
     df = pd.read_csv(results_path, sep="\t") if results_path.exists() else pd.DataFrame()
@@ -247,7 +325,8 @@ def run_grid(
 SUMMARY_METRICS = [
     "ari_all", "nmi_all", "ari_assigned", "nmi_assigned", "mean_best_match_jaccard",
     "module_recovery_50", "frac_pred_grey", "grey_recall", "grey_precision", "K_ratio",
-    "gene_ari", "split_detection_rate", "isoform_gene_agreement", "runtime_s",
+    "gene_ari", "split_detection_rate", "isoform_gene_agreement",
+    "switched_recall", "switched_precision", "switched_ari", "runtime_s",
 ]
 
 

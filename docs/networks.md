@@ -67,6 +67,23 @@ Outputs:
 - `leiden_modules.csv` with `--use-leiden`
 - `gamma_gene.npz`, `hard_assignments_gene.npz` and `gene_divergent.csv` (genes whose isoforms land in two or more modules) with `--aggregate-to-gene --tx2gene`
 
+## Consensus Over Seeds
+
+```bash
+bsvae-networks consensus-modules --modules run_s0/modules.csv run_s1/modules.csv run_s2/modules.csv --output-dir consensus
+```
+
+Writes `consensus_modules.csv` with a per-feature `agreement` stability score; features below `--min-agreement` are unassigned.
+
+## Isoform-Specific Membership
+
+```bash
+bsvae-networks isoform-specific --dataset transcripts.tsv.gz --tx2gene tx2gene.tsv \
+  --modules results/run/modules/modules.csv --output results/run/isoform_specific.csv
+```
+
+For each multi-isoform transcript, the part of its profile that its gene's aggregate does not explain is correlated with every module eigengene; a transcript whose residual tracks another module (kME ≥ `--min-kme`) is called isoform-specific, with the target module. On the isoform simulations this enriches truly switched isoforms 6–9× over the base rate at `--min-kme 0.4–0.5`. `isoform-residuals` writes the residual matrix for custom analyses.
+
 ## Export Latents
 
 ```bash

@@ -57,6 +57,8 @@ Supported loaders:
 - `bsvae-simulate`
 - `bsvae-benchmark` (BSVAE vs WGCNA on simulated data; needs R with `WGCNA`)
 
+Transcript-level extras in `bsvae-networks`: `consensus-modules` (majority vote over seeds with a per-feature stability score), `isoform-specific` (isoforms whose expression tracks a module other than their gene's), `module-quality` (kME, enrichment, preservation in a second dataset) and `regress-covariates` (remove batch and other known covariates before training).
+
 ## Quickstart
 
 Train a small model:

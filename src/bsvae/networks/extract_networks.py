@@ -142,34 +142,25 @@ def method_a_cosine(
     norms = np.maximum(norms, 1e-8)
     mu_norm = mu / norms  # (F, D)
 
-    rows, cols, vals = [], [], []
+    rows_l, cols_l, vals_l = [], [], []
 
     for start in range(0, F, chunk_size):
         end = min(start + chunk_size, F)
         C = end - start
         chunk = mu_norm[start:end]            # (C, D)
         sim = chunk @ mu_norm.T               # (C, F)
+        sim[np.arange(C), np.arange(start, end)] = -np.inf   # exclude self
 
-        # Exclude self-similarity
-        for local_i in range(C):
-            sim[local_i, start + local_i] = -np.inf
-
-        # Vectorised top-K per row across the whole chunk
-        top_idx = np.argpartition(sim, -k, axis=1)[:, -k:]  # (C, k)
+        top_idx = np.argpartition(sim, -k, axis=1)[:, -k:]   # (C, k)
         top_vals = np.take_along_axis(sim, top_idx, axis=1)  # (C, k)
+        keep = top_vals > 0
+        r = np.repeat(np.arange(start, end), k).reshape(C, k)
+        rows_l.append(r[keep]); cols_l.append(top_idx[keep]); vals_l.append(top_vals[keep])
 
-        for local_i in range(C):
-            global_i = start + local_i
-            for rank in range(k):
-                s = top_vals[local_i, rank]
-                if s > 0:
-                    rows.append(global_i)
-                    cols.append(int(top_idx[local_i, rank]))
-                    vals.append(float(s))
-
-    A = sp.csr_matrix(
-        (vals, (rows, cols)), shape=(F, F), dtype=np.float32
-    )
+    rows = np.concatenate(rows_l) if rows_l else np.zeros(0, dtype=np.int64)
+    cols = np.concatenate(cols_l) if cols_l else np.zeros(0, dtype=np.int64)
+    vals = np.concatenate(vals_l).astype(np.float32) if vals_l else np.zeros(0, dtype=np.float32)
+    A = sp.csr_matrix((vals, (rows, cols)), shape=(F, F), dtype=np.float32)
     # Symmetrise
     A = A.maximum(A.T)
     return A
@@ -221,20 +212,10 @@ def method_b_gamma_knn(
     k_query = min(top_k + 1, F)
     distances, indices = index.search(gamma_norm, k_query)
 
-    rows, cols, vals = [], [], []
-    for i in range(F):
-        for rank in range(k_query):
-            j = int(indices[i, rank])
-            s = float(distances[i, rank])
-            if j == i or j < 0:
-                continue
-            if s > 0:
-                rows.append(i)
-                cols.append(j)
-                vals.append(s)
-
+    rows = np.repeat(np.arange(F), k_query).reshape(F, k_query)
+    keep = (indices != rows) & (indices >= 0) & (distances > 0)
     A = sp.csr_matrix(
-        (vals, (rows, cols)), shape=(F, F), dtype=np.float32
+        (distances[keep].astype(np.float32), (rows[keep], indices[keep])), shape=(F, F), dtype=np.float32
     )
     # Symmetrise
     A = A.maximum(A.T)

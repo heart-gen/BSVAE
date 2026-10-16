@@ -159,3 +159,59 @@ def test_soft_eigengenes_standardised_and_aligned():
     gamma_empty = np.zeros((40, 3)); gamma_empty[np.arange(40), labels] = 1.0
     eg3 = compute_module_eigengenes_from_soft(expr, gamma_empty, fids)
     assert eg3["module_2"].isna().all()
+
+
+def test_align_labels_matches_by_overlap():
+    from bsvae.networks.postprocess import align_labels
+    ref = np.array([0, 0, 0, 1, 1, 1, 2, 2, -1])
+    lab = np.array([5, 5, 5, 7, 7, 7, 9, 9, -1])     # permuted ids
+    assert align_labels(ref, lab).tolist() == ref.tolist()
+    lab2 = np.array([5, 5, 5, 7, 7, 7, 3, 3, 3])      # module 3 also covers ref's grey feature
+    out = align_labels(ref, lab2)
+    assert out[:6].tolist() == [0, 0, 0, 1, 1, 1]
+    assert out[6] == out[7] == out[8] == 2             # best overlap with ref module 2
+
+
+def test_consensus_recovers_truth_and_flags_unstable_features():
+    from bsvae.networks.postprocess import consensus_assignments
+    rng = np.random.default_rng(0)
+    truth = np.repeat([0, 1, 2], 40)
+    runs = []
+    for r in range(5):
+        perm = rng.permutation(3)
+        lab = perm[truth]
+        noise = rng.choice(120, size=6, replace=False)      # 6 random flips per run
+        lab[noise] = rng.integers(0, 3, size=6)
+        runs.append(lab)
+    runs[0][:5] = -1                                       # grey in one run only
+    res = consensus_assignments(runs, min_agreement=0.5, min_module_size=5)
+    from bsvae.simulation.metrics import compute_ari
+    assert compute_ari(truth, res.labels) > 0.95
+    assert res.agreement.min() >= 0.4 and res.agreement.mean() > 0.9
+    assert all(a > 0.8 for a in res.run_ari) and res.n_runs == 5
+    # A feature the runs split evenly on falls below a 0.6 agreement floor → grey.
+    runs2 = [np.array([0, 0, 1, 1, i % 2]) for i in range(4)]
+    res2 = consensus_assignments(runs2, min_agreement=0.6, min_module_size=1)
+    assert res2.labels[4] == -1 and res2.labels[:4].tolist() == [0, 0, 1, 1]
+    assert res2.agreement[4] == pytest.approx(0.5)
+
+
+def test_consensus_cli_roundtrip(tmp_path):
+    from bsvae.cli.networks import build_parser, handle_consensus_modules
+    import logging
+    fids = [f"f{i}" for i in range(30)]
+    truth = np.repeat([0, 1, 2], 10)
+    paths = []
+    for r in range(3):
+        lab = ((truth + r) % 3) if r else truth
+        p = tmp_path / f"run{r}.csv"
+        pd.DataFrame({"feature_id": fids, "module": lab}).to_csv(p, index=False)
+        paths.append(str(p))
+    args = build_parser().parse_args(["consensus-modules", "--modules", *paths, "--output-dir", str(tmp_path / "out"),
+                                      "--min-module-size", "5"])
+    handle_consensus_modules(args, logging.getLogger("t"))
+    out = pd.read_csv(tmp_path / "out" / "consensus_modules.csv")
+    assert set(out.columns) == {"feature_id", "module", "module_label", "agreement"}
+    from bsvae.simulation.metrics import compute_ari
+    assert compute_ari(truth, out["module"].values) == pytest.approx(1.0)
+    assert json.load(open(tmp_path / "out" / "consensus_summary.json"))["n_runs"] == 3

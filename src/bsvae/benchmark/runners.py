@@ -310,8 +310,11 @@ def run_bsvae(
         else:
             labels = pd.Series(gamma.argmax(axis=1).astype(int), index=feature_ids, name="module")
             gamma_out, eig = gamma, None
-        np.savez_compressed(workdir / "gamma.npz", gamma=gamma_out, mu=mu,
+        np.savez_compressed(workdir / "gamma.npz", gamma=gamma_out, mu=mu, gamma_raw=gamma,
                             feature_ids=np.array(feature_ids, dtype=object))
+        from bsvae.utils.modelIO import save_model
+        save_model(model, str(workdir), metadata={**{k: v for k, v in vars(args).items() if not k.startswith("_")},
+                                                  "n_features": dataset.n_samples})
         pd.DataFrame({"feature_id": feature_ids, "module": labels.values}).to_csv(workdir / "modules.csv", index=False)
     except Exception as exc:  # noqa: BLE001
         logger.exception("BSVAE run failed")

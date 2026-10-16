@@ -73,6 +73,7 @@ def save_model(
         metadata.setdefault("use_batch_norm", model.encoder.use_batch_norm)
         metadata.setdefault("sigma_min", model.gmm_prior.sigma_min)
         metadata.setdefault("normalize_input", model.normalize_input)
+        metadata.setdefault("diag_covariance", model.gmm_prior.diag_covariance)
 
     save_metadata(metadata, directory)
     # Save state_dict directly without moving model — avoids state corruption
@@ -132,6 +133,7 @@ def _metadata_from_model(model: GMMModuleVAE) -> dict:
         use_batch_norm=model.encoder.use_batch_norm,
         sigma_min=model.gmm_prior.sigma_min,
         normalize_input=model.normalize_input,
+        diag_covariance=model.gmm_prior.diag_covariance,
     )
 
 
@@ -154,6 +156,7 @@ def _get_model(metadata: dict, device: torch.device, path_to_model: str) -> GMMM
         use_batch_norm=use_batch_norm,
         sigma_min=metadata.get("sigma_min", 0.3),
         normalize_input=metadata.get("normalize_input", False),
+        diag_covariance=bool(metadata.get("diag_covariance", False)),
     ).to(device)
 
     if state_dict is None:
