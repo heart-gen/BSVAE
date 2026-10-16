@@ -211,3 +211,33 @@ def test_cli_target_genes_with_bed(iso_sim, tmp_path):
     loci = pd.read_csv(out / "target_loci.tsv", sep="\t")
     assert list(loci["locus"]) == ["rsA", "rsB"]
     assert (out / "target_genes.tsv").exists() and (out / "target_neighbours.tsv").exists()
+
+
+def test_combine_target_tests_pools_weak_evidence(tmp_path):
+    from bsvae.networks.targets import combine_target_tests
+    from bsvae.cli.networks import cli
+    rng = np.random.default_rng(0)
+    iso = [f"t{i}" for i in range(30)]
+    tables = {}
+    for k in range(6):
+        p = rng.uniform(0.05, 1.0, size=30)          # nothing significant alone
+        p[:5] = rng.uniform(0.02, 0.08, size=5)      # weak but consistent for five isoforms
+        tables[f"r{k}"] = pd.DataFrame({"gene_id": [f"g{i // 2}" for i in range(30)], "best_other_module": rng.integers(0, 4, 30),
+                                        "kme_residual": np.where(np.arange(30) < 5, 0.25, 0.05) * rng.choice([-1, 1], 30),
+                                        "p_value": p, "q_value": p, "called": False}, index=iso)
+    out = combine_target_tests(tables, n_samples={f"r{k}": 150 for k in range(6)})
+    assert out.loc[iso[:5], "called"].all() and not out.loc[iso[5:], "called"].any()
+    assert (out["n_cohorts"] == 6).all() and out.loc["t0", "modules"].count(";") == 5
+    assert out["p_combined"].between(0, 1).all() and (out["q_combined"] >= out["p_combined"] - 1e-12).all()
+    # fewer cohorts than min_cohorts are never called
+    one = combine_target_tests({"a": tables["r0"]}, min_cohorts=2)
+    assert not one["called"].any()
+    with pytest.raises(ValueError):
+        combine_target_tests({})
+    # CLI round trip
+    paths = []
+    for k, t in tables.items():
+        d = tmp_path / k; d.mkdir(); t.to_csv(d / "target_isoforms.tsv", sep="\t"); paths.append(f"{k}={d / 'target_isoforms.tsv'}")
+    cli(["target-genes-combine", "--inputs", *paths, "--n-samples", *[f"r{k}=150" for k in range(6)], "--output", str(tmp_path / "combined.tsv")])
+    got = pd.read_csv(tmp_path / "combined.tsv", sep="\t", index_col=0)
+    assert got["called"].sum() == 5

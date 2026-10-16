@@ -57,7 +57,7 @@ Supported loaders:
 - `bsvae-simulate`
 - `bsvae-benchmark` (BSVAE vs WGCNA, transcript-usage networks, ICA/NMF, acorde and TWN on simulated data; needs R with `WGCNA`, plus `glasso` for TWN)
 
-Transcript-level extras in `bsvae-networks`: `consensus-modules` (majority vote over seeds with a per-feature stability score), `isoform-specific` (isoforms whose expression tracks a module other than their gene's), `target-genes` (calibrated membership tests for candidate genes or GWAS loci from a gene list, transcript list or BED file, with a case/control interaction test), `module-quality` (kME, enrichment, preservation in a second dataset) and `regress-covariates` (remove batch and other known covariates before training).
+Transcript-level extras in `bsvae-networks`: `consensus-modules` (majority vote over seeds with a per-feature stability score), `isoform-specific` (isoforms whose expression tracks a module other than their gene's), `target-genes` (calibrated membership tests for candidate genes or GWAS loci from a gene list, transcript list or BED file, with a case/control interaction test), `target-genes-combine` (pool those tests across cohorts or brain regions), `module-quality` (kME, enrichment, preservation in a second dataset) and `regress-covariates` (remove batch and other known covariates before training).
 
 ## Quickstart
 

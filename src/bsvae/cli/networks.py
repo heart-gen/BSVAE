@@ -9,6 +9,7 @@ Subcommands
   isoform-residuals  Gene-programme-removed transcript matrix (residuals)
   isoform-specific   Call isoforms whose residual belongs to another module
   target-genes       Test isoforms of candidate genes / GWAS loci against the module solution
+  target-genes-combine  Combine target-genes tables across cohorts / regions (Stouffer)
   module-quality     kME summaries, enrichment, preservation in a second dataset
   regress-covariates Remove known sample covariates before training
   export-latents     Save μ, logσ², γ as NPZ
@@ -188,6 +189,20 @@ def build_parser() -> argparse.ArgumentParser:
     tg.add_argument("--no-leave-one-out", action="store_true", default=False)
     tg.add_argument("--keep-tx-version", action="store_true", default=False)
     tg.add_argument("--seed", type=int, default=0)
+
+    # ------------------------------------------------------------------
+    # target-genes-combine
+    # ------------------------------------------------------------------
+    tc = subs.add_parser("target-genes-combine",
+                         help="Combine target-genes results from several cohorts/tissues/regions (Stouffer).")
+    tc.add_argument("--inputs", nargs="+", required=True,
+                    help="target_isoforms.tsv files, optionally as name=path (name defaults to the parent directory).")
+    tc.add_argument("--n-samples", nargs="*", default=None,
+                    help="Sample counts per input as name=N for sqrt(N) weighting (default: equal weights).")
+    tc.add_argument("--output", required=True)
+    tc.add_argument("--alpha", type=float, default=0.05)
+    tc.add_argument("--min-kme", type=float, default=0.2, help="Mean |kME| across cohorts required for a call.")
+    tc.add_argument("--min-cohorts", type=int, default=2)
 
     # ------------------------------------------------------------------
     # regress-covariates
@@ -535,6 +550,25 @@ def handle_target_genes(args, logger: logging.Logger) -> None:
                 out_dir, int(res["isoforms"]["called"].sum()), len(res["isoforms"]))
 
 
+def handle_target_genes_combine(args, logger: logging.Logger) -> None:
+    import pandas as pd
+    from bsvae.networks.targets import combine_target_tests
+
+    tables = {}
+    for item in args.inputs:
+        name, _, path = item.rpartition("=") if "=" in item else ("", "", item)
+        name = name or Path(path).resolve().parent.name
+        tables[name] = pd.read_csv(path, sep="\t", index_col=0)
+    n_samples = None
+    if args.n_samples:
+        n_samples = {k: int(v) for k, v in (x.split("=", 1) for x in args.n_samples)}
+    out = combine_target_tests(tables, n_samples=n_samples, alpha=args.alpha, min_kme=args.min_kme, min_cohorts=args.min_cohorts)
+    p = Path(args.output); p.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(p, sep="\t")
+    logger.info("Combined %d cohorts: %d isoforms, %d called (FDR < %.2f, mean |kME| >= %.2f, >= %d cohorts)",
+                len(tables), len(out), int(out["called"].sum()), args.alpha, args.min_kme, args.min_cohorts)
+
+
 def handle_regress_covariates(args, logger: logging.Logger) -> None:
     from bsvae.utils.preprocess import regress_covariates
 
@@ -748,6 +782,8 @@ def cli(argv=None):
         handle_isoform_specific(args, logger)
     elif args.command == "target-genes":
         handle_target_genes(args, logger)
+    elif args.command == "target-genes-combine":
+        handle_target_genes_combine(args, logger)
     elif args.command == "regress-covariates":
         handle_regress_covariates(args, logger)
     elif args.command == "module-quality":

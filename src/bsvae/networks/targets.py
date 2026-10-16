@@ -565,7 +565,66 @@ def locus_summary(isoforms: pd.DataFrame, loci_genes: pd.DataFrame, labels: np.n
     return pd.DataFrame(rows)
 
 
+def combine_target_tests(
+    tables: Dict[str, pd.DataFrame],
+    n_samples: Optional[Dict[str, int]] = None,
+    alpha: float = 0.05,
+    min_kme: float = 0.2,
+    min_cohorts: int = 2,
+) -> pd.DataFrame:
+    """
+    Combine per-cohort (or per-tissue / per-region) targeted-gene tables into
+    one evidence table per isoform.
+
+    ``tables`` maps a cohort name to the ``target_isoforms.tsv`` table from
+    :func:`target_gene_tests` on that cohort.  Each cohort tests "does this
+    isoform's residual track a module other than its gene's?" against its own
+    module solution, so the p-values are combined with Stouffer's method
+    (weights sqrt(n_samples), or equal) for that question, which does not
+    require the modules to be aligned across cohorts.  Module identity is
+    reported per cohort (``modules``) together with the number of cohorts in
+    which the isoform was called and the mean |kME|.
+
+    The combined call requires BH FDR < ``alpha`` across isoforms, mean |kME|
+    ≥ ``min_kme`` and at least ``min_cohorts`` cohorts contributing.  With ten
+    brain regions of 150 donors this is what makes a rare isoform at
+    correlation 0.2 reportable when no single region can.
+    """
+    from scipy import stats as sps
+
+    from bsvae.utils.isoform import _bh_adjust
+
+    if not tables:
+        raise ValueError("no tables to combine")
+    names = list(tables)
+    w = {k: float(np.sqrt(n_samples[k])) if n_samples and k in n_samples else 1.0 for k in names}
+    frames = []
+    for k, t in tables.items():
+        t = t.copy(); t.index = t.index.astype(str)
+        t = t[["gene_id", "best_other_module", "kme_residual", "p_value", "called"]].copy()
+        t["cohort"] = k
+        frames.append(t)
+    long = pd.concat(frames)
+    rows = []
+    for tx, g in long.groupby(level=0):
+        p = np.clip(g["p_value"].values.astype(float), 1e-300, 1.0)
+        z = sps.norm.isf(p)                                   # one-sided: evidence for membership
+        ws = np.array([w[c] for c in g["cohort"]])
+        zc = float((ws * z).sum() / np.sqrt((ws ** 2).sum()))
+        rows.append({
+            "feature_id": tx, "gene_id": g["gene_id"].iloc[0], "n_cohorts": int(len(g)),
+            "n_called": int(g["called"].sum()), "mean_abs_kme": float(g["kme_residual"].abs().mean()),
+            "max_abs_kme": float(g["kme_residual"].abs().max()), "z_combined": zc,
+            "p_combined": float(sps.norm.sf(zc)),
+            "modules": ";".join(f"{c}:{int(m)}" for c, m in zip(g["cohort"], g["best_other_module"])),
+        })
+    out = pd.DataFrame(rows).set_index("feature_id")
+    out["q_combined"] = _bh_adjust(out["p_combined"].values)
+    out["called"] = (out["q_combined"] < float(alpha)) & (out["mean_abs_kme"] >= float(min_kme)) & (out["n_cohorts"] >= int(min_cohorts))
+    return out.sort_values("p_combined")
+
+
 __all__ = [
     "read_id_list", "read_bed", "read_gene_annotation", "loci_to_genes", "resolve_target_transcripts",
-    "profile_reliability", "target_gene_tests", "locus_summary",
+    "profile_reliability", "target_gene_tests", "locus_summary", "combine_target_tests",
 ]

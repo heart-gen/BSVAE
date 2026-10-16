@@ -271,6 +271,18 @@ Outputs in `--output-dir`:
 
 What it cannot do: it needs a transcriptome-wide `extract-modules` run first, it cannot rescue transcripts that quantification dropped, and it does not move the noise ceiling of a rare isoform (see `isoform-specific`); it lowers the multiplicity burden and reports calibrated evidence for exactly the genes you care about.
 
+### `target-genes-combine`
+
+Combine `target-genes` results from several cohorts, tissues or brain regions into one evidence table per isoform. Each cohort's test asks whether the isoform's residual tracks a module other than its gene's against that cohort's own module solution, so the p-values combine with Stouffer's method (weights √n with `--n-samples`, otherwise equal) without aligning modules across cohorts; module identity is reported per cohort. A combined call needs BH FDR < `--alpha` (0.05), mean |kME| ≥ `--min-kme` (0.2) and at least `--min-cohorts` (2) cohorts. This is the lever for 150-sample regions: a rare isoform at correlation 0.2 is undetectable in one GTEx brain region and clear across ten.
+
+```bash
+bsvae-networks target-genes-combine \
+  --inputs DLPFC=results/dlpfc/targets/target_isoforms.tsv HIPP=results/hipp/targets/target_isoforms.tsv \
+  --n-samples DLPFC=160 HIPP=150 --output results/brain_targets_combined.tsv
+```
+
+Output columns: `gene_id, n_cohorts, n_called, mean_abs_kme, max_abs_kme, z_combined, p_combined, modules, q_combined, called`.
+
 ### `isoform-residuals`
 
 Write the gene-programme-removed residual matrix itself (what `isoform-specific` correlates with the eigengenes), for custom downstream analysis. Clustering the residuals alone does **not** recover isoform-specific modules: switched isoforms are too few per module to form clusters of their own, so the membership test above is the recommended route.
