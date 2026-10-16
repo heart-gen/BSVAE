@@ -42,7 +42,7 @@ Comparison methods
 Abundance confounding
 
 * `nb_isoform_modules` gains usage-driven regulation (`usage_rate`, `usage_strength`, `usage_from` = signal | null | all): one non-dominant isoform's share of its gene follows a module factor with the shares re-normalised per sample, so the gene total is unchanged and only the isoform split varies. The switch table records `mechanism` (switch | usage | none), `is_usage` and `usage_strength`; `is_switched` covers both mechanisms.
-* `extract-modules --gene-coherence` (and the `bsvae_coherent` benchmark method): isoforms placed apart from their gene's majority module are moved back unless their sibling-residual kME supports the other membership; `bsvae_hier` benchmarks the hierarchical loss (`--hier-strength 0.05 --isoform-stratified`) for the same purpose.
+* `extract-modules --gene-coherence` (and the `bsvae_coherent` benchmark method): isoforms placed apart from their gene's majority module are moved back unless their sibling-residual kME supports the other membership. On the confounding simulations this cuts BSVAE's false-split rate from 28–46 % to 11–19 % (WGCNA 22–34 %) and raises transcript ARI by ~0.1, at the cost of switch detection (0.89 → 0.63 for abundance switches; WGCNA 0.73). `bsvae_hier` benchmarks the hierarchical loss (`--hier-strength 0.05 --isoform-stratified`) for the same purpose (false splits 25–35 %, detection 0.81).
 * Gene-level metrics add `false_split_rate` (unswitched multi-isoform genes whose assigned transcripts are spread over two or more modules). `scripts/benchmark_confounding.py` runs the abundance-only, usage-only, usage-vs-gene-signal ratio and switch-versus-usage scenario sets and stratifies false divergence by isoform abundance.
 
 Consensus and isoform-specific modules

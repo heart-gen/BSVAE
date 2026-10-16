@@ -18,7 +18,7 @@ Scenario sets (transcript-level ``nb_isoform_modules`` family, 600 genes × 150 
 
 Usage:
   poetry run python scripts/benchmark_confounding.py --outdir results/confounding \\
-    [--methods bsvae,wgcna,bsvae_isoform] [--seeds 0,1,2] [--epochs 150] [--sets A,B,C,D]
+    [--methods bsvae,bsvae_coherent,wgcna,bsvae_isoform] [--seeds 0,1,2] [--epochs 150] [--sets A,B,C,D]
 """
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--outdir", default="results/confounding")
     p.add_argument("--sets", default=",".join(SETS))
-    p.add_argument("--methods", default="bsvae,wgcna,bsvae_isoform")
+    p.add_argument("--methods", default="bsvae,bsvae_coherent,wgcna,bsvae_isoform")
     p.add_argument("--seeds", default="0,1,2")
     p.add_argument("--reps", type=int, default=1)
     p.add_argument("--epochs", type=int, default=150)
