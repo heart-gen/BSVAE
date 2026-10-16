@@ -126,3 +126,18 @@ def test_alpha_filters_small_correlations_in_large_samples():
     strict = isoform_specific_calls(expr, t2g, np.array(labels), ids, min_kme=0.0, alpha=0.05)
     assert loose["called"].all()
     assert strict["called"].mean() < 0.2
+
+
+def test_linear_input_scale_sums_siblings_directly():
+    rng = np.random.default_rng(3)
+    S = 40
+    a, b, c = rng.normal(size=S), rng.normal(size=S), rng.normal(size=S)
+    expr = pd.DataFrame(np.vstack([a, b, c]), index=["t1", "t2", "t3"], columns=[f"s{j}" for j in range(S)])
+    t2g = {"t1": "g", "t2": "g", "t3": "g"}
+    resid, stats = isoform_residuals(expr, t2g, input_scale="linear")
+    sib = b + c
+    sc, ac = sib - sib.mean(), a - a.mean()
+    slope = (ac * sc).sum() / (sc ** 2).sum()
+    np.testing.assert_allclose(resid.loc["t1"].values, ac - slope * sc, atol=1e-8)
+    with pytest.raises(ValueError):
+        isoform_residuals(expr, t2g, input_scale="counts")

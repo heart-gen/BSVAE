@@ -178,6 +178,7 @@ def simulate_isoform_counts(params: Dict, seed: int) -> ScenarioResult:
 
     expr_sxg = pd.DataFrame(obs["expr"], index=sample_ids, columns=tx_ids)
     expr_gxs = expr_sxg.T
+    counts_gxs = pd.DataFrame(obs["counts"].T, index=tx_ids, columns=sample_ids)
     covariates = obs["covariates"]
     covariates.index = pd.Index(sample_ids, name="sample_id")
 
@@ -276,6 +277,7 @@ def simulate_isoform_counts(params: Dict, seed: int) -> ScenarioResult:
             "modules_gene.csv": modules_gene,
             "switch_table.tsv.gz": switch_table,
         },
+        counts_features_x_samples=counts_gxs,
     )
 
 

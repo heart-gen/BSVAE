@@ -57,6 +57,7 @@ def isoform_residuals(
     min_isoforms: int = 2,
     keep_version: bool = False,
     leave_one_out: bool = True,
+    input_scale: str = "log2",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Regress each isoform's profile on its gene's aggregate profile and return
@@ -70,8 +71,13 @@ def isoform_residuals(
     With ``leave_one_out`` (default) the gene profile each isoform is regressed
     on is the sum of its *sibling* isoforms, so an isoform that carries a large
     share of its gene does not regress out its own signal.  ``False`` uses the
-    full gene aggregate (the previous behaviour).
+    full gene aggregate (the previous behaviour).  ``input_scale`` is
+    ``"log2"`` for log2(x + 1) matrices (isoforms are summed on the linear
+    scale) or ``"linear"`` for matrices whose values add directly, such as
+    Pearson residuals.
     """
+    if input_scale not in ("log2", "linear"):
+        raise ValueError("input_scale must be 'log2' or 'linear'")
     expr = expr.copy()
     expr.index = expr.index.astype(str)
     tx_gene = map_transcripts_to_genes(expr.index, tx2gene, keep_version)
@@ -79,14 +85,21 @@ def isoform_residuals(
     multi = tx_gene.map(counts).fillna(0) >= int(min_isoforms)
     sub = expr.loc[multi.values]
     genes = tx_gene.loc[sub.index]
-    agg = gene_aggregate(expr, tx_gene)
     X = sub.values.astype(np.float64)
-    if leave_one_out:
-        lin_gene = np.power(2.0, agg.reindex(genes.values).values) - 1.0
-        lin_self = np.maximum(np.power(2.0, X) - 1.0, 0.0)
-        G = np.log2(np.maximum(lin_gene - lin_self, 0.0) + 1.0)   # siblings only
+    if input_scale == "log2":
+        agg = gene_aggregate(expr, tx_gene)
+        if leave_one_out:
+            lin_gene = np.power(2.0, agg.reindex(genes.values).values) - 1.0
+            lin_self = np.maximum(np.power(2.0, X) - 1.0, 0.0)
+            G = np.log2(np.maximum(lin_gene - lin_self, 0.0) + 1.0)   # siblings only
+        else:
+            G = agg.reindex(genes.values).values            # (T, S) gene profile per transcript
     else:
-        G = agg.reindex(genes.values).values            # (T, S) gene profile per transcript
+        keep = tx_gene.notna().values
+        agg = pd.DataFrame(expr.values[keep], index=tx_gene.values[keep], columns=expr.columns).groupby(level=0).sum()
+        G = agg.reindex(genes.values).values
+        if leave_one_out:
+            G = G - X
 
     Xc = X - X.mean(axis=1, keepdims=True)
     Gc = G - G.mean(axis=1, keepdims=True)
@@ -156,6 +169,7 @@ def isoform_specific_calls(
     alpha: Optional[float] = 0.05,
     residualize_eigengenes: bool = True,
     leave_one_out: bool = True,
+    input_scale: str = "log2",
 ) -> pd.DataFrame:
     """
     Call isoforms whose *gene-programme-removed* profile belongs to a module
@@ -198,7 +212,8 @@ def isoform_specific_calls(
     if eigengenes is None:
         eigengenes = module_eigengenes(expr, labels, fids)
     eigengenes = eigengenes.dropna(axis=1, how="any")
-    resid, stats = isoform_residuals(expr, tx2gene, keep_version=keep_version, leave_one_out=leave_one_out)
+    resid, stats = isoform_residuals(expr, tx2gene, keep_version=keep_version, leave_one_out=leave_one_out,
+                                     input_scale=input_scale)
     columns = ["gene_id", "gene_module", "best_other_module", "kme_residual", "p_value", "q_value",
                "r2_gene", "n_isoforms", "mean_expr", "called"]
     if eigengenes.shape[1] == 0 or len(resid) == 0:
