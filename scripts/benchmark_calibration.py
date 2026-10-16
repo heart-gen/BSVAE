@@ -136,10 +136,11 @@ def main(argv=None):
         sub = df[df["check"] == check].drop(columns=["check"])
         if sub.empty:
             continue
+        sub = sub.dropna(axis=1, how="all")
         keys = [k for k in ("labels", "eigengene", "stratum", "switch_rate") if k in sub.columns]
         num = [c for c in sub.columns if c not in keys + ["seed"] and pd.api.types.is_numeric_dtype(sub[c])]
         print(f"== {check}")
-        print(sub.groupby(keys)[num].mean().round(3).to_string() if keys else sub[num].mean().round(3).to_string())
+        print(sub.groupby(keys, dropna=False)[num].mean().round(3).to_string() if keys else sub[num].mean().round(3).to_string())
     df.to_csv(outdir / "results.tsv", sep="\t", index=False)
 
 
