@@ -208,7 +208,7 @@ def run_one(
             if sub.status == "ok":
                 fids = [str(f) for f in expr.index]
                 lab = sub.labels.reindex(fids).fillna(-1).astype(int).values
-                min_kme = float((post_cfg or {}).get("isoform_min_kme", 0.4))
+                min_kme = float((post_cfg or {}).get("isoform_min_kme", 0.3))
                 calls = isoform_specific_calls(expr, truth["tx2gene"], lab, fids, min_kme=min_kme, eigengenes=sub.eigengenes)
                 labels = pd.Series(-1, index=fids, name="module")
                 called = calls[calls["called"]]

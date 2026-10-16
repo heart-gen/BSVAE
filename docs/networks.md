@@ -82,7 +82,7 @@ bsvae-networks isoform-specific --dataset transcripts.tsv.gz --tx2gene tx2gene.t
   --modules results/run/modules/modules.csv --output results/run/isoform_specific.csv
 ```
 
-For each multi-isoform transcript, the part of its profile that its gene's aggregate does not explain is correlated with every module eigengene; a transcript whose residual tracks another module (kME ≥ `--min-kme`) is called isoform-specific, with the target module. On the isoform simulations this enriches truly switched isoforms 6–9× over the base rate at `--min-kme 0.4–0.5`. `isoform-residuals` writes the residual matrix for custom analyses.
+For each multi-isoform transcript, the part of its profile that its sibling isoforms do not explain is correlated with every module eigengene (each residualised on the gene's own module eigengene, which removes leakage between correlated modules); a transcript whose residual tracks another module (kME ≥ `--min-kme`, BH FDR < `--alpha`) is called isoform-specific, with the target module. On the isoform simulations this enriches truly switched isoforms about 8× over the base rate at the default `--min-kme 0.3`. Low-abundance isoforms have attenuated correlations and are the hardest to call; see `docs/cli.md` for what helps. `isoform-residuals` writes the residual matrix for custom analyses.
 
 ## Export Latents
 

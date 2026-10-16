@@ -16,12 +16,30 @@ def test_residuals_remove_gene_programme_and_exclude_singletons():
     expr = pd.DataFrame(np.vstack([iso_a, iso_b, single]), index=["t1.2", "t2", "t3"],
                         columns=[f"s{j}" for j in range(S)])
     tx2gene = pd.Series({"t1": "gA", "t2": "gA", "t3": "gB"})
-    resid, stats = isoform_residuals(expr, tx2gene)
+    resid, stats = isoform_residuals(expr, tx2gene, leave_one_out=False)
     assert list(resid.index) == ["t1.2", "t2"]
     agg = gene_aggregate(expr, map_transcripts_to_genes(expr.index, tx2gene))
     for t in resid.index:
         assert abs(np.corrcoef(resid.loc[t], agg.loc["gA"])[0, 1]) < 0.05
     assert stats.loc["t1.2", "r2_gene"] > 0.95 and stats.loc["t1.2", "n_isoforms"] == 2
+
+
+def test_leave_one_out_regresses_on_siblings_only():
+    """With two isoforms the leave-one-out gene profile of each is exactly the other isoform."""
+    rng = np.random.default_rng(1)
+    S = 50
+    a = rng.normal(size=S) + 4
+    b = rng.normal(size=S) + 3
+    expr = pd.DataFrame(np.vstack([a, b]), index=["t1", "t2"], columns=[f"s{j}" for j in range(S)])
+    tx2gene = {"t1": "g", "t2": "g"}
+    resid, stats = isoform_residuals(expr, tx2gene, leave_one_out=True)
+    bc = b - b.mean(); ac = a - a.mean()
+    slope = (ac * bc).sum() / (bc ** 2).sum()
+    np.testing.assert_allclose(resid.loc["t1"].values, ac - slope * bc, atol=1e-8)
+    assert abs(stats.loc["t1", "slope"] - slope) < 1e-8
+    # full-aggregate regression removes part of the isoform's own signal
+    resid_full, _ = isoform_residuals(expr, tx2gene, leave_one_out=False)
+    assert resid_full.loc["t1"].std() < resid.loc["t1"].std()
 
 
 def test_residuals_isolate_switched_isoform_signal():
@@ -54,7 +72,9 @@ def test_isoform_specific_calls_enrich_switched_isoforms():
     expr = r.expr_features_x_samples
     t2g = dict(zip(r.extra_truth["tx2gene.tsv"]["transcript_id"], r.extra_truth["tx2gene.tsv"]["gene_id"]))
     truth = r.modules_hard.set_index("feature_id")["module"].reindex(expr.index).values   # oracle labels
-    calls = isoform_specific_calls(expr, t2g, truth, list(expr.index), min_kme=0.4)
+    calls = isoform_specific_calls(expr, t2g, truth, list(expr.index))
+    assert {"p_value", "q_value", "mean_expr"} <= set(calls.columns)
+    assert ((calls["q_value"] >= calls["p_value"] - 1e-12) | calls["p_value"].isna()).all()
     st = r.extra_truth["switch_table.tsv.gz"].set_index("transcript_id")
     is_sw = st.loc[calls.index, "is_switched"].values == 1
     called = calls["called"].values
@@ -63,3 +83,46 @@ def test_isoform_specific_calls_enrich_switched_isoforms():
     assert recall > 0.5 and precision > 3 * is_sw.mean()
     hit = calls[called & is_sw]
     assert (hit["best_other_module"].values == st.loc[hit.index, "tx_module"].values).mean() > 0.8
+
+
+def test_residualised_eigengenes_suppress_leakage_from_correlated_modules():
+    """An unswitched minor isoform of a gene in module A must not be called for a module B
+    correlated with A; residualising the eigengenes on A removes that leakage."""
+    from bsvae.utils.isoform import isoform_specific_calls
+    rng = np.random.default_rng(5)
+    S, n_genes = 120, 40
+    zA = rng.normal(size=S)
+    zB = 0.6 * zA + 0.8 * rng.normal(size=S)             # B correlated with A
+    rows, ids, t2g, labels = [], [], {}, []
+    for g in range(n_genes):
+        z = zA if g < n_genes // 2 else zB
+        mod = 0 if g < n_genes // 2 else 1
+        dom = 2.0 * z + 0.3 * rng.normal(size=S) + 6
+        minor = 0.5 * z + 0.6 * rng.normal(size=S) + 2     # noisier, lower-expressed copy of the gene programme
+        for k, x in enumerate([dom, minor]):
+            ids.append(f"t{g}_{k}"); t2g[f"t{g}_{k}"] = f"g{g}"; rows.append(x); labels.append(mod)
+    expr = pd.DataFrame(np.vstack(rows), index=ids, columns=[f"s{j}" for j in range(S)])
+    labels = np.array(labels)
+    raw = isoform_specific_calls(expr, t2g, labels, ids, min_kme=0.3, alpha=None, residualize_eigengenes=False)
+    fixed = isoform_specific_calls(expr, t2g, labels, ids, min_kme=0.3, alpha=None, residualize_eigengenes=True)
+    assert fixed["called"].mean() <= raw["called"].mean()
+    assert fixed["called"].mean() < 0.1
+    assert fixed["kme_residual"].abs().mean() < raw["kme_residual"].abs().mean()
+
+
+def test_alpha_filters_small_correlations_in_large_samples():
+    from bsvae.utils.isoform import isoform_specific_calls
+    rng = np.random.default_rng(7)
+    S = 400
+    z0, z1 = rng.normal(size=S), rng.normal(size=S)
+    rows, ids, t2g, labels = [], [], {}, []
+    for g in range(30):
+        z = z0 if g < 15 else z1
+        for k in range(2):
+            ids.append(f"t{g}_{k}"); t2g[f"t{g}_{k}"] = f"g{g}"; labels.append(0 if g < 15 else 1)
+            rows.append(z * (2.0 if k == 0 else 0.4) + rng.normal(size=S) * (0.3 if k == 0 else 1.0) + 3)
+    expr = pd.DataFrame(np.vstack(rows), index=ids, columns=[f"s{j}" for j in range(S)])
+    loose = isoform_specific_calls(expr, t2g, np.array(labels), ids, min_kme=0.0, alpha=None)
+    strict = isoform_specific_calls(expr, t2g, np.array(labels), ids, min_kme=0.0, alpha=0.05)
+    assert loose["called"].all()
+    assert strict["called"].mean() < 0.2
