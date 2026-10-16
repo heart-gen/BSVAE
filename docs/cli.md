@@ -211,7 +211,7 @@ Outputs: `consensus_modules.csv` (`feature_id, module, module_label, agreement`)
 
 ### `isoform-specific`
 
-Call isoforms whose expression belongs to a module other than their gene's. Each multi-isoform transcript's profile is regressed on its gene aggregate (isoforms summed on the linear scale); the residual is correlated with every module eigengene from `extract-modules`, and a transcript is called when its residual kME to a module other than its gene's majority module reaches `--min-kme`.
+Call isoforms whose expression belongs to a module other than their gene's. Each multi-isoform transcript's profile is regressed on the sum of its *sibling* isoforms (linear scale, leave-one-out, so an isoform carrying a large share of its gene does not regress out its own signal); the residual is correlated with every module eigengene from `extract-modules`, after each eigengene has been residualised on the gene's own module eigengene (module eigengenes are correlated, and without this step gene-programme signal that the regression did not remove leaks into neighbouring modules and doubles the false-call rate among unswitched isoforms). A transcript is called when its residual kME to a module other than its gene's majority module reaches `--min-kme` and the correlation passes a Benjamini–Hochberg test at `--alpha`.
 
 ```bash
 bsvae-networks isoform-specific \
@@ -221,10 +221,14 @@ bsvae-networks isoform-specific \
 
 Options:
 
-- `--min-kme` default `0.4` (0.4–0.5 gives 6–9× enrichment of truly switched isoforms over the base rate on the isoform simulations; lower values trade precision for recall)
+- `--min-kme` default `0.3` (effect-size floor; with the residualised eigengenes this keeps precision at or above the previous `0.4` default while catching about 10 % more switched isoforms on the isoform simulations)
+- `--alpha` default `0.05` (BH false-discovery rate for the residual correlation, Bonferroni-corrected over modules per transcript; `0` disables it). At 150 samples the kME floor dominates; with several hundred samples the test is what keeps weak-but-significant correlations from flooding the calls.
+- `--no-residualize-eigengenes`, `--no-leave-one-out` restore the previous behaviour
 - `--keep-tx-version`
 
-Output columns: `gene_id, gene_module, best_other_module, kme_residual, r2_gene, n_isoforms, called`.
+Output columns: `gene_id, gene_module, best_other_module, kme_residual, p_value, q_value, r2_gene, n_isoforms, mean_expr, called`.
+
+Rare transcripts: a low-abundance isoform has an attenuated correlation with every eigengene, so its achievable kME is bounded by its sampling noise rather than by biology. On simulations where minor isoforms carry about a tenth of their gene, the lowest-expressed third of switched isoforms is called about a third of the time at 150 samples and the true target module is ranked first about 70 % of the time even with the true module factors, so more samples (or deeper quantification) is the lever, not a lower threshold. Removing zeros from the reconstruction loss (`--masked-recon`), filtering low-expression features before training, and training on negative-binomial Pearson residuals of the raw counts (`bsvae.utils.preprocess.pearson_residuals`) were all evaluated: the first two reduce recovery of switched isoforms, and Pearson residuals leave rare-isoform recovery unchanged (caller recall +0.04) while lowering transcript-level ARI by 0.05 on the isoform scenarios (unchanged on gene-level data), so log-normalised input remains the default. Simulated scenarios now also write `expr/counts_features_x_samples.tsv.gz` for count-aware methods.
 
 ### `isoform-residuals`
 

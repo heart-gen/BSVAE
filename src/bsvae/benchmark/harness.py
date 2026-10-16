@@ -48,6 +48,7 @@ def load_truth(run_dir: str | Path) -> Dict:
     out: Dict = {
         "labels": pd.Series(hard["module"].astype(int).values, index=hard["feature_id"].astype(str)),
         "expr_path": run_dir / "expr" / "features_x_samples.tsv.gz",
+        "counts_path": run_dir / "expr" / "counts_features_x_samples.tsv.gz",
         "covariates_path": run_dir / "covariates.tsv.gz",
         "metadata": json.loads((run_dir / "metadata.json").read_text()),
     }
@@ -208,7 +209,7 @@ def run_one(
             if sub.status == "ok":
                 fids = [str(f) for f in expr.index]
                 lab = sub.labels.reindex(fids).fillna(-1).astype(int).values
-                min_kme = float((post_cfg or {}).get("isoform_min_kme", 0.4))
+                min_kme = float((post_cfg or {}).get("isoform_min_kme", 0.3))
                 calls = isoform_specific_calls(expr, truth["tx2gene"], lab, fids, min_kme=min_kme, eigengenes=sub.eigengenes)
                 labels = pd.Series(-1, index=fids, name="module")
                 called = calls[calls["called"]]

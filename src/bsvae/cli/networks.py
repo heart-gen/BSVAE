@@ -124,6 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
     ir.add_argument("--output", required=True, help="Residual matrix path (.tsv.gz / .csv).")
     ir.add_argument("--stats", default=None, help="Optional per-transcript statistics table.")
     ir.add_argument("--min-isoforms", type=int, default=2)
+    ir.add_argument("--no-leave-one-out", action="store_true", default=False,
+                    help="Regress each isoform on the full gene aggregate (including itself) instead of its siblings.")
     ir.add_argument("--keep-tx-version", action="store_true", default=False)
 
     # ------------------------------------------------------------------
@@ -135,8 +137,16 @@ def build_parser() -> argparse.ArgumentParser:
     isp.add_argument("--tx2gene", required=True)
     isp.add_argument("--modules", required=True, help="modules.csv from extract-modules on the same matrix.")
     isp.add_argument("--output", required=True, help="Calls table (.csv / .tsv).")
-    isp.add_argument("--min-kme", type=float, default=0.4,
-                     help="Minimum residual kME to another module (default: 0.4).")
+    isp.add_argument("--min-kme", type=float, default=0.3,
+                     help="Minimum residual kME to another module (default: 0.3).")
+    isp.add_argument("--alpha", type=float, default=0.05,
+                     help="BH false-discovery rate for the residual correlation test (default: 0.05); "
+                          "0 or a negative value disables the test.")
+    isp.add_argument("--no-residualize-eigengenes", action="store_true", default=False,
+                     help="Correlate residuals with the raw eigengenes instead of eigengenes residualised "
+                          "on the gene's own module (more false calls among unswitched isoforms).")
+    isp.add_argument("--no-leave-one-out", action="store_true", default=False,
+                     help="Regress each isoform on the full gene aggregate (including itself) instead of its siblings.")
     isp.add_argument("--keep-tx-version", action="store_true", default=False)
 
     # ------------------------------------------------------------------
@@ -401,7 +411,12 @@ def handle_isoform_specific(args, logger: logging.Logger) -> None:
     fids = [str(f) for f in expr.index]
     labels = mods.set_index(mods["feature_id"].astype(str))["module"].reindex(fids).fillna(-1).astype(int).values
     tx2gene = load_tx2gene(path=args.tx2gene, feature_ids=fids, keep_version=args.keep_tx_version, logger=logger)
-    calls = isoform_specific_calls(expr, tx2gene, labels, fids, min_kme=args.min_kme, keep_version=args.keep_tx_version)
+    calls = isoform_specific_calls(
+        expr, tx2gene, labels, fids, min_kme=args.min_kme, keep_version=args.keep_tx_version,
+        alpha=args.alpha if args.alpha > 0 else None,
+        residualize_eigengenes=not args.no_residualize_eigengenes,
+        leave_one_out=not args.no_leave_one_out,
+    )
     out = Path(args.output); out.parent.mkdir(parents=True, exist_ok=True)
     calls.to_csv(out, sep="\t" if out.suffix == ".tsv" else ",")
     logger.info("Isoform-specific calls written to %s (%d called)", out, int(calls["called"].sum()))
@@ -458,7 +473,7 @@ def handle_isoform_residuals(args, logger: logging.Logger) -> None:
     tx2gene = load_tx2gene(path=args.tx2gene, feature_ids=list(expr.index.astype(str)),
                            keep_version=args.keep_tx_version, logger=logger)
     resid, stats = isoform_residuals(expr, tx2gene, min_isoforms=args.min_isoforms,
-                                     keep_version=args.keep_tx_version)
+                                     keep_version=args.keep_tx_version, leave_one_out=not args.no_leave_one_out)
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     sep = "\t" if ".tsv" in [s.lower() for s in out.suffixes] else ","

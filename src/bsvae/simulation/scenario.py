@@ -186,6 +186,7 @@ class ScenarioResult:
     metadata: Dict
     modules_overlap: Optional[pd.DataFrame] = None
     extra_truth: Dict[str, pd.DataFrame] = field(default_factory=dict)
+    counts_features_x_samples: Optional[pd.DataFrame] = None
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +380,7 @@ def _nb_observe(
     )
     return {
         "expr": expr,
+        "counts": counts,
         "covariates": covariates,
         "theta": theta,
         "libsize": libsize,
@@ -533,6 +535,7 @@ def _simulate_counts(
     )
     expr_sxg = pd.DataFrame(obs["expr"], index=sample_ids, columns=feature_ids)
     expr_gxs = expr_sxg.T
+    counts_gxs = pd.DataFrame(obs["counts"].T, index=feature_ids, columns=sample_ids)
     covariates = obs["covariates"]
     covariates.index = pd.Index(sample_ids, name="sample_id")
 
@@ -616,6 +619,7 @@ def _simulate_counts(
         gene_metadata=gene_metadata,
         metadata=metadata,
         modules_overlap=modules_overlap,
+        counts_features_x_samples=counts_gxs,
     )
 
 
@@ -726,6 +730,9 @@ def generate_scenario(config: Dict, scenario_id: str, rep: int, outdir: str | Pa
     cov_path = base / "covariates.tsv.gz"
 
     result.expr_features_x_samples.to_csv(expr_gxs_path, sep="\t", compression="gzip")
+    if result.counts_features_x_samples is not None and bool(outputs_cfg.get("emit_counts", True)):
+        result.counts_features_x_samples.to_csv(base / "expr" / "counts_features_x_samples.tsv.gz",
+                                                sep="\t", compression="gzip")
     emit_wgcna = bool(outputs_cfg.get("emit_wgcna_matrix", True))
     if emit_wgcna:
         result.expr_samples_x_features.to_csv(expr_sxg_path, sep="\t", compression="gzip")
