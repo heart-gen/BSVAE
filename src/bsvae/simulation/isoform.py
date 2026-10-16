@@ -175,6 +175,27 @@ def simulate_isoform_counts(params: Dict, seed: int) -> ScenarioResult:
             tx_modules[iso] = int(rs.choice(other))
             is_switched[iso] = True
 
+    # Region heterogeneity (second cohort only): keep a fraction of the base switches and add
+    # region-specific ones, both drawn from the cohort stream so regions of one truth differ.
+    switch_keep_frac = float(params.get("switch_keep_frac", 1.0))
+    switch_extra_rate = float(params.get("switch_extra_rate", 0.0))
+    base_switched = is_switched.copy()
+    if rt is not None and (switch_keep_frac < 1.0 or switch_extra_rate > 0.0) and K > 1:
+        sw_idx = np.where(is_switched)[0]
+        drop = sw_idx[rt.random(sw_idx.size) >= switch_keep_frac]
+        for iso in drop:
+            tx_modules[iso] = gene_modules[gene_of_tx[iso]]
+            is_switched[iso] = False
+        if switch_extra_rate > 0.0:
+            for g in multi_signal:
+                start = gene_starts[g]
+                if base_switched[start: start + n_iso[g]].any() or rt.random() >= switch_extra_rate:
+                    continue
+                iso = start + int(rt.integers(1, n_iso[g]))
+                other = [m for m in range(K) if m != gene_modules[g]]
+                tx_modules[iso] = int(rt.choice(other))
+                is_switched[iso] = True
+
     # Usage-driven regulation: one non-dominant isoform's share of the gene follows a
     # module factor while the gene total is unchanged (shares are re-normalised per sample).
     usage_rate = float(params.get("usage_rate", 0.0))
@@ -205,6 +226,13 @@ def simulate_isoform_counts(params: Dict, seed: int) -> ScenarioResult:
     # Factors and loadings.
     signal_scale = float(params.get("signal_scale", 1.9))
     z = _latent_factors(rf, n_samples, K, float(params.get("factor_corr", 0.3)))
+    donor_seed = params.get("donor_seed", None)
+    donor_effect_sd = float(params.get("donor_effect_sd", 0.0))
+    if donor_seed is not None and donor_effect_sd > 0.0:
+        # the same donors contribute to every region: a donor-level offset of the module factors,
+        # drawn from donor_seed, is shared by all cohorts that use it (correlated samples across regions)
+        rd = np.random.default_rng(int(donor_seed))
+        z = z + donor_effect_sd * rd.normal(size=(n_samples, K))
     W = np.zeros((n_tx, K), dtype=np.float64)
     load = np.abs(rl.normal(0.0, signal_scale, size=n_tx))
     sig_tx = tx_modules >= 0
@@ -290,6 +318,7 @@ def simulate_isoform_counts(params: Dict, seed: int) -> ScenarioResult:
             "tx_module": tx_modules,
             "alpha": np.where(is_switched, alpha_mix, 0.0),
             "is_switched": (is_switched | is_usage).astype(int),
+            "is_base_switched": base_switched.astype(int),
             "mechanism": np.where(is_switched, "switch", np.where(is_usage, "usage", "none")),
             "is_usage": is_usage.astype(int),
             "usage_strength": np.where(is_usage, usage_strength, 0.0),
@@ -350,6 +379,10 @@ def simulate_isoform_counts(params: Dict, seed: int) -> ScenarioResult:
         "usage_from": usage_from,
         "n_usage_transcripts": int(is_usage.sum()),
         "sample_seed": sample_seed,
+        "switch_keep_frac": switch_keep_frac,
+        "switch_extra_rate": switch_extra_rate,
+        "donor_seed": donor_seed,
+        "donor_effect_sd": donor_effect_sd,
         "tissue_shift": tissue_shift,
         "tissue_shift_mode": tissue_shift_mode,
         "dissolved_modules": dissolved_modules,

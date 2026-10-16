@@ -209,6 +209,10 @@ def build_parser() -> argparse.ArgumentParser:
     tc.add_argument("--alpha", type=float, default=0.05)
     tc.add_argument("--min-kme", type=float, default=0.25, help="Mean |kME| across cohorts required for a call.")
     tc.add_argument("--min-cohorts", type=int, default=2)
+    tc.add_argument("--min-called", type=int, default=0, help="Single-cohort calls required in addition.")
+    tc.add_argument("--correlation", choices=["none", "empirical"], default="empirical",
+                    help="Strube correction for dependent cohorts (shared donors across regions), estimated from "
+                         "the correlation of per-isoform z-scores between cohorts (default: empirical).")
 
     # ------------------------------------------------------------------
     # regress-covariates
@@ -572,6 +576,7 @@ def handle_target_genes(args, logger: logging.Logger) -> None:
 
 
 def handle_target_genes_combine(args, logger: logging.Logger) -> None:
+    import numpy as np
     import pandas as pd
     from bsvae.networks.targets import combine_target_tests
 
@@ -583,7 +588,12 @@ def handle_target_genes_combine(args, logger: logging.Logger) -> None:
     n_samples = None
     if args.n_samples:
         n_samples = {k: int(v) for k, v in (x.split("=", 1) for x in args.n_samples)}
-    out = combine_target_tests(tables, n_samples=n_samples, alpha=args.alpha, min_kme=args.min_kme, min_cohorts=args.min_cohorts)
+    out = combine_target_tests(tables, n_samples=n_samples, alpha=args.alpha, min_kme=args.min_kme, min_cohorts=args.min_cohorts,
+                               correlation=args.correlation, min_called=args.min_called)
+    rho = out.attrs.get("cohort_z_correlation")
+    if rho is not None and len(tables) > 1:
+        off = rho.values[np.triu_indices(len(rho), 1)]
+        logger.info("Between-cohort z correlation: mean %.2f, max %.2f", float(np.mean(off)), float(np.max(off)))
     p = Path(args.output); p.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(p, sep="\t")
     logger.info("Combined %d cohorts: %d isoforms, %d called (FDR < %.2f, mean |kME| >= %.2f, >= %d cohorts)",

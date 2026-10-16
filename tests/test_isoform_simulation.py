@@ -261,3 +261,34 @@ def test_tissue_shift_modules_dissolves_whole_modules():
     assert (ga["module"].values[~was_member] == gc["module"].values[~was_member]).all()
     with pytest.raises(ValueError):
         simulate_params(dict(p, tissue_shift=0.3, tissue_shift_mode="bogus"), seed=1)
+
+
+def test_region_heterogeneity_and_donor_effects():
+    from bsvae.simulation.scenario import ISOFORM_GENERATOR_DEFAULTS, simulate_params
+    p = dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=300, n_samples=60, n_modules=5, switch_rate=0.3)
+    a = simulate_params(p, seed=2)
+    sa = a.extra_truth["switch_table.tsv.gz"].set_index("transcript_id")
+    # partially shared switches in a second region
+    b = simulate_params(dict(p, sample_seed=5, switch_keep_frac=0.5, switch_extra_rate=0.2), seed=2)
+    sb = b.extra_truth["switch_table.tsv.gz"].set_index("transcript_id")
+    base = sa.index[sa["is_switched"] == 1]
+    kept = sb.loc[base, "is_switched"].values == 1
+    assert 0.2 < kept.mean() < 0.8 and (sb["is_base_switched"].values == sa["is_switched"].values).all()
+    new = sb.index[(sb["is_switched"] == 1) & (sb["is_base_switched"] == 0)]
+    assert len(new) > 0 and (sb.loc[new, "gene_module"] != sb.loc[new, "tx_module"]).all()
+    # the region-specific set is reproducible for the same sample_seed and differs for another
+    b2 = simulate_params(dict(p, sample_seed=5, switch_keep_frac=0.5, switch_extra_rate=0.2), seed=2)
+    b3 = simulate_params(dict(p, sample_seed=6, switch_keep_frac=0.5, switch_extra_rate=0.2), seed=2)
+    assert (b2.extra_truth["switch_table.tsv.gz"]["is_switched"].values == sb["is_switched"].values).all()
+    assert not (b3.extra_truth["switch_table.tsv.gz"]["is_switched"].values == sb["is_switched"].values).all()
+    # without a cohort stream the heterogeneity keys are ignored
+    c = simulate_params(dict(p, switch_keep_frac=0.5), seed=2)
+    assert (c.extra_truth["switch_table.tsv.gz"]["is_switched"].values == sa["is_switched"].values).all()
+    # donor effects: regions sharing donor_seed have correlated module factors, others do not
+    r1 = simulate_params(dict(p, sample_seed=11, donor_seed=77, donor_effect_sd=1.0), seed=2)
+    r2 = simulate_params(dict(p, sample_seed=12, donor_seed=77, donor_effect_sd=1.0), seed=2)
+    r3 = simulate_params(dict(p, sample_seed=12, donor_effect_sd=0.0), seed=2)
+    z1, z2, z3 = (r.module_latents.values for r in (r1, r2, r3))
+    shared = np.mean([np.corrcoef(z1[:, k], z2[:, k])[0, 1] for k in range(5)])
+    indep = np.mean([np.corrcoef(z1[:, k], z3[:, k])[0, 1] for k in range(5)])
+    assert shared > 0.3 and abs(indep) < 0.3

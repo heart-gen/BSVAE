@@ -572,6 +572,8 @@ def combine_target_tests(
     alpha: float = 0.05,
     min_kme: float = 0.25,
     min_cohorts: int = 2,
+    correlation: str = "none",
+    min_called: int = 0,
 ) -> pd.DataFrame:
     """
     Combine per-cohort (or per-tissue / per-region) targeted-gene tables into
@@ -585,6 +587,14 @@ def combine_target_tests(
     require the modules to be aligned across cohorts.  Module identity is
     reported per cohort (``modules``) together with the number of cohorts in
     which the isoform was called and the mean |kME|.
+
+    ``correlation="empirical"`` applies Strube's correction for dependent
+    cohorts (the same donors contributing to several brain regions): the
+    pairwise correlation of the per-isoform z-scores between cohorts is
+    estimated over all tested isoforms and enters the denominator
+    (sqrt(sum w^2 + 2 sum_{i<j} w_i w_j rho_ij)), so shared donor effects do
+    not inflate the combined evidence.  ``min_called`` additionally requires
+    that many single-cohort calls.
 
     The combined call requires BH FDR < ``alpha`` across isoforms, mean |kME|
     ≥ ``min_kme`` and at least ``min_cohorts`` cohorts contributing.  On
@@ -610,12 +620,30 @@ def combine_target_tests(
         t["cohort"] = k
         frames.append(t)
     long = pd.concat(frames)
+    if correlation not in ("none", "empirical"):
+        raise ValueError("correlation must be 'none' or 'empirical'")
+    rho = pd.DataFrame(0.0, index=names, columns=names)
+    if correlation == "empirical" and len(names) > 1:
+        zmat = long.assign(z=sps.norm.isf(np.clip(long["p_value"].astype(float), 1e-300, 1.0))).pivot_table(
+            index=long.index, columns="cohort", values="z")
+        # the dependence of interest is between null tests, so estimate it on isoforms that are
+        # not nominally significant in any cohort (fall back to all isoforms when too few)
+        null_like = zmat[(zmat.max(axis=1) < sps.norm.isf(0.05)) | zmat.isna().any(axis=1)]
+        src = null_like if len(null_like) >= 20 else zmat
+        rho = src.corr(min_periods=5).fillna(0.0).clip(lower=0.0)
+        np.fill_diagonal(rho.values, 1.0)
     rows = []
     for tx, g in long.groupby(level=0):
         p = np.clip(g["p_value"].values.astype(float), 1e-300, 1.0)
         z = sps.norm.isf(p)                                   # one-sided: evidence for membership
-        ws = np.array([w[c] for c in g["cohort"]])
-        zc = float((ws * z).sum() / np.sqrt((ws ** 2).sum()))
+        cs = list(g["cohort"])
+        ws = np.array([w[c] for c in cs])
+        denom2 = float((ws ** 2).sum())
+        if correlation == "empirical" and len(cs) > 1:
+            for i in range(len(cs)):
+                for j in range(i + 1, len(cs)):
+                    denom2 += 2.0 * ws[i] * ws[j] * float(rho.loc[cs[i], cs[j]])
+        zc = float((ws * z).sum() / np.sqrt(denom2))
         rows.append({
             "feature_id": tx, "gene_id": g["gene_id"].iloc[0], "n_cohorts": int(len(g)),
             "n_called": int(g["called"].sum()), "mean_abs_kme": float(g["kme_residual"].abs().mean()),
@@ -625,7 +653,9 @@ def combine_target_tests(
         })
     out = pd.DataFrame(rows).set_index("feature_id")
     out["q_combined"] = _bh_adjust(out["p_combined"].values)
-    out["called"] = (out["q_combined"] < float(alpha)) & (out["mean_abs_kme"] >= float(min_kme)) & (out["n_cohorts"] >= int(min_cohorts))
+    out["called"] = ((out["q_combined"] < float(alpha)) & (out["mean_abs_kme"] >= float(min_kme))
+                     & (out["n_cohorts"] >= int(min_cohorts)) & (out["n_called"] >= int(min_called)))
+    out.attrs["cohort_z_correlation"] = rho
     return out.sort_values("p_combined")
 
 

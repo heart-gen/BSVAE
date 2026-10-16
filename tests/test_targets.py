@@ -241,3 +241,27 @@ def test_combine_target_tests_pools_weak_evidence(tmp_path):
     cli(["target-genes-combine", "--inputs", *paths, "--n-samples", *[f"r{k}=150" for k in range(6)], "--output", str(tmp_path / "combined.tsv")])
     got = pd.read_csv(tmp_path / "combined.tsv", sep="\t", index_col=0)
     assert got["called"].sum() == 5
+
+
+def test_combine_strube_correction_reduces_evidence_for_dependent_cohorts():
+    from bsvae.networks.targets import combine_target_tests
+    rng = np.random.default_rng(3)
+    iso = [f"t{i}" for i in range(200)]
+    shared = rng.normal(size=200)                       # donor-driven component shared by all cohorts
+    tables = {}
+    for k in range(5):
+        z = 0.9 * shared + 0.45 * rng.normal(size=200)  # strongly dependent cohorts
+        from scipy import stats as sps
+        p = sps.norm.sf(z)
+        tables[f"r{k}"] = pd.DataFrame({"gene_id": [f"g{i}" for i in range(200)], "best_other_module": 0,
+                                        "kme_residual": 0.3, "p_value": p, "q_value": p, "called": p < 0.05}, index=iso)
+    naive = combine_target_tests(tables, correlation="none")
+    corr = combine_target_tests(tables, correlation="empirical")
+    rho = corr.attrs["cohort_z_correlation"]
+    assert rho.values[np.triu_indices(5, 1)].mean() > 0.6
+    assert corr["z_combined"].abs().mean() < naive["z_combined"].abs().mean()
+    assert corr["called"].sum() < naive["called"].sum()
+    strict = combine_target_tests(tables, correlation="none", min_called=3)
+    assert strict["called"].sum() <= naive["called"].sum()
+    with pytest.raises(ValueError):
+        combine_target_tests(tables, correlation="bogus")
