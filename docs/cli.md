@@ -281,6 +281,8 @@ bsvae-networks target-genes-combine \
   --n-samples DLPFC=160 HIPP=150 --output results/brain_targets_combined.tsv
 ```
 
+Dependent cohorts: when the same donors contribute to several regions (BrainSEQ, GTEx), the per-region tests are not independent and a plain Stouffer sum overstates the evidence. `--correlation empirical` (default) applies Strube's correction: the correlation of per-isoform z-scores between cohorts is estimated on isoforms that are not nominally significant in any cohort and enters the denominator, so shared donor effects do not inflate the combined z. `--min-called N` additionally requires N single-cohort calls. Note that the false-call rates quoted above are false-positive rates among unswitched isoforms; the positive predictive value among calls depends on how rare true switches are (at 5 % prevalence a 5 % false-positive rate with 0.8 recall gives a PPV near 0.46), which `scripts/benchmark_calibration.py` and the heterogeneity simulation report explicitly.
+
 Output columns: `gene_id, n_cohorts, n_called, mean_abs_kme, max_abs_kme, z_combined, p_combined, modules, q_combined, called`.
 
 ### `isoform-residuals`

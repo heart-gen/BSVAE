@@ -414,8 +414,20 @@ SUMMARY_METRICS = [
 ]
 
 
-def summarize(df: pd.DataFrame, by: Sequence[str] = ("scenario_id", "method")) -> pd.DataFrame:
-    """Mean ± sd per group for the headline metrics (ok rows only)."""
+def summarize(
+    df: pd.DataFrame,
+    by: Sequence[str] = ("scenario_id", "method"),
+    ci: bool = True,
+    n_boot: int = 2000,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """
+    Mean ± sd per group for the headline metrics (ok rows only) and, with
+    ``ci``, a percentile bootstrap 95 % interval over the runs of each group
+    (``*_ci_lo`` / ``*_ci_hi``; NaN with fewer than three runs).  Runs are the
+    unit of replication, so with several seeds per independently generated
+    dataset (``rep``) the interval reflects both sources of variation.
+    """
     ok = df[df["status"] == "ok"] if "status" in df else df
     cols = [c for c in SUMMARY_METRICS if c in ok.columns]
     if ok.empty or not cols:
@@ -424,7 +436,23 @@ def summarize(df: pd.DataFrame, by: Sequence[str] = ("scenario_id", "method")) -
     mean = g.mean().add_suffix("_mean")
     sd = g.std(ddof=0).add_suffix("_sd")
     n = g.size().rename("n_runs")
-    return pd.concat([n, mean, sd], axis=1).reset_index()
+    parts = [n, mean, sd]
+    if ci:
+        rng = np.random.default_rng(int(seed))
+        lo_rows, hi_rows, idx = [], [], []
+        for key, sub in ok.groupby(list(by), dropna=False):
+            lo, hi = {}, {}
+            for c in cols:
+                v = sub[c].dropna().values.astype(float)
+                if len(v) < 3:
+                    lo[f"{c}_ci_lo"] = np.nan; hi[f"{c}_ci_hi"] = np.nan
+                    continue
+                boots = rng.choice(v, size=(int(n_boot), len(v)), replace=True).mean(axis=1)
+                lo[f"{c}_ci_lo"] = float(np.percentile(boots, 2.5)); hi[f"{c}_ci_hi"] = float(np.percentile(boots, 97.5))
+            lo_rows.append(lo); hi_rows.append(hi); idx.append(key)
+        index = pd.MultiIndex.from_tuples(idx, names=list(by)) if len(by) > 1 else pd.Index([k[0] if isinstance(k, tuple) else k for k in idx], name=by[0])
+        parts += [pd.DataFrame(lo_rows, index=index), pd.DataFrame(hi_rows, index=index)]
+    return pd.concat(parts, axis=1).reset_index()
 
 
 __all__ = ["run_grid", "run_one", "evaluate_run", "load_truth", "summarize", "METHODS"]

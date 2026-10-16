@@ -27,6 +27,11 @@ Simulation normalisation
 * Simulated counts are normalised with median-of-ratios size factors instead of plain CPM. Under CPM, features without module signal co-varied with each other (|r| ≈ 0.35) against the large modules, so the benchmark's "null" features were not null and grey-detection metrics measured a compositional artefact.
 * Post-processing applies `--min-gamma` to the merged responsibilities (after eigengene merging). A training-time or inference-time "background" mixture component was evaluated and rejected: trained jointly it absorbs every feature; applied at inference it never fires because null features are not latent-space outliers.
 
+Calibration
+
+* `isoform_specific_calls(loo_eigengene=True)` recomputes a module's eigengene without the tested gene's transcripts before scoring them (leave-one-gene-out), removing the selection bias of a transcript contributing to the eigengene it is tested against. `scripts/benchmark_calibration.py` checks the residual p-values under abundance-only null simulations (type-I error at 0.05, KS against uniform) with and without the correction, and the held-out replication of transcriptome-wide calls (labels from one half of the samples, calls validated on the other half). `summarize` reports percentile-bootstrap 95 % intervals over runs.
+* Simulated cohorts can differ in their switches (`switch_keep_frac`, `switch_extra_rate`) and share donors (`donor_seed`, `donor_effect_sd`: donor-level module-factor offsets common to every region). `target-genes-combine` applies Strube's correction for dependent cohorts by default (`--correlation empirical`, the between-cohort correlation of z-scores estimated on null-like isoforms) and accepts `--min-called`.
+
 Cross-cohort targeted tests
 
 * `bsvae-networks target-genes-combine` pools `target-genes` tables across cohorts, tissues or regions with Stouffer's method (√n weights), reporting per-cohort modules and a combined FDR, so rare isoforms that no single 150-sample region can call become reportable.

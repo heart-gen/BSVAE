@@ -170,10 +170,21 @@ def isoform_specific_calls(
     residualize_eigengenes: bool = True,
     leave_one_out: bool = True,
     input_scale: str = "log2",
+    loo_eigengene: bool = False,
+    labels_for_eigengenes: Optional[np.ndarray] = None,
 ) -> pd.DataFrame:
     """
     Call isoforms whose *gene-programme-removed* profile belongs to a module
     other than their gene's ("isoform-specific membership").
+
+    ``loo_eigengene`` guards against selection bias: a transcript whose own
+    raw label is the module it is tested against contributed to that module's
+    eigengene, which inflates its kME.  With the option on, for every gene
+    that has a member in a module, that module's eigengene is recomputed
+    without any transcript of the gene before the gene's transcripts are
+    scored against it (leave-one-gene-out).  The cost is one small PCA per
+    (gene, module) pair with a member, which is affordable for a targeted
+    set and a few minutes transcriptome-wide.
 
     For every multi-isoform transcript the residual (see
     :func:`isoform_residuals`, leave-one-out by default) is correlated with
@@ -240,6 +251,26 @@ def isoform_specific_calls(
             kme[rows_idx] = compute_kme(resid.iloc[rows_idx], E, list(resid.index[rows_idx])).values
     else:
         kme = compute_kme(resid, eigengenes, list(resid.index)).values
+    if loo_eigengene:
+        lab_e = labels if labels_for_eigengenes is None else np.asarray(labels_for_eigengenes).astype(np.int64)
+        lab_e_s = pd.Series(lab_e, index=fids)
+        gene_of = stats["gene_id"].values
+        for g in np.unique(gene_of):
+            rows_idx = np.where(gene_of == g)[0]
+            members_g = [t for t in tx_gene.index[tx_gene.values == g]]
+            mods_g = {int(m) for m in lab_e_s.reindex(members_g).dropna().values if m >= 0 and int(m) in cols}
+            gm = int(gm_per_tx[rows_idx[0]])
+            for m in mods_g:
+                sub_lab = lab_e.copy()
+                sub_lab[np.isin(fids, members_g)] = -1
+                e_m = module_eigengenes(expr, np.where(sub_lab == m, m, -1), fids).dropna(axis=1, how="any")
+                if e_m.shape[1] == 0:
+                    continue
+                E_full = eigengenes.copy(); E_full.iloc[:, cols.index(m)] = e_m.iloc[:, 0].values
+                if residualize_eigengenes and gm in cols:
+                    E_full = _residualize_eigengenes(E_full, cols.index(gm))
+                k = compute_kme(resid.iloc[rows_idx], E_full, list(resid.index[rows_idx])).values[:, cols.index(m)]
+                kme[rows_idx, cols.index(m)] = k
     kme = np.nan_to_num(kme)
     for i, gm in enumerate(gm_per_tx):
         if gm in cols:
