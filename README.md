@@ -57,7 +57,7 @@ Supported loaders:
 - `bsvae-simulate`
 - `bsvae-benchmark` (BSVAE vs WGCNA, transcript-usage networks, ICA/NMF, acorde and TWN on simulated data; needs R with `WGCNA`, plus `glasso` for TWN)
 
-Transcript-level extras in `bsvae-networks`: `consensus-modules` (majority vote over seeds with a per-feature stability score), `isoform-specific` (isoforms whose expression tracks a module other than their gene's), `target-genes` (calibrated membership tests for candidate genes or GWAS loci from a gene list, transcript list or BED file, with a case/control interaction test), `target-genes-combine` (pool those tests across cohorts or brain regions), `module-quality` (kME, enrichment, preservation in a second dataset) and `regress-covariates` (remove batch and other known covariates before training).
+At transcript level, `extract-modules` returns two independent outputs: coherent module assignments (the gene-coherence policy is the default whenever `--expr` and `--tx2gene` are given) and the isoform-specific residual scan over every multi-isoform transcript, so module membership and isoform-specific divergence are reported and validated separately. Further transcript-level commands in `bsvae-networks`: `consensus-modules` (majority vote over seeds with a per-feature stability score), `isoform-specific` (isoforms whose expression tracks a module other than their gene's), `target-genes` (calibrated membership tests for candidate genes or GWAS loci from a gene list, transcript list or BED file, with a case/control interaction test), `target-genes-combine` (pool those tests across cohorts or brain regions), `module-quality` (kME, enrichment, preservation in a second dataset) and `regress-covariates` (remove batch and other known covariates before training).
 
 ## Quickstart
 
@@ -94,6 +94,19 @@ bsvae-networks extract-modules \
   --expr data/expression.csv \
   --soft-eigengenes
 ```
+
+With transcript-level data, pass `--tx2gene` as well. `extract-modules` then produces two independent outputs: module assignments annotated by the gene-coherence policy (default; `--no-gene-coherence` to disable) and the isoform-specific residual scan (`--no-isoform-calls` to skip, `--loo-eigengene` to change the leave-one-gene-out eigengene correction). A transcript's module label never decides whether it is tested.
+
+```bash
+bsvae-networks extract-modules \
+  --model-path results/iso1 \
+  --dataset data/transcripts.tsv.gz \
+  --output-dir results/iso1/modules \
+  --expr data/transcripts.tsv.gz \
+  --tx2gene data/tx2gene.tsv
+```
+
+This adds `modules_raw.csv`, `gene_coherence.csv` and `isoform_specific.csv` next to `modules.csv`; see the [CLI reference](docs/cli.md) for the columns.
 
 Export latents:
 

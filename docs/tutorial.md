@@ -132,6 +132,28 @@ Optional comparison outputs:
 - `leiden_modules.csv` with `--use-leiden`
 - `gamma_gene.npz`, `hard_assignments_gene.npz` and `gene_divergent.csv` with `--aggregate-to-gene --tx2gene`
 
+### Transcript-level data: two outputs
+
+With transcript-level data, pass `--tx2gene` as well. `extract-modules` then produces two independent outputs: module assignments annotated by the gene-coherence policy (default; `--no-gene-coherence` to disable) and the isoform-specific residual scan (`--no-isoform-calls` to skip, `--loo-eigengene` to change the leave-one-gene-out eigengene correction). A transcript's module label never decides whether it is tested.
+
+```bash
+bsvae-networks extract-modules \
+  --model-path results/iso1 \
+  --dataset data/transcripts.tsv.gz \
+  --output-dir results/iso1/modules \
+  --expr data/transcripts.tsv.gz \
+  --tx2gene data/tx2gene.tsv
+```
+
+Additional outputs:
+
+- `modules.csv`: module assignments after the gene-coherence policy (an isoform placed apart from its gene's majority module is returned to it unless its sibling-residual kME supports the other membership at BH FDR 0.05)
+- `modules_raw.csv`: the labels before the policy
+- `gene_coherence.csv`: every divergent isoform tested, with its residual kME, q-value and whether it was kept
+- `isoform_specific.csv`: the residual scan over every multi-isoform transcript on the raw labels (`called`, `best_other_module`, `kme_residual`, `q_value`, `label_discordant`), the primary evidence for isoform-specific divergence
+
+Use `modules.csv` for module biology (enrichment, eigengene–trait correlation, preservation) and `isoform_specific.csv` for divergence. For candidate genes, GWAS loci or several cohorts, see `target-genes` and `target-genes-combine` in the [CLI reference](cli.md).
+
 ## 7. Export Latents
 
 `export-latents` writes a compressed NumPy archive.

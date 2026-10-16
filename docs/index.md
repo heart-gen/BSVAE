@@ -1,6 +1,6 @@
 # BSVAE Documentation
 
-BSVAE is a CLI-first workflow for feature-level module discovery in omics data. It combines a Gaussian-mixture variational autoencoder with tools for model selection, network extraction, module assignment, latent analysis, and synthetic benchmarking.
+BSVAE is a CLI-first workflow for feature-level module discovery in omics data. It combines a Gaussian-mixture variational autoencoder with tools for model selection, network extraction, module assignment, latent analysis, and synthetic benchmarking. At transcript level it reports two independent outputs: gene-coherent module assignments and an isoform-specific residual scan, with targeted tests for candidate genes or GWAS loci and cross-cohort evidence combination.
 
 ## Main Commands
 
@@ -8,9 +8,9 @@ BSVAE is a CLI-first workflow for feature-level module discovery in omics data. 
 | --- | --- |
 | `bsvae-train` | Train a `GMMModuleVAE` on a `features x samples` matrix |
 | `bsvae-sweep-k` | Select the number of modules with held-out validation and optional stability replicates |
-| `bsvae-networks` | Extract networks, modules, latents, and latent-analysis outputs from a trained model |
+| `bsvae-networks` | Extract networks, modules (with gene coherence and the isoform-specific scan at transcript level), latents, targeted-gene tests and cross-cohort combination from a trained model |
 | `bsvae-simulate` | Generate synthetic datasets (gene- or transcript-level), build scenario grids, and score a trained model |
-| `bsvae-benchmark` | Run BSVAE and WGCNA head-to-head on a scenario grid with grey-aware metrics |
+| `bsvae-benchmark` | Run BSVAE, WGCNA, acorde, usage networks, ICA/NMF and TWN on a scenario grid with grey-aware and edge metrics |
 
 ## Data Orientation
 

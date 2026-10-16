@@ -174,6 +174,7 @@ Options:
 - `--kme-reassign`
 - Gene coherence is the default annotation policy when `--expr` and `--tx2gene` are given (`--no-gene-coherence` disables it; raw labels are always written to `modules_raw.csv`): an isoform assigned to a module other than its gene's majority module is moved back to the gene's module unless its sibling-residual kME to that other module reaches `--min-kme` at BH FDR 0.05. In the same run the isoform-specific residual scan over every multi-isoform transcript is written to `isoform_specific.csv` from the raw labels (`--no-isoform-calls` to skip), so module membership and isoform-specific divergence are two independent outputs: the residual test is the primary evidence for divergence and raw-label discordance is an annotation (`label_discordant`). This removes divergence driven by abundance noise alone. On the abundance-confounding simulations (`scripts/benchmark_confounding.py`, 600 genes × 150 samples) raw BSVAE spreads the isoforms of 28–46 % of unswitched genes over two or more modules (WGCNA 22–34 %), most often for rare isoforms; with `--gene-coherence` that false-split rate falls to 11–19 % and transcript-level ARI rises by about 0.1 (for example 0.73 to 0.87 with no switching), while detection of true switches falls from 0.89 to 0.63 for abundance switches (WGCNA 0.73) and from 0.72 to 0.40 for compensated usage shifts at unit strength (WGCNA 0.48). The decision is made by the FDR test; the kME floor is not binding below 0.3. Use it when false divergence matters more than recall of switches; the hierarchical loss (`--hier-strength 0.05 --isoform-stratified`) sits between the two (false splits 25–35 %, switch detection 0.81). Writes `gene_coherence.csv`.
 - `--min-kme` default `0.3`
+- `--loo-eigengene` default `approx` (leave-one-gene-out eigengene in the residual scan; `exact` or `off`; see `isoform-specific`)
 - `--kme-margin` default `0.1`
 - `--no-postprocess` write raw `argmax(γ)` only
 - `--soft-eigengenes`
@@ -192,6 +193,7 @@ Outputs:
 - `soft_eigengenes.csv` when requested
 - `leiden_modules.csv` when requested
 - `gamma_gene.npz`, `hard_assignments_gene.npz` and `gene_divergent.csv` when gene aggregation is requested
+- with `--expr` and `--tx2gene`: `modules_raw.csv` (labels before gene coherence), `gene_coherence.csv` (every divergent isoform tested: residual kME, q-value, `kept`) and `isoform_specific.csv` (the residual scan; columns as for `isoform-specific`)
 
 ### `consensus-modules`
 
@@ -224,6 +226,7 @@ Options:
 
 - `--min-kme` default `0.3` (effect-size floor; with the residualised eigengenes this keeps precision at or above the previous `0.4` default while catching about 10 % more switched isoforms on the isoform simulations)
 - `--alpha` default `0.05` (BH false-discovery rate for the residual correlation, Bonferroni-corrected over modules per transcript; `0` disables it). At 150 samples the kME floor dominates; with several hundred samples the test is what keeps weak-but-significant correlations from flooding the calls.
+- `--loo-eigengene` default `approx`: recompute each module's eigengene without the tested gene's transcripts before scoring them (first-order downdate; `exact` recomputes the PCA per gene at higher cost; `off` disables). This removes the self-contribution of a transcript to the eigengene it is tested against; see the calibration note below
 - `--no-residualize-eigengenes`, `--no-leave-one-out` restore the previous behaviour
 - `--keep-tx-version`
 

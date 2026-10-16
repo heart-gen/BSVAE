@@ -77,12 +77,20 @@ Writes `consensus_modules.csv` with a per-feature `agreement` stability score; f
 
 ## Isoform-Specific Membership
 
+`extract-modules` already runs this scan on the raw labels whenever `--expr` and `--tx2gene` are given and writes `isoform_specific.csv`; the standalone command re-runs it on an existing `modules.csv` (for example with other thresholds, or on labels from another method).
+
 ```bash
 bsvae-networks isoform-specific --dataset transcripts.tsv.gz --tx2gene tx2gene.tsv \
   --modules results/run/modules/modules.csv --output results/run/isoform_specific.csv
 ```
 
 For each multi-isoform transcript, the part of its profile that its sibling isoforms do not explain is correlated with every module eigengene (each residualised on the gene's own module eigengene, which removes leakage between correlated modules); a transcript whose residual tracks another module (kME ≥ `--min-kme`, BH FDR < `--alpha`) is called isoform-specific, with the target module. On the isoform simulations this enriches truly switched isoforms about 8× over the base rate at the default `--min-kme 0.3`. Low-abundance isoforms have attenuated correlations and are the hardest to call; see `docs/cli.md` for what helps. `isoform-residuals` writes the residual matrix for custom analyses. For a handful of candidate genes or GWAS loci, `target-genes` runs the same membership test against a permutation or abundance-matched null with multiplicity controlled within the target set only, and adds reliability-corrected kME, a case/control interaction test and module-neighbour tables (see `docs/cli.md`).
+
+Options: `--min-kme` (0.3), `--alpha` (0.05), `--loo-eigengene approx|exact|off` (leave-one-gene-out eigengene, default `approx`), `--no-residualize-eigengenes`, `--no-leave-one-out`.
+
+## Targeted Genes And Cross-Cohort Evidence
+
+`target-genes` applies the same residual test to the isoforms of a gene list, transcript list or BED file of loci (mapped to genes through a GTF/BED annotation) with multiplicity controlled within the target set, a permutation null, an optional reliability estimate from raw counts and a case/control interaction test. `target-genes-combine` pools the per-cohort tables with Stouffer's method and Strube's correction for shared donors. Both are documented flag by flag in the [CLI reference](cli.md).
 
 ## Export Latents
 

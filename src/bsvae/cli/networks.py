@@ -105,6 +105,8 @@ def build_parser() -> argparse.ArgumentParser:
     mp.add_argument("--no-isoform-calls", action="store_true", default=False,
                     help="Skip the isoform-specific membership scan (isoform_specific.csv) that runs on the raw "
                          "labels whenever --expr and --tx2gene are given.")
+    mp.add_argument("--loo-eigengene", choices=["approx", "exact", "off"], default="approx",
+                    help="Leave-one-gene-out eigengene in the residual test: 'approx' (default; first-order downdate removing the tested gene's transcripts from the module eigengene), 'exact' (recompute the PCA per gene; slower) or 'off'. Removes the self-contribution of a transcript to the eigengene it is tested against.")
     mp.add_argument("--tx2gene", type=str, default=None,
                     help="TSV (transcript_id, gene_id) for isoform-to-gene aggregation.")
     mp.add_argument("--aggregate-to-gene", action="store_true", default=False,
@@ -159,6 +161,8 @@ def build_parser() -> argparse.ArgumentParser:
                           "on the gene's own module (more false calls among unswitched isoforms).")
     isp.add_argument("--no-leave-one-out", action="store_true", default=False,
                      help="Regress each isoform on the full gene aggregate (including itself) instead of its siblings.")
+    isp.add_argument("--loo-eigengene", choices=["approx", "exact", "off"], default="approx",
+                     help="Leave-one-gene-out eigengene in the residual test: 'approx' (default; first-order downdate removing the tested gene's transcripts from the module eigengene), 'exact' (recompute the PCA per gene; slower) or 'off'. Removes the self-contribution of a transcript to the eigengene it is tested against.")
     isp.add_argument("--keep-tx-version", action="store_true", default=False)
 
     # ------------------------------------------------------------------
@@ -413,7 +417,8 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
                 # Two-output workflow: the residual scan over every multi-isoform transcript runs on the raw
                 # labels, so the coherence policy below can never hide a candidate from it.
                 from bsvae.utils.isoform import isoform_specific_calls
-                calls = isoform_specific_calls(expr, t2g, raw_labels, feature_ids, min_kme=args.min_kme)
+                calls = isoform_specific_calls(expr, t2g, raw_labels, feature_ids, min_kme=args.min_kme,
+                                               loo_eigengene=_loo_choice(args.loo_eigengene))
                 calls.to_csv(out_dir / "isoform_specific.csv")
                 logger.info("Isoform-specific scan: %d of %d multi-isoform transcripts called (isoform_specific.csv)",
                             int(calls["called"].sum()), len(calls))
@@ -493,6 +498,11 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
         logger.info("Leiden fallback modules saved.")
 
 
+def _loo_choice(value: str) -> "bool | str":
+    """Map the --loo-eigengene CLI choice onto the isoform_specific_calls argument."""
+    return False if value == "off" else value
+
+
 def handle_isoform_specific(args, logger: logging.Logger) -> None:
     import pandas as pd
     from bsvae.utils.hierarchy import load_tx2gene
@@ -508,6 +518,7 @@ def handle_isoform_specific(args, logger: logging.Logger) -> None:
         alpha=args.alpha if args.alpha > 0 else None,
         residualize_eigengenes=not args.no_residualize_eigengenes,
         leave_one_out=not args.no_leave_one_out,
+        loo_eigengene=_loo_choice(args.loo_eigengene),
     )
     out = Path(args.output); out.parent.mkdir(parents=True, exist_ok=True)
     calls.to_csv(out, sep="\t" if out.suffix == ".tsv" else ",")

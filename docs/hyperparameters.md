@@ -61,6 +61,14 @@ The active training workflow is configured through explicit CLI flags, primarily
 - `--merge-cut-height` default `0.4`: merge modules whose eigengene correlation exceeds `0.6` (GMM components that split one module have noisier eigengenes than a WGCNA tree cut, so the cut is looser than WGCNA's 0.25)
 - `--kme-reassign` with `--min-kme` `0.3` and `--kme-margin` `0.1`
 
+## Gene Coherence And The Isoform-Specific Scan (transcript level)
+
+- gene coherence is on by default when `--expr` and `--tx2gene` are given (`--no-gene-coherence`); a divergent isoform keeps its module only if its sibling-residual kME reaches `--min-kme` (`0.3`) at BH FDR `0.05` (the FDR test binds on the reference simulations; the floor does not)
+- the residual scan runs on the raw labels over every multi-isoform transcript (`--no-isoform-calls` to skip) with the same `--min-kme` and `--alpha 0.05`
+- `--loo-eigengene approx` (default) removes the tested gene's transcripts from the module eigengene by a first-order downdate; `exact` recomputes the PCA per gene (slower); `off` disables it. On abundance-only null simulations the type-I error for transcripts whose raw label is the tested module falls from 0.50 to 0.29 (`exact`: 0.26); for all other transcripts it is 0.06 at α 0.05 without any correction
+- `target-genes`: `--min-kme 0.2`, `--null permutation` with `--n-perm 1000`, `--alpha 0.05` within the target set
+- `target-genes-combine`: `--min-kme 0.25`, `--min-cohorts 2`, `--correlation empirical` (Strube correction; the between-cohort z correlation is estimated on isoforms with max |z| < 1.64)
+
 ## Choosing K
 
 `--n-modules` is the number of GMM components, not the final module count. Train with about three times the number of modules you expect (at least 20) and let `extract-modules` merge components whose eigengenes correlate; on the reference simulations this recovered small modules that a K equal to the true count absorbed into large ones, and raised ARI by 0.1–0.2. `bsvae-sweep-k` remains useful for picking the component count by held-out ELBO.
