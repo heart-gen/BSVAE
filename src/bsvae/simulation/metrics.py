@@ -307,6 +307,10 @@ def gene_level_metrics(
 
     * ``gene_ari`` / ``gene_nmi``: majority vote of each gene's non-grey
       isoform labels against the gene truth (ties → smallest label).
+    * ``false_split_rate``: among genes with no switched transcript and at
+      least two assigned transcripts, the fraction whose transcripts are
+      spread over two or more predicted modules (abundance confounding:
+      divergence that is not in the truth);
     * ``split_detection_rate``: among genes whose transcript truth places at
       least one isoform in a module different from the gene module
       ("switched" genes), the fraction where the prediction also places that
@@ -329,6 +333,7 @@ def gene_level_metrics(
     gene_true, gene_pred = [], []
     agree_n = agree_ok = 0
     split_n = split_ok = 0
+    plain_n = plain_split = 0
     for g, txs in by_gene.items():
         if g not in truth_gene:
             continue
@@ -353,6 +358,11 @@ def gene_level_metrics(
                 else:
                     detected = False
                 split_ok += int(detected)
+            else:
+                assigned = [pred_map[t] for t in txs if pred_map.get(t, GREY) != GREY]
+                if len(assigned) >= 2:
+                    plain_n += 1
+                    plain_split += int(len(set(assigned)) > 1)
     out = {
         "gene_ari": compute_ari(np.array(gene_true), np.array(gene_pred)) if len(gene_true) > 1 else float("nan"),
         "gene_nmi": compute_nmi(np.array(gene_true), np.array(gene_pred)) if len(gene_true) > 1 else float("nan"),
@@ -360,6 +370,8 @@ def gene_level_metrics(
         "isoform_gene_agreement": agree_ok / agree_n if agree_n else float("nan"),
         "n_switched_genes": split_n,
         "split_detection_rate": split_ok / split_n if split_n else float("nan"),
+        "n_unswitched_multi_genes": plain_n,
+        "false_split_rate": plain_split / plain_n if plain_n else float("nan"),
     }
     return out
 

@@ -326,7 +326,7 @@ def run_grid(
 SUMMARY_METRICS = [
     "ari_all", "nmi_all", "ari_assigned", "nmi_assigned", "mean_best_match_jaccard",
     "module_recovery_50", "frac_pred_grey", "grey_recall", "grey_precision", "K_ratio",
-    "gene_ari", "split_detection_rate", "isoform_gene_agreement",
+    "gene_ari", "split_detection_rate", "false_split_rate", "isoform_gene_agreement",
     "switched_recall", "switched_precision", "switched_ari", "runtime_s",
 ]
 

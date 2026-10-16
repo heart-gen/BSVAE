@@ -186,3 +186,44 @@ def test_median_ratio_normalisation_removes_compositional_correlation():
     assert abs(out[0].mean() - out[1:].mean()) < 0.3    # library size removed
     with pytest.raises(ValueError):
         normalize_counts(counts, "tmm")
+
+
+def test_usage_regulation_keeps_gene_total_flat():
+    """Usage-regulated isoforms track their module factor while the gene total does not."""
+    from bsvae.simulation.scenario import ISOFORM_GENERATOR_DEFAULTS, simulate_params
+    p = dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=300, n_samples=200, n_modules=5, switch_rate=0.0,
+             usage_rate=0.5, usage_strength=1.5, null_fraction=0.1)
+    r = simulate_params(p, seed=3)
+    st = r.extra_truth["switch_table.tsv.gz"].set_index("transcript_id")
+    z = r.module_latents.values
+    expr = r.expr_features_x_samples
+    assert {"mechanism", "is_usage", "usage_strength"} <= set(st.columns)
+    usage = st.index[st["is_usage"] == 1]
+    assert len(usage) > 20 and (st.loc[usage, "is_switched"] == 1).all() and (st.loc[usage, "mechanism"] == "usage").all()
+    assert (st.loc[usage, "isoform_rank"] > 0).all() and (st.loc[usage, "tx_module"] != st.loc[usage, "gene_module"]).all()
+    cu, cd, ct = [], [], []
+    for t in usage:
+        g = st.loc[t, "gene_id"]; m = int(st.loc[t, "tx_module"])
+        sib = st.index[st["gene_id"] == g]
+        dom = st.index[(st["gene_id"] == g) & (st["isoform_rank"] == 0)][0]
+        tot = np.log2(np.power(2.0, expr.loc[sib]).sub(1).clip(lower=0).sum(axis=0) + 1)
+        cu.append(np.corrcoef(expr.loc[t], z[:, m])[0, 1])
+        cd.append(np.corrcoef(expr.loc[dom], z[:, m])[0, 1])
+        ct.append(np.corrcoef(tot, z[:, m])[0, 1])
+    assert np.mean(cu) > 0.3 and np.mean(cd) < -0.1 and abs(np.mean(ct)) < 0.15
+    assert r.metadata["n_usage_transcripts"] == len(usage)
+
+
+def test_usage_from_null_and_switch_exclusive():
+    from bsvae.simulation.scenario import ISOFORM_GENERATOR_DEFAULTS, simulate_params
+    p = dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=300, n_samples=60, n_modules=4, switch_rate=0.3,
+             usage_rate=0.8, usage_from="null", null_fraction=0.4)
+    r = simulate_params(p, seed=5)
+    st = r.extra_truth["switch_table.tsv.gz"].set_index("transcript_id")
+    usage = st[st["is_usage"] == 1]
+    assert len(usage) > 10 and (usage["gene_module"] == -1).all() and (usage["tx_module"] >= 0).all()
+    # a gene is never both switched and usage-regulated
+    sw_genes = set(st.loc[st["mechanism"] == "switch", "gene_id"])
+    assert not (set(usage["gene_id"]) & sw_genes)
+    with pytest.raises(ValueError):
+        simulate_params(dict(p, usage_from="bogus"), seed=1)

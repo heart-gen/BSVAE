@@ -69,6 +69,12 @@ def test_gene_level_metrics_split_detection():
     assert m["isoform_gene_agreement"] == pytest.approx(2 / 3)
     pred_missed = [0, 0, 1, 1, 1, 1, 1]
     assert gene_level_metrics(pred_missed, tx_ids, tx2gene, truth_gene, truth_tx)["split_detection_rate"] == 0.0
+    # g1 and g2 have no switched transcript: both kept together → no false split
+    assert m["n_unswitched_multi_genes"] == 2 and m["false_split_rate"] == 0.0
+    pred_false = [0, 1, 1, 1, 1, 1, 0]     # g1's isoforms spread over two modules
+    assert gene_level_metrics(pred_false, tx_ids, tx2gene, truth_gene, truth_tx)["false_split_rate"] == pytest.approx(0.5)
+    pred_grey = [0, -1, 1, 1, 1, 1, 0]     # a grey isoform does not count as a split
+    assert gene_level_metrics(pred_grey, tx_ids, tx2gene, truth_gene, truth_tx)["false_split_rate"] == 0.0
 
 
 def test_evaluate_labels_keys():

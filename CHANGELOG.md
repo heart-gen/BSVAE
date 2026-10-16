@@ -27,6 +27,11 @@ Simulation normalisation
 * Simulated counts are normalised with median-of-ratios size factors instead of plain CPM. Under CPM, features without module signal co-varied with each other (|r| ≈ 0.35) against the large modules, so the benchmark's "null" features were not null and grey-detection metrics measured a compositional artefact.
 * Post-processing applies `--min-gamma` to the merged responsibilities (after eigengene merging). A training-time or inference-time "background" mixture component was evaluated and rejected: trained jointly it absorbs every feature; applied at inference it never fires because null features are not latent-space outliers.
 
+Abundance confounding
+
+* `nb_isoform_modules` gains usage-driven regulation (`usage_rate`, `usage_strength`, `usage_from` = signal | null | all): one non-dominant isoform's share of its gene follows a module factor with the shares re-normalised per sample, so the gene total is unchanged and only the isoform split varies. The switch table records `mechanism` (switch | usage | none), `is_usage` and `usage_strength`; `is_switched` covers both mechanisms.
+* Gene-level metrics add `false_split_rate` (unswitched multi-isoform genes whose assigned transcripts are spread over two or more modules). `scripts/benchmark_confounding.py` runs the abundance-only, usage-only, usage-vs-gene-signal ratio and switch-versus-usage scenario sets and stratifies false divergence by isoform abundance.
+
 Consensus and isoform-specific modules
 
 * `bsvae-networks consensus-modules` and the `bsvae_consensus` benchmark method: runs are aligned by module overlap, features take the majority label, and the agreement fraction is a stability score.

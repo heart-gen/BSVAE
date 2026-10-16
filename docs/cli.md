@@ -424,7 +424,7 @@ Common files:
 - `expr/features_x_samples.tsv.gz`
 - `expr/samples_x_features.tsv.gz` (when `outputs.emit_wgcna_matrix` is true)
 - `truth/modules_hard.csv` (`module` is `-1` for null features), `truth/modules_overlap.csv`
-- `truth/tx2gene.tsv`, `truth/modules_gene.csv`, `truth/switch_table.tsv.gz` for the isoform family
+- `truth/tx2gene.tsv`, `truth/modules_gene.csv`, `truth/switch_table.tsv.gz` for the isoform family (the switch table's `mechanism` column is `switch` for an uncompensated abundance switch, `usage` for a compensated usage shift that leaves the gene total unchanged — generator keys `usage_rate`, `usage_strength`, `usage_from`)
 - `method_inputs.json`
 
 Configs are JSON by default; YAML is accepted when PyYAML is installed (`pip install bsvae[yaml]`).
