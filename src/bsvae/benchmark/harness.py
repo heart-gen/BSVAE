@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 METHODS = ("bsvae", "wgcna")
 KNOWN_METHODS = ("bsvae", "bsvae_consensus", "bsvae_isoform", "bsvae_regressed", "wgcna", "wgcna_signed", "wgcna_unsigned", "wgcna_regressed",
-                 "usage_network", "ica", "nmf", "acorde", "twn")
+                 "bsvae_coherent", "bsvae_hier", "usage_network", "ica", "nmf", "acorde", "twn")
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +191,28 @@ def run_one(
             train_cfg={k: v for k, v in cfg.items() if not k.startswith("_")},
             post_cfg=post_cfg, device=device, postprocess=postprocess, **kwargs,
         )
+    elif method in ("bsvae_coherent", "bsvae_hier"):
+        from bsvae.networks.postprocess import enforce_gene_coherence
+        if "tx2gene" not in truth:
+            result = MethodResult(method, "skipped", message="scenario has no transcript structure")
+        else:
+            cfg = {k: v for k, v in (bsvae_cfg or {}).items() if not k.startswith("_")}
+            if method == "bsvae_hier":
+                cfg = dict(cfg, hier_strength=cfg.get("hier_strength", 0.05), isoform_stratified=True)
+            tx2gene = pd.DataFrame(list(truth["tx2gene"].items()), columns=["transcript_id", "gene_id"])
+            kwargs = {"over_cluster_factor": over_cluster_factor} if over_cluster_factor is not None else {}
+            sub = run_bsvae(expr, n_modules=n_modules, seed=seed, workdir=out_dir, tx2gene=tx2gene, train_cfg=cfg,
+                            post_cfg=post_cfg, device=device, postprocess=postprocess, **kwargs)
+            if sub.status == "ok" and method == "bsvae_coherent":
+                fids = [str(f) for f in expr.index]
+                lab = sub.labels.reindex(fids).fillna(-1).astype(int).values
+                new_lab, table = enforce_gene_coherence(lab, expr, fids, truth["tx2gene"],
+                                                        min_kme=float((post_cfg or {}).get("isoform_min_kme", 0.3)))
+                table.to_csv(out_dir / "gene_coherence.csv")
+                sub.labels = pd.Series(new_lab, index=fids, name="module")
+                sub.params = {**sub.params, "n_divergent_tested": int(len(table)), "n_divergent_kept": int(table["kept"].sum()) if len(table) else 0}
+            result = sub
+            result.method = method
     elif method == "bsvae_consensus":
         from bsvae.networks.postprocess import consensus_assignments
         cfg = {k: v for k, v in (bsvae_cfg or {}).items() if not k.startswith("_")}
@@ -382,7 +404,7 @@ def summarize(df: pd.DataFrame, by: Sequence[str] = ("scenario_id", "method")) -
     cols = [c for c in SUMMARY_METRICS if c in ok.columns]
     if ok.empty or not cols:
         return pd.DataFrame(columns=list(by))
-    g = ok.groupby(list(by))[cols]
+    g = ok.groupby(list(by), dropna=False)[cols]
     mean = g.mean().add_suffix("_mean")
     sd = g.std(ddof=0).add_suffix("_sd")
     n = g.size().rename("n_runs")

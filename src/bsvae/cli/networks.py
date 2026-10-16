@@ -94,6 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Reassign features by module membership (kME) after merging. Requires --expr.")
     mp.add_argument("--min-kme", type=float, default=0.3)
     mp.add_argument("--kme-margin", type=float, default=0.1)
+    mp.add_argument("--gene-coherence", action="store_true", default=False,
+                    help="After post-processing, move an isoform that sits in a module other than its gene's "
+                         "majority module back to the gene's module unless its gene-programme-removed residual "
+                         "supports the other membership (kME >= --min-kme, BH FDR < 0.05). Requires --expr and --tx2gene.")
     mp.add_argument("--tx2gene", type=str, default=None,
                     help="TSV (transcript_id, gene_id) for isoform-to-gene aggregation.")
     mp.add_argument("--aggregate-to-gene", action="store_true", default=False,
@@ -371,6 +375,18 @@ def handle_extract_modules(args, logger: logging.Logger) -> None:
             min_kme=args.min_kme,
             kme_margin=args.kme_margin,
         )
+        if args.gene_coherence:
+            if expr is None or not args.tx2gene:
+                logger.warning("--gene-coherence requires --expr and --tx2gene; skipping.")
+            else:
+                from bsvae.networks.postprocess import enforce_gene_coherence
+                from bsvae.utils.hierarchy import load_tx2gene
+                t2g = load_tx2gene(path=args.tx2gene, feature_ids=feature_ids, logger=logger)
+                new_labels, table = enforce_gene_coherence(post.labels, expr, feature_ids, t2g, min_kme=args.min_kme)
+                post.labels = new_labels
+                post.n_grey = int((new_labels < 0).sum())
+                Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+                table.to_csv(Path(args.output_dir) / "gene_coherence.csv")
         save_postprocess(post, args.output_dir, feature_ids)
         gamma_final = post.gamma
         labels_final = post.labels

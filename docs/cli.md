@@ -172,6 +172,7 @@ Options:
 - `--merge-cut-height` default `0.4`
 - `--no-merge`
 - `--kme-reassign`
+- `--gene-coherence` (requires `--expr` and `--tx2gene`): an isoform assigned to a module other than its gene's majority module is moved back to the gene's module unless its sibling-residual kME to that other module reaches `--min-kme` at BH FDR 0.05. This removes divergence driven by abundance noise alone; on the abundance-confounding simulations it is the difference between BSVAE's false-split rate and WGCNA's (see `scripts/benchmark_confounding.py`). Writes `gene_coherence.csv`.
 - `--min-kme` default `0.3`
 - `--kme-margin` default `0.1`
 - `--no-postprocess` write raw `argmax(γ)` only
