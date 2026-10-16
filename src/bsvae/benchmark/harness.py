@@ -27,13 +27,15 @@ from bsvae.benchmark.runners import (
     run_wgcna,
     wgcna_available,
 )
+from bsvae.benchmark.edges import edge_metrics, edges_from_labels
 from bsvae.simulation.metrics import evaluate_labels, gene_level_metrics, normalize_labels, switched_isoform_metrics
 from bsvae.simulation.scenario import expand_scenarios, generate_scenario, load_config
 
 logger = logging.getLogger(__name__)
 
 METHODS = ("bsvae", "wgcna")
-KNOWN_METHODS = ("bsvae", "bsvae_consensus", "bsvae_isoform", "bsvae_regressed", "wgcna", "wgcna_signed", "wgcna_unsigned", "wgcna_regressed")
+KNOWN_METHODS = ("bsvae", "bsvae_consensus", "bsvae_isoform", "bsvae_regressed", "wgcna", "wgcna_signed", "wgcna_unsigned", "wgcna_regressed",
+                 "usage_network", "ica", "nmf", "acorde", "twn")
 
 
 # ---------------------------------------------------------------------------
@@ -61,12 +63,22 @@ def load_truth(run_dir: str | Path) -> Dict:
     sw = truth / "switch_table.tsv.gz"
     if sw.exists():
         out["switch_table"] = pd.read_csv(sw, sep="\t")
+    el = truth / "edge_list.tsv.gz"
+    if el.exists():
+        out["edge_list"] = pd.read_csv(el, sep="\t")
     return out
 
 
 def evaluate_run(truth: Dict, result: MethodResult) -> Dict[str, float]:
     """Score a MethodResult against loaded truth; NaN metrics when not ok."""
-    if result.status != "ok" or result.labels is None:
+    if result.status != "ok":
+        return {}
+    if result.edges is not None and result.labels is None:
+        if "truth_gene" not in truth:
+            return {}
+        return {f"edge_{k}": v for k, v in edge_metrics(
+            result.edges, truth["truth_gene"], truth.get("switch_table"), truth.get("edge_list"), truth.get("tx2gene")).items()}
+    if result.labels is None:
         return {}
     if result.method == "bsvae_isoform":
         if "switch_table" not in truth:
@@ -91,6 +103,13 @@ def evaluate_run(truth: Dict, result: MethodResult) -> Dict[str, float]:
                 truth_tx=dict(zip(truth_labels.index, truth_labels.values)),
             )
         )
+        if "expr" in truth and truth["expr"] is not None:
+            try:
+                e = edges_from_labels(truth["expr"], pred, truth["tx2gene"])
+                metrics.update({f"edge_{k}": v for k, v in edge_metrics(
+                    e, truth["truth_gene"], None, truth.get("edge_list"), truth.get("tx2gene")).items()})
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("edge metrics from labels failed: %s", exc)
     return metrics
 
 
@@ -142,6 +161,8 @@ def run_one(
 ) -> tuple[MethodResult, Dict]:
     truth = load_truth(run_dir)
     expr = pd.read_csv(truth["expr_path"], sep="\t", index_col=0)
+    expr.index = expr.index.astype(str)
+    truth["expr"] = expr
     expr.index = expr.index.astype(str)
     if method.endswith("_regressed"):
         from bsvae.utils.preprocess import regress_covariates
@@ -219,6 +240,28 @@ def run_one(
                                       params={**sub.params, "isoform_min_kme": min_kme, "n_called": int(len(called))})
             else:
                 result = MethodResult("bsvae_isoform", sub.status, runtime_s=sub.runtime_s, message=sub.message)
+    elif method == "usage_network":
+        from bsvae.benchmark.methods import run_usage_network
+        if "tx2gene" not in truth:
+            result = MethodResult("usage_network", "skipped", message="scenario has no transcript structure")
+        else:
+            result = run_usage_network(expr, truth["tx2gene"], workdir=out_dir, seed=seed, wgcna_cfg=wgcna_cfg)
+    elif method in ("ica", "nmf"):
+        from bsvae.benchmark.methods import run_ica, run_nmf
+        from bsvae.benchmark.runners import over_cluster_k
+        k = over_cluster_k(n_modules, over_cluster_factor, n_features=expr.shape[0]) if over_cluster_factor else n_modules
+        fn = run_ica if method == "ica" else run_nmf
+        result = fn(expr, n_components=k, workdir=out_dir, seed=seed,
+                    min_module_size=(post_cfg or {}).get("min_module_size", 10))
+    elif method == "acorde":
+        from bsvae.benchmark.methods import run_acorde
+        result = run_acorde(expr, workdir=out_dir, seed=seed)
+    elif method == "twn":
+        from bsvae.benchmark.methods import run_twn
+        if "tx2gene" not in truth:
+            result = MethodResult("twn", "skipped", message="scenario has no transcript structure")
+        else:
+            result = run_twn(expr, truth["tx2gene"], workdir=out_dir)
     elif method_base in ("wgcna", "wgcna_unsigned", "wgcna_signed"):
         cfg = dict(WGCNA_DEFAULTS)
         cfg.update(wgcna_cfg or {})
@@ -327,7 +370,9 @@ SUMMARY_METRICS = [
     "ari_all", "nmi_all", "ari_assigned", "nmi_assigned", "mean_best_match_jaccard",
     "module_recovery_50", "frac_pred_grey", "grey_recall", "grey_precision", "K_ratio",
     "gene_ari", "split_detection_rate", "false_split_rate", "isoform_gene_agreement",
-    "switched_recall", "switched_precision", "switched_ari", "runtime_s",
+    "switched_recall", "switched_precision", "switched_ari",
+    "edge_tt_precision", "edge_tt_recall", "edge_ti_switched_precision", "edge_ti_switched_recall",
+    "edge_ti_unswitched_false_rate", "runtime_s",
 ]
 
 
