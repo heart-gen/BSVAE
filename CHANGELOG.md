@@ -38,6 +38,8 @@ Pooling under heterogeneity and shared donors (`scripts/benchmark_pooling.py`, s
 * Partially shared switches: isoforms switched in 4–6 of 6 regions are recovered at 0.63–0.88 by pooling, those switched in one region at 0.04–0.14 (a single region recovers 0.14–0.24 of them); the corrected pooling is conservative here (recall 0.18 vs 0.30 uncorrected) because the between-region correlation estimate also absorbs partially shared true signal. Projected PPV at 5 % prevalence 0.22–0.27.
 * Region-specific switches: pooling does not help (recall 0.06–0.22) and per-region calls must be read alongside the pooled table (`n_called`, `modules` columns). Projected PPV at 5 % prevalence 0.11–0.18.
 
+Rare isoforms: `scripts/benchmark_rare_isoforms.py` packages the rare-isoform evaluation (hard / partial switching at default and rare minor-isoform shares; base, masked-reconstruction, low-expression-filter and Pearson-residual variants of BSVAE plus WGCNA; recovery, separation from the dominant sibling and residual-scan calls by abundance tercile; the oracle ceiling of the sibling residual against the true target factor).
+
 Calibration (`scripts/benchmark_calibration.py`, 3 seeds)
 
 * Held-out replication: with modules learned on one half of the samples, 75–89 % of residual-scan calls on switched isoforms replicate on the other half with the same target module, against 70–78 % of calls on unswitched isoforms; the null call rate on the held-out half is 1.8–1.9 %.
