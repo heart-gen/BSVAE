@@ -245,3 +245,19 @@ def test_sample_seed_gives_new_cohort_of_same_truth_and_tissue_shift_changes_mod
     changed = ga["module"].values != gc["module"].values
     assert changed.sum() == gc["tissue_shifted"].sum() and (gc.loc[changed, "tissue_shifted"] == 1).all()
     assert c.metadata["n_tissue_shifted_genes"] == int(gc["tissue_shifted"].sum())
+
+
+def test_tissue_shift_modules_dissolves_whole_modules():
+    from bsvae.simulation.scenario import ISOFORM_GENERATOR_DEFAULTS, simulate_params
+    p = dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=200, n_samples=30, n_modules=5)
+    a = simulate_params(p, seed=1)
+    c = simulate_params(dict(p, sample_seed=3, tissue_shift=0.3, tissue_shift_mode="modules"), seed=1)
+    ga, gc = a.extra_truth["modules_gene.csv"], c.extra_truth["modules_gene.csv"]
+    dissolved = c.metadata["dissolved_modules"]
+    assert len(dissolved) == 2 and c.metadata["tissue_shift_mode"] == "modules"
+    was_member = ga["module"].isin(dissolved).values
+    assert (gc["tissue_shifted"].values == was_member.astype(int)).all()
+    assert not gc["module"].isin(dissolved).any()
+    assert (ga["module"].values[~was_member] == gc["module"].values[~was_member]).all()
+    with pytest.raises(ValueError):
+        simulate_params(dict(p, tissue_shift=0.3, tissue_shift_mode="bogus"), seed=1)

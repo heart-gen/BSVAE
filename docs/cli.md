@@ -437,7 +437,7 @@ Common files:
 - `expr/features_x_samples.tsv.gz`
 - `expr/samples_x_features.tsv.gz` (when `outputs.emit_wgcna_matrix` is true)
 - `truth/modules_hard.csv` (`module` is `-1` for null features), `truth/modules_overlap.csv`
-- `truth/tx2gene.tsv`, `truth/modules_gene.csv`, `truth/switch_table.tsv.gz` for the isoform family (the switch table's `mechanism` column is `switch` for an uncompensated abundance switch, `usage` for a compensated usage shift that leaves the gene total unchanged — generator keys `usage_rate`, `usage_strength`, `usage_from`; `sample_seed` draws a second cohort of the same truth with new samples, and `tissue_shift` moves that fraction of signal genes to another module in the second cohort, flagged in `modules_gene.csv` as `tissue_shifted`)
+- `truth/tx2gene.tsv`, `truth/modules_gene.csv`, `truth/switch_table.tsv.gz` for the isoform family (the switch table's `mechanism` column is `switch` for an uncompensated abundance switch, `usage` for a compensated usage shift that leaves the gene total unchanged — generator keys `usage_rate`, `usage_strength`, `usage_from`; `sample_seed` draws a second cohort of the same truth with new samples, and `tissue_shift` changes the second cohort: with `tissue_shift_mode: modules` (default in the preservation benchmark) that fraction of modules dissolves and their genes scatter over the other modules, with `genes` that fraction of signal genes moves at random; moved genes are flagged in `modules_gene.csv` as `tissue_shifted` and dissolved modules are listed in the metadata)
 - `method_inputs.json`
 
 Configs are JSON by default; YAML is accepted when PyYAML is installed (`pip install bsvae[yaml]`).

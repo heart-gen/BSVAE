@@ -137,13 +137,26 @@ def simulate_isoform_counts(params: Dict, seed: int) -> ScenarioResult:
     # Tissue shift: in a second cohort a fraction of signal genes change module (cohort-specific
     # stream), so module preservation statistics can be checked against a known partial change.
     tissue_shift = float(params.get("tissue_shift", 0.0))
+    tissue_shift_mode = str(params.get("tissue_shift_mode", "genes"))     # "genes" | "modules"
     shifted_genes = np.zeros(n_genes, dtype=bool)
+    dissolved_modules: list = []
     if tissue_shift > 0.0 and K > 1:
         r_shift = rt if rt is not None else rs
-        n_shift = int(round(tissue_shift * len(signal_genes)))
-        for g in r_shift.choice(signal_genes, size=n_shift, replace=False):
-            gene_modules[g] = int(r_shift.choice([m for m in range(K) if m != gene_modules[g]]))
-            shifted_genes[g] = True
+        if tissue_shift_mode == "genes":
+            n_shift = int(round(tissue_shift * len(signal_genes)))
+            for g in r_shift.choice(signal_genes, size=n_shift, replace=False):
+                gene_modules[g] = int(r_shift.choice([m for m in range(K) if m != gene_modules[g]]))
+                shifted_genes[g] = True
+        elif tissue_shift_mode == "modules":
+            # whole modules dissolve in the second tissue: their genes scatter over the other modules
+            n_mod = max(1, int(round(tissue_shift * K)))
+            dissolved_modules = sorted(int(m) for m in r_shift.choice(K, size=n_mod, replace=False))
+            keep = [m for m in range(K) if m not in dissolved_modules]
+            for g in np.where(np.isin(gene_modules, dissolved_modules))[0]:
+                gene_modules[g] = int(r_shift.choice(keep))
+                shifted_genes[g] = True
+        else:
+            raise ValueError("tissue_shift_mode must be 'genes' or 'modules'")
 
     # Transcript modules with switching.
     tx_modules = gene_modules[gene_of_tx].copy()
@@ -338,6 +351,8 @@ def simulate_isoform_counts(params: Dict, seed: int) -> ScenarioResult:
         "n_usage_transcripts": int(is_usage.sum()),
         "sample_seed": sample_seed,
         "tissue_shift": tissue_shift,
+        "tissue_shift_mode": tissue_shift_mode,
+        "dissolved_modules": dissolved_modules,
         "n_tissue_shifted_genes": int(shifted_genes.sum()),
         "frac_switched_actual": float(is_switched.mean()),
         "null_fraction": null_fraction,

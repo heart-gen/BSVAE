@@ -11,9 +11,10 @@ On one transcript-level scenario (``nb_isoform_modules``, 600 genes × 150 sampl
   cohort     an independent cohort of the same truth (new samples, same
              structure): ARI between the two solutions, and preservation of the
              reference modules in the cohort data (Z_density, cor_kME),
-  tissue     a cohort in which 20 % of signal genes changed module: preservation
-             statistics of reference modules against the fraction of their members
-             that moved, and ARI on the unchanged genes,
+  tissue     a cohort in which 30 % of the modules dissolved (their genes scattered
+             over the other modules; ``--tissue-mode genes`` instead moves 30 % of
+             genes at random): preservation statistics of reference modules against
+             the fraction of their members that moved, and ARI on the unchanged genes,
 
 and, for every comparison, reproducibility of isoform-specific membership:
 among genes called divergent (isoforms in two or more modules) in the reference
@@ -46,13 +47,13 @@ from bsvae.simulation.scenario import ISOFORM_GENERATOR_DEFAULTS, simulate_param
 logger = logging.getLogger("preservation")
 
 BASE = dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=600, n_samples=150, n_modules=10, switch_rate=0.15, alpha=1.0, null_fraction=0.10)
-COHORT_SEED, TISSUE_SHIFT = 991, 0.2
+COHORT_SEED, TISSUE_SHIFT = 991, 0.3
 
 
-def simulate(seed: int):
+def simulate(seed: int, tissue_mode: str = "modules"):
     a = simulate_params(BASE, seed)
     b = simulate_params(dict(BASE, sample_seed=COHORT_SEED), seed)
-    c = simulate_params(dict(BASE, sample_seed=COHORT_SEED, tissue_shift=TISSUE_SHIFT), seed)
+    c = simulate_params(dict(BASE, sample_seed=COHORT_SEED, tissue_shift=TISSUE_SHIFT, tissue_shift_mode=tissue_mode), seed)
     out = {}
     for name, r in (("A", a), ("B", b), ("C", c)):
         expr = r.expr_features_x_samples; expr.index = expr.index.astype(str)
@@ -112,6 +113,8 @@ def parse_args(argv=None):
     p.add_argument("--bootstraps", type=int, default=5)
     p.add_argument("--epochs", type=int, default=150)
     p.add_argument("--n-perm", type=int, default=200)
+    p.add_argument("--comparisons", default="seeds,donors,cohort,tissue")
+    p.add_argument("--tissue-mode", choices=["modules", "genes"], default="modules")
     p.add_argument("--log-level", default="info")
     return p.parse_args(argv)
 
@@ -124,8 +127,9 @@ def main(argv=None):
     methods = [m.strip() for m in args.methods.split(",")]
     seeds = [int(s) for s in args.seeds.split(",")]
     rows, pres_rows = [], []
+    comps = set(args.comparisons.split(","))
     for seed in seeds:
-        sims = simulate(seed)
+        sims = simulate(seed, args.tissue_mode)
         A, B, C = sims["A"], sims["B"], sims["C"]
         fids = [str(f) for f in A["expr"].index]
         shifted = set(C["genes"].loc[C["genes"]["tissue_shifted"] == 1, "gene_id"].astype(str))
@@ -136,7 +140,7 @@ def main(argv=None):
             ref = fit(method, A["expr"], A["tx2gene"], 10, seed, wd / "ref", args.epochs)
             truth_ari = ari_nmi_assigned(A["truth"], ref)["ari_assigned"]
             # (a) random initialisations
-            if method.startswith("bsvae"):
+            if method.startswith("bsvae") and "seeds" in comps:
                 inits = [ref] + [fit(method, A["expr"], A["tx2gene"], 10, 1000 * (seed + 1) + i, wd / f"init_{i}", args.epochs) for i in range(2)]
                 row = dict(seed=seed, method=method, comparison="seeds", ari=stability(inits), truth_ari=truth_ari)
                 reps = [divergence_reproducibility(ref, l, fids, A["tx2gene"], A["switch"]) for l in inits[1:]]
@@ -144,7 +148,7 @@ def main(argv=None):
             # (b) donor resampling
             rng = np.random.default_rng(seed)
             boots = []
-            for b in range(int(args.bootstraps)):
+            for b in range(int(args.bootstraps) if "donors" in comps else 0):
                 cols = rng.choice(A["expr"].shape[1], size=A["expr"].shape[1], replace=True)
                 xb = A["expr"].iloc[:, cols]; xb.columns = [f"{c}_b{i}" for i, c in enumerate(xb.columns)]
                 lab = fit(method, xb, A["tx2gene"], 10, seed, wd / f"boot_{b}", args.epochs)
@@ -153,37 +157,39 @@ def main(argv=None):
                            ari=ari_nmi_assigned(ref, lab)["ari_assigned"])
                 row.update(divergence_reproducibility(ref, lab, fids, A["tx2gene"], A["switch"])); rows.append(row)
             # (c) independent cohort
-            labB = fit(method, B["expr"], B["tx2gene"], 10, seed, wd / "cohort", args.epochs)
-            row = dict(seed=seed, method=method, comparison="cohort", truth_ari=truth_ari, ari=ari_nmi_assigned(ref, labB)["ari_assigned"],
-                       truth_ari_cohort=ari_nmi_assigned(B["truth"], labB)["ari_assigned"])
-            row.update(divergence_reproducibility(ref, labB, fids, A["tx2gene"], A["switch"])); rows.append(row)
-            pres = module_preservation(A["expr"], B["expr"], ref, fids, n_perm=args.n_perm, seed=seed)
-            pres.insert(0, "comparison", "cohort"); pres.insert(0, "method", method); pres.insert(0, "seed", seed)
-            pres["frac_shifted"] = 0.0; pres_rows.append(pres)
+            if "cohort" in comps:
+              labB = fit(method, B["expr"], B["tx2gene"], 10, seed, wd / "cohort", args.epochs)
+              row = dict(seed=seed, method=method, comparison="cohort", truth_ari=truth_ari, ari=ari_nmi_assigned(ref, labB)["ari_assigned"],
+                         truth_ari_cohort=ari_nmi_assigned(B["truth"], labB)["ari_assigned"])
+              row.update(divergence_reproducibility(ref, labB, fids, A["tx2gene"], A["switch"])); rows.append(row)
+              pres = module_preservation(A["expr"], B["expr"], ref, fids, n_perm=args.n_perm, seed=seed)
+              pres.insert(0, "comparison", "cohort"); pres.insert(0, "method", method); pres.insert(0, "seed", seed)
+              pres["frac_shifted"] = 0.0; pres_rows.append(pres)
             # (d) tissue with partial change
-            labC = fit(method, C["expr"], C["tx2gene"], 10, seed, wd / "tissue", args.epochs)
-            m = unshifted_mask
-            row = dict(seed=seed, method=method, comparison="tissue", truth_ari=truth_ari,
-                       ari=ari_nmi_assigned(ref, labC)["ari_assigned"], ari_unshifted=ari_nmi_assigned(ref[m], labC[m])["ari_assigned"],
-                       truth_ari_cohort=ari_nmi_assigned(C["truth"], labC)["ari_assigned"])
-            row.update(divergence_reproducibility(ref, labC, fids, A["tx2gene"], A["switch"])); rows.append(row)
-            pres = module_preservation(A["expr"], C["expr"], ref, fids, n_perm=args.n_perm, seed=seed)
-            frac = {}
-            for k in pres["module"]:
-                members = [f for f, l in zip(fids, ref) if l == k]
-                frac[k] = float(np.mean([A["tx2gene"][f] in shifted for f in members])) if members else np.nan
-            pres.insert(0, "comparison", "tissue"); pres.insert(0, "method", method); pres.insert(0, "seed", seed)
-            pres["frac_shifted"] = pres["module"].map(frac); pres_rows.append(pres)
+            if "tissue" in comps:
+              labC = fit(method, C["expr"], C["tx2gene"], 10, seed, wd / "tissue", args.epochs)
+              m = unshifted_mask
+              row = dict(seed=seed, method=method, comparison="tissue", truth_ari=truth_ari,
+                         ari=ari_nmi_assigned(ref, labC)["ari_assigned"], ari_unshifted=ari_nmi_assigned(ref[m], labC[m])["ari_assigned"],
+                         truth_ari_cohort=ari_nmi_assigned(C["truth"], labC)["ari_assigned"])
+              row.update(divergence_reproducibility(ref, labC, fids, A["tx2gene"], A["switch"])); rows.append(row)
+              pres = module_preservation(A["expr"], C["expr"], ref, fids, n_perm=args.n_perm, seed=seed)
+              frac = {}
+              for k in pres["module"]:
+                  members = [f for f, l in zip(fids, ref) if l == k]
+                  frac[k] = float(np.mean([A["tx2gene"][f] in shifted for f in members])) if members else np.nan
+              pres.insert(0, "comparison", "tissue"); pres.insert(0, "method", method); pres.insert(0, "seed", seed)
+              pres["frac_shifted"] = pres["module"].map(frac); pres_rows.append(pres)
             pd.DataFrame(rows).to_csv(outdir / "results.tsv", sep="\t", index=False)
             pd.concat(pres_rows, ignore_index=True).to_csv(outdir / "preservation.tsv", sep="\t", index=False)
-    df = pd.DataFrame(rows); pres = pd.concat(pres_rows, ignore_index=True)
+    df = pd.DataFrame(rows); pres = pd.concat(pres_rows, ignore_index=True) if pres_rows else pd.DataFrame(columns=["comparison", "method", "frac_shifted", "Z_density", "cor_kME", "n_shared"])
     pd.set_option("display.width", 250)
     cols = [c for c in ["ari", "ari_unshifted", "truth_ari", "truth_ari_cohort", "div_repro_switched", "div_repro_unswitched", "n_div_ref_switched", "n_div_ref_unswitched"] if c in df.columns]
     summ = df.groupby(["comparison", "method"])[cols].mean()
     summ.to_csv(outdir / "summary.tsv", sep="\t")
     print(summ.round(3).to_string())
     print()
-    pres["shift_bin"] = pd.cut(pres["frac_shifted"].fillna(0), [-0.01, 0.1, 0.3, 1.0], labels=["<=10%", "10-30%", ">30%"])
+    pres["shift_bin"] = pd.cut(pres["frac_shifted"].fillna(0), [-0.01, 0.1, 0.5, 1.0], labels=["<=10%", "10-50%", ">50%"])
     print(pres.groupby(["comparison", "method", "shift_bin"], observed=True)[["Z_density", "cor_kME", "n_shared"]].agg(["mean", "count"]).round(2).to_string())
 
 
