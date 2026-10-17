@@ -232,7 +232,84 @@ Each replicate directory includes method-ready files such as:
 - `truth/modules_hard.csv`
 - `method_inputs.json`
 
-## 10. Common Problems
+## 10. A Real-Data Project: Transcript-Level Expression
+
+This is the chain used for the transcript-level brain-expression projects behind the benchmark study, with generic file names. Everything runs from explicit CLI flags, so each step is one SLURM job script (see [HPC](hpc.md)).
+
+**0. Inputs.** A transcripts x samples matrix of log-scale expression (`residualized_expression.tsv.gz`) and a `tx2gene.tsv` with `transcript_id` and `gene_id` columns (headers are auto-detected, Ensembl version suffixes are stripped). Remove known technical effects first, either before the matrix is written or with `regress-covariates`:
+
+```bash
+bsvae-networks regress-covariates --dataset data/expression.tsv.gz \
+  --covariates data/samples.tsv --columns batch,sex,age --output data/residualized_expression.tsv.gz
+```
+
+If you want covariate-adjusted isoform calls instead of a residualised input, keep the original matrix and pass `--covariates` to `extract-modules` (the two overlap, so you normally need only one).
+
+**1. Select K and train the final model.** The grid is a comma list or a `start:end:step` range; the hierarchical loss with gene-grouped batches keeps isoforms of one gene together.
+
+```bash
+bsvae-sweep-k transcripts_v1 \
+  --dataset data/residualized_expression.tsv.gz \
+  --k-grid 16:64:8 --sweep-epochs 100 --stability-reps 3 --val-frac 0.1 --final-epochs 300 \
+  --latent-dim 32 --hidden-dims "[512,256,128]" --batch-size 128 --lr 5e-4 \
+  --tx2gene data/tx2gene.tsv --hier-strength 0.2 --isoform-stratified \
+  --checkpoint-every 25 --no-progress-bar
+```
+
+The selected model is retrained under `results/transcripts_v1/final_k<K>/`.
+
+**2. Modules, networks and latents from the final model.**
+
+```bash
+M=results/transcripts_v1/final_k<K>
+D=data/residualized_expression.tsv.gz
+
+bsvae-networks extract-modules --model-path $M --dataset $D --expr $D \
+  --tx2gene data/tx2gene.tsv --soft-eigengenes --output-dir $M/modules
+
+bsvae-networks extract-networks --model-path $M --dataset $D \
+  --output-dir $M/networks --top-k 50 --methods mu_cosine
+
+bsvae-networks export-latents --model-path $M --dataset $D --output $M/latent_exports/latents
+```
+
+Use `modules.csv` and `eigengenes.csv` for module biology (eigengene-trait models, enrichment, preservation with `module-quality`) and `isoform_specific.csv` for divergence.
+
+**3. Calibrated divergence calls.** Fit one model per sample fold (`--exclude-samples fold_<f>.txt` on `bsvae-train` and `extract-modules`), then cross-fit with covariates and target-module exclusion:
+
+```bash
+bsvae-networks isoform-specific --dataset $D --tx2gene data/tx2gene.tsv \
+  --modules fold0/modules/modules_raw.csv fold1/modules/modules_raw.csv --folds folds.tsv \
+  --covariates data/samples.tsv --max-target-corr 0.4 --output results/isoform_specific_crossfit.tsv
+```
+
+The simulations show type-I error close to the nominal 0.05 with these settings, but for transcripts whose raw label is the tested module the p-value is still best read as a ranking; confirm calls on held-out samples or another region.
+
+**4. Candidate genes and several regions.** Run `target-genes` per region against its own modules, then pool with `target-genes-combine` (it corrects for donors shared between regions):
+
+```bash
+bsvae-networks target-genes --dataset $D --tx2gene data/tx2gene.tsv \
+  --modules $M/modules/modules.csv --bed gwas_loci.bed --annotation gencode.annotation.gtf.gz \
+  --rule window --window 500000 --output-dir results/region_a/targets
+
+bsvae-networks target-genes-combine \
+  --inputs A=results/region_a/targets/target_isoforms.tsv B=results/region_b/targets/target_isoforms.tsv \
+  --n-samples A=160 B=150 --output results/targets_combined.tsv
+```
+
+## 11. Worked Example On Simulated Data
+
+The same chain on simulated transcripts, with a known truth to score against. This is the pattern the [benchmark study](benchmarking.md) uses; every file has a ground truth.
+
+```bash
+bsvae-simulate init-config --output iso.json --isoform
+bsvae-simulate generate-grid --config iso.json --outdir sim --reps 1 --base-seed 13
+SCEN=$(ls -d sim/scenarios/*/rep_000 | head -1)
+```
+
+Then run steps 1 to 3 above with `--dataset $SCEN/expr/features_x_samples.tsv.gz`, `--tx2gene $SCEN/truth/tx2gene.tsv` and `--covariates $SCEN/covariates.tsv.gz`, and compare with `$SCEN/truth/modules_hard.csv` (`feature_id, module, is_null`; null features are `-1`) and `$SCEN/truth/switch_table.tsv.gz` (`is_switched`, `mechanism`, `is_usage`, ...). To compare methods over a whole grid, use `bsvae-benchmark run`; see [Benchmarking](benchmarking.md).
+
+## 12. Common Problems
 
 - Data orientation is wrong: transpose sample-by-feature matrices before training.
 - CUDA memory is tight: reduce `--batch-size` or use `--no-cuda`.
@@ -240,7 +317,7 @@ Each replicate directory includes method-ready files such as:
 - Hierarchical options fail: make sure `--tx2gene` matches the matrix row IDs.
 - No eigengene file appears: `--soft-eigengenes` only writes output when `--expr` is supplied.
 
-## 11. Legacy Configuration Note
+## 13. Legacy Configuration Note
 
 The active CLI does not use `hyperparam.ini`; the legacy ini files have been removed.
 

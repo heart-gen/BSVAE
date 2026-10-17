@@ -36,6 +36,7 @@ Supported inputs:
 - [Network And Latent Workflows](networks.md)
 - [Usage Guide](usage.md)
 - [Hyperparameters](hyperparameters.md)
+- [Benchmarking](benchmarking.md)
 - [HPC](hpc.md)
 - [FAQ](faq.md)
 - [Contributing](contributing.md)
@@ -52,6 +53,7 @@ cli
 networks
 usage
 hyperparameters
+benchmarking
 hpc
 faq
 contributing

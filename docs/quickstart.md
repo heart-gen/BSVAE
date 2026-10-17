@@ -130,3 +130,13 @@ Validate outputs:
 ```bash
 bsvae-simulate validate-grid --grid-dir results/sim_pub_v1
 ```
+
+## 9. Benchmark Methods On The Simulated Grid
+
+```bash
+bsvae-benchmark check-env
+bsvae-benchmark run --config sim.yaml --outdir results/bench --methods bsvae,wgcna --reps 3
+bsvae-benchmark summarize --results results/bench/results.tsv
+```
+
+See [Benchmarking](benchmarking.md) for the full pipeline, the output files and the headline results, and the [Tutorial](tutorial.md) for an end-to-end transcript-level example.

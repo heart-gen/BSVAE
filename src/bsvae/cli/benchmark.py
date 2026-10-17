@@ -31,7 +31,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Comma list of replicate indices to run (e.g. one per SLURM task); overrides --reps.")
     r.add_argument("--seeds", default="0", help="Comma list of method seeds (default: 0).")
     r.add_argument("--scenario-ids", default=None, help="Comma list to restrict scenarios.")
-    r.add_argument("--k-mode", choices=["oracle", "sweep"], default="oracle")
+    r.add_argument("--k-mode", choices=["oracle"], default="oracle",
+                   help="oracle: the true module count times --over-cluster-factor (the only mode).")
     r.add_argument("--no-resume", dest="resume", action="store_false", default=True)
     r.add_argument("--no-cuda", action="store_true", default=False)
     r.add_argument("--log-level", default="info")

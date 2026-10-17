@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # BSVAE Networks
 
 This page is retained as a short compatibility pointer.

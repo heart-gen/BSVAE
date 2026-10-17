@@ -16,8 +16,10 @@ keywords = [
     "omics",
 ]
 classifiers = [
+    "Development Status :: 4 - Beta",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -51,8 +53,10 @@ yaml = ["pyyaml"]
 
 [tool.poetry.urls]
 homepage = "https://bsvae.readthedocs.io/en/latest/"
+documentation = "https://bsvae.readthedocs.io/en/latest/"
 repository = "https://github.com/heart-gen/BSVAE"
 "Bug Tracker" = "https://github.com/heart-gen/BSVAE/issues"
+Changelog = "https://github.com/heart-gen/BSVAE/blob/main/CHANGELOG.md"
 
 [tool.poetry.scripts]
 bsvae-train = "bsvae.cli.train:cli"

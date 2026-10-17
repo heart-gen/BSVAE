@@ -203,6 +203,12 @@ def _done_keys(path: Path) -> set:
     return {tuple(r) for r in df.itertuples(index=False, name=None)}
 
 
+def _check_k_mode(k_mode: str) -> None:
+    # K comes from the simulation metadata; no selection procedure is wired in.
+    if k_mode != "oracle":
+        raise ValueError(f"k_mode must be 'oracle' (got {k_mode!r}); the harness has no K-selection mode")
+
+
 def run_one(
     run_dir: Path,
     method: str,
@@ -217,6 +223,7 @@ def run_one(
     over_cluster_factor: Optional[float] = None,
     consensus_runs: int = 3,
 ) -> tuple[MethodResult, Dict]:
+    _check_k_mode(k_mode)
     truth = load_truth(run_dir)
     expr = pd.read_csv(truth["expr_path"], sep="\t", index_col=0)
     expr.index = expr.index.astype(str)
@@ -238,8 +245,6 @@ def run_one(
 
     if method_base in ("bsvae", "bsvae_coherent"):
         cfg = dict(bsvae_cfg or {})
-        if k_mode == "sweep":
-            cfg.setdefault("_k_mode", "sweep")
         tx2gene = None
         if "tx2gene" in truth:
             tx2gene = pd.DataFrame(list(truth["tx2gene"].items()), columns=["transcript_id", "gene_id"])
@@ -381,6 +386,7 @@ def run_grid(
     consensus_runs: int = 3,
 ) -> pd.DataFrame:
     """Run every (scenario, rep, method, seed) and return the tidy results table."""
+    _check_k_mode(k_mode)
     cfg = load_config(config) if not isinstance(config, dict) else config
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)

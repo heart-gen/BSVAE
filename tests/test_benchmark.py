@@ -250,3 +250,12 @@ def test_run_grid_regressed_method(tmp_path):
     bs = {"epochs": 6, "warmup_epochs": 2, "transition_epochs": 1, "hidden_dims": [16], "no_cuda": True}
     df = run_grid(cfg, tmp_path, methods=("bsvae_regressed",), seeds=[0], bsvae_cfg=bs)
     assert df["method"].tolist() == ["bsvae_regressed"] and (df["status"] == "ok").all()
+
+
+def test_k_mode_other_than_oracle_is_rejected(tmp_path):
+    from bsvae.cli.benchmark import build_parser
+
+    with pytest.raises(ValueError, match="oracle"):
+        run_grid({"scenarios": []}, tmp_path, k_mode="sweep")
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["run", "--config", "c.yaml", "--outdir", str(tmp_path), "--k-mode", "sweep"])
