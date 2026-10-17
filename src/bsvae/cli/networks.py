@@ -211,6 +211,10 @@ def build_parser() -> argparse.ArgumentParser:
     tg.add_argument("--covariates", default=None, help="Sample table (samples × columns) for --condition.")
     tg.add_argument("--condition", default=None, help="Two-level column of --covariates for a case/control interaction test.")
     tg.add_argument("--n-neighbours", type=int, default=20)
+    tg.add_argument("--max-target-corr", type=float, default=None,
+                    help="Exclude as targets the modules whose eigengene correlates with the gene's own module above "
+                         "this, in the observed statistic and in the null (default: none; 0.4 removes split components "
+                         "of one programme, as for isoform-specific).")
     tg.add_argument("--no-residualize-eigengenes", action="store_true", default=False)
     tg.add_argument("--no-leave-one-out", action="store_true", default=False)
     tg.add_argument("--keep-tx-version", action="store_true", default=False)
@@ -646,7 +650,7 @@ def handle_target_genes(args, logger: logging.Logger) -> None:
         expr, tx2gene, labels, fids, targets, null=args.null, n_perm=args.n_perm, n_matched=args.n_matched,
         min_kme=args.min_kme, alpha=args.alpha, counts=counts, condition=condition, n_neighbours=args.n_neighbours,
         residualize_eigengenes=not args.no_residualize_eigengenes, leave_one_out=not args.no_leave_one_out,
-        keep_version=args.keep_tx_version, seed=args.seed,
+        keep_version=args.keep_tx_version, seed=args.seed, max_target_corr=args.max_target_corr,
     )
     res["isoforms"].to_csv(out_dir / "target_isoforms.tsv", sep="\t")
     res["genes"].to_csv(out_dir / "target_genes.tsv", sep="\t")

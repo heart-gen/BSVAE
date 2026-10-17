@@ -2,6 +2,12 @@
 
 Versions follow the git tags (`vX.Y.Z`). Benchmark results quoted here are simulation results; the full tables and the scripts that produce them are described in [docs/benchmarking.md](docs/benchmarking.md).
 
+## Unreleased
+
+### Added
+
+* `target-genes --max-target-corr R` (and `target_gene_tests(max_target_corr=...)`): exclude as targets the modules whose eigengene correlates with the gene's own module above `R`, as `isoform-specific` already does. The exclusion applies to the observed best module and inside the permutation, matched and analytic nulls. The output gains `n_targets`, the number of eligible target modules; an isoform with none gets `best_other_module = -1` and `p_value = 1`.
+
 ## 0.4.0 - 2026-10-17
 
 Transcript-level review: gene-coherent modules and a calibrated isoform-specific residual scan as two independent outputs, targeted-gene and cross-cohort tests, WGCNA-style post-processing, a benchmark harness with comparison methods, and a set of training correctness fixes.
