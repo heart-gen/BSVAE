@@ -300,6 +300,7 @@ def target_gene_tests(
     leave_one_out: bool = True,
     keep_version: bool = False,
     seed: int = 0,
+    max_target_corr: Optional[float] = None,
 ) -> Dict[str, pd.DataFrame]:
     """
     Test every isoform of the target genes for membership of a module other
@@ -327,6 +328,17 @@ def target_gene_tests(
         Two-level sample grouping (index = sample IDs); the best-other kME is
         then also estimated per group and the difference tested with
         Fisher's z (``p_interaction``).
+    max_target_corr
+        Exclude as targets the modules whose eigengene correlates with the
+        gene's own module eigengene above this (absolute Pearson correlation
+        of the eigengenes, as in
+        :func:`bsvae.utils.isoform.isoform_specific_calls`).  The exclusion
+        is applied before the best module is chosen and inside every null
+        (the permutation maximum, the matched pool's best-other |kME| and the
+        analytic Bonferroni factor), so the test compares like with like.
+        ``n_targets`` reports the eligible modules per isoform; an isoform
+        with none gets ``best_other_module = -1``, ``kme_residual = 0`` and
+        ``p_value = 1``.  Default ``None`` (no exclusion).
 
     min_kme, alpha
         Effect-size floor and BH FDR within the target set.  The floor is
@@ -399,27 +411,56 @@ def target_gene_tests(
             K[rows_idx] = Zrows[rows_idx] @ Eg / (S - 1)
         return K
 
+    # eligible target modules per gene module: never the gene's own module and, with
+    # max_target_corr, never a module whose eigengene tracks the gene's module (a split
+    # component of the same programme rather than a divergence target)
+    Ecorr = None
+    if max_target_corr is not None and len(cols) > 1:
+        Ecorr = np.atleast_2d(np.nan_to_num(np.corrcoef(eigengenes.values.T.astype(np.float64))))
+
+    def eligible(g: int) -> np.ndarray:
+        ok = np.ones(len(cols), bool)
+        if g in cols:
+            j = cols.index(int(g))
+            ok[j] = False
+            if Ecorr is not None:
+                ok &= np.abs(Ecorr[j]) <= float(max_target_corr)
+                ok[j] = False
+        return ok
+
+    elig = {int(g): eligible(int(g)) for g in np.unique(gm)}
+
+    def mask_other(Kmat: np.ndarray, gmods: np.ndarray) -> np.ndarray:
+        Km = Kmat.copy()
+        for i, g in enumerate(gmods):
+            ok = elig.get(int(g))
+            if ok is None:
+                ok = elig[int(g)] = eligible(int(g))
+            Km[i, ~ok] = 0.0
+        return Km
+
     K = kme_matrix(Z, gm)
     kme_own = np.array([K[i, cols.index(int(g))] if g in cols else np.nan for i, g in enumerate(gm)])
-    K_other = K.copy()
-    for i, g in enumerate(gm):
-        if g in cols:
-            K_other[i, cols.index(int(g))] = 0.0
+    K_other = mask_other(K, gm)
+    n_targets = np.array([int(elig[int(g)].sum()) for g in gm])
     best_j = np.abs(K_other).argmax(axis=1)
     best = K_other[np.arange(len(targets)), best_j]
+    no_target = n_targets == 0
 
     # null distribution of the best-other |kME|
     if null == "analytic":
         from scipy import stats as sps
         rr = np.minimum(best ** 2, 1 - 1e-12)
         tval = np.abs(best) * np.sqrt(max(S - 2, 1) / (1 - rr))
-        p = np.minimum(2.0 * sps.t.sf(tval, max(S - 2, 1)) * len(cols), 1.0)
+        p = np.minimum(2.0 * sps.t.sf(tval, max(S - 2, 1)) * np.maximum(n_targets, 1), 1.0)
     elif null == "permutation":
-        p = np.zeros(len(targets))
+        p = np.ones(len(targets))
         for g in np.unique(gm):
             rows_idx = np.where(gm == g)[0]
             Eg = _standardize_cols(_residualize_eigengenes(eigengenes, cols.index(int(g))).values) if (residualize_eigengenes and g in cols) else E
-            other = [j for j in range(len(cols)) if cols[j] != g]
+            other = np.where(elig[int(g)])[0]
+            if other.size == 0:
+                continue
             for i in rows_idx:
                 perms = np.array([rng.permutation(S) for _ in range(int(n_perm))])
                 null_k = (Z[i][perms] @ Eg[:, other]) / (S - 1)
@@ -437,10 +478,7 @@ def target_gene_tests(
         pool_feat = np.column_stack([pool_expr.mean(axis=1).values, (pool_expr.values == 0).mean(axis=1)])
         pool_Z = _zscore_rows(resid_all.loc[pool].values)
         pool_gm = np.array([gene_mod.get(g, -1) for g in stats_all.loc[pool, "gene_id"].values])
-        pool_K = kme_matrix(pool_Z, pool_gm)
-        for i, g in enumerate(pool_gm):
-            if g in cols:
-                pool_K[i, cols.index(int(g))] = 0.0
+        pool_K = mask_other(kme_matrix(pool_Z, pool_gm), pool_gm)
         pool_best = np.abs(pool_K).max(axis=1)
         tgt_expr = expr.reindex(targets.index)
         tgt_feat = np.column_stack([tgt_expr.mean(axis=1).values, (tgt_expr.values == 0).mean(axis=1)])
@@ -450,8 +488,10 @@ def target_gene_tests(
             d = (((pool_feat - tgt_feat[i]) / scale) ** 2).sum(axis=1)
             near = np.argsort(d, kind="stable")[: int(n_matched)]
             p[i] = (1.0 + (pool_best[near] >= abs(best[i])).sum()) / (len(near) + 1.0)
+    p = np.where(no_target, 1.0, p)
+    best = np.where(no_target, 0.0, best)
     q = _bh_adjust(p)
-    called = (np.abs(best) >= float(min_kme)) & (q < float(alpha))
+    called = (np.abs(best) >= float(min_kme)) & (q < float(alpha)) & ~no_target
 
     out = pd.DataFrame({
         "gene_id": targets.values,
@@ -463,7 +503,8 @@ def target_gene_tests(
         "isoform_module": own,
         "label_discordant": (own >= 0) & (gm >= 0) & (own != gm),
         "kme_gene_module": kme_own,
-        "best_other_module": [cols[j] for j in best_j],
+        "n_targets": n_targets,
+        "best_other_module": [-1 if nt else cols[j] for j, nt in zip(best_j, no_target)],
         "kme_residual": best,
         "p_value": p,
         "q_value": q,
@@ -498,9 +539,10 @@ def target_gene_tests(
         n1, n2 = masks[0].sum(), masks[1].sum()
         z1, z2 = np.arctanh(np.clip(k_grp[0], -0.999, 0.999)), np.arctanh(np.clip(k_grp[1], -0.999, 0.999))
         zdiff = (z1 - z2) / np.sqrt(1.0 / max(n1 - 3, 1) + 1.0 / max(n2 - 3, 1))
+        zdiff = np.where(no_target, np.nan, zdiff)
         from scipy import stats as sps
-        out[f"kme_{levels[0]}"] = k_grp[0]
-        out[f"kme_{levels[1]}"] = k_grp[1]
+        out[f"kme_{levels[0]}"] = np.where(no_target, np.nan, k_grp[0])
+        out[f"kme_{levels[1]}"] = np.where(no_target, np.nan, k_grp[1])
         out["z_interaction"] = zdiff
         out["p_interaction"] = 2.0 * sps.norm.sf(np.abs(zdiff))
 

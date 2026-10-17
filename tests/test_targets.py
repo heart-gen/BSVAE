@@ -178,6 +178,74 @@ def test_profile_reliability_rises_with_abundance(iso_sim):
 # CLI
 # ---------------------------------------------------------------------------
 
+def _split_module(expr, t2g, truth, module=0):
+    """Split one module into two components by gene, so their eigengenes are near copies."""
+    labels = np.asarray(truth).astype(np.int64).copy()
+    new = int(labels.max()) + 1
+    genes = sorted({t2g[f] for f, m in zip(expr.index.astype(str), labels) if m == module})
+    moved = set(genes[::2])
+    for i, f in enumerate(expr.index.astype(str)):
+        if labels[i] == module and t2g[f] in moved:
+            labels[i] = new
+    return labels, new
+
+
+@pytest.mark.parametrize("null", ["permutation", "matched", "analytic"])
+def test_target_tests_max_target_corr_excludes_split_components(iso_sim, null):
+    expr, t2g, truth, st, counts, cov = iso_sim
+    labels, new = _split_module(expr, t2g, truth, module=0)
+    from bsvae.networks.postprocess import module_eigengenes
+    eg = module_eigengenes(expr, labels, list(expr.index.astype(str))).dropna(axis=1, how="any")
+    assert abs(np.corrcoef(eg[0].values, eg[new].values)[0, 1]) > 0.4   # the split is a near copy
+    tx_gene = pd.Series(t2g).reindex(expr.index.astype(str))
+    genes0 = sorted({t2g[f] for f, m in zip(expr.index.astype(str), labels) if m in (0, new)})
+    targets, _ = resolve_target_transcripts(tx_gene, genes=genes0[:20])
+    base = target_gene_tests(expr, t2g, labels, list(expr.index), targets, null=null, n_perm=200, seed=1)["isoforms"]
+    capd = target_gene_tests(expr, t2g, labels, list(expr.index), targets, null=null, n_perm=200, seed=1,
+                             max_target_corr=0.4)["isoforms"]
+    assert "n_targets" in capd and (capd["n_targets"] <= base["n_targets"]).all()
+    assert (base["n_targets"] == len(eg.columns) - 1).all()
+    # the split partner is never the chosen target of a gene in the other half
+    pair = {0: new, new: 0}
+    partner = capd["gene_module"].map(pair)
+    assert not (capd["best_other_module"] == partner).any()
+    # without the cap, the split partner is the most frequent target among unswitched isoforms
+    uns = st.loc[base.index, "is_switched"].values == 0
+    assert (base.loc[uns, "best_other_module"] == base.loc[uns, "gene_module"].map(pair)).mean() > 0.3
+    assert capd.loc[uns, "called"].sum() <= base.loc[uns, "called"].sum()
+
+
+def test_target_tests_max_target_corr_with_no_eligible_target(iso_sim):
+    expr, t2g, truth, st, counts, cov = iso_sim
+    tx_gene = pd.Series(t2g).reindex(expr.index.astype(str))
+    sw_genes = st.loc[st["is_switched"] == 1, "gene_id"].unique()[:5]
+    targets, _ = resolve_target_transcripts(tx_gene, genes=list(sw_genes))
+    cond = pd.Series(np.where(np.arange(expr.shape[1]) % 2 == 0, "case", "control"), index=expr.columns)
+    iso = target_gene_tests(expr, t2g, truth, list(expr.index), targets, null="permutation", n_perm=50,
+                            condition=cond, max_target_corr=-1.0)["isoforms"]   # every module excluded
+    assert (iso["n_targets"] == 0).all() and (iso["best_other_module"] == -1).all()
+    assert (iso["p_value"] == 1.0).all() and not iso["called"].any() and (iso["kme_residual"] == 0).all()
+    assert iso["p_interaction"].isna().all()
+
+
+def test_cli_target_genes_max_target_corr(iso_sim, tmp_path):
+    from bsvae.cli.networks import cli
+    expr, t2g, truth, st, counts, cov = iso_sim
+    labels, new = _split_module(expr, t2g, truth, module=0)
+    (tmp_path / "expr.tsv").write_text(expr.to_csv(sep="\t"))
+    pd.DataFrame({"transcript_id": list(t2g), "gene_id": list(t2g.values())}).to_csv(tmp_path / "tx2gene.tsv", sep="\t", index=False)
+    pd.DataFrame({"feature_id": expr.index, "module": labels}).to_csv(tmp_path / "modules.csv", index=False)
+    genes0 = sorted({t2g[f] for f, m in zip(expr.index.astype(str), labels) if m == 0})[:6]
+    (tmp_path / "list.txt").write_text("\n".join(genes0) + "\n")
+    out = tmp_path / "out"
+    cli(["target-genes", "--dataset", str(tmp_path / "expr.tsv"), "--tx2gene", str(tmp_path / "tx2gene.tsv"),
+         "--modules", str(tmp_path / "modules.csv"), "--output-dir", str(out), "--genes", str(tmp_path / "list.txt"),
+         "--null", "analytic", "--max-target-corr", "0.4"])
+    iso = pd.read_csv(out / "target_isoforms.tsv", sep="\t", index_col=0)
+    assert (iso.loc[iso["gene_module"] == 0, "best_other_module"] != new).all()
+    assert (iso["n_targets"] < labels.max()).any()
+
+
 def test_cli_target_genes_with_bed(iso_sim, tmp_path):
     from bsvae.cli.networks import cli
     expr, t2g, truth, st, counts, cov = iso_sim
