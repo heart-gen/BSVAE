@@ -195,10 +195,13 @@ def resolve_target_transcripts(
     Transcripts of the target genes (plus explicitly listed transcripts) that
     are present in ``tx_gene`` (feature_id → gene_id for the expression
     matrix).  Gene symbols are resolved through ``annotation`` when given.
-    Returns (feature_id → gene_id for the targets, list of unmatched inputs).
+    Returns (feature_id → gene_id for the targets, list of unmatched inputs);
+    the index keeps the matrix's own feature IDs (versions included), while
+    listed transcripts match with versions stripped unless ``keep_version``.
     """
     tx_gene = tx_gene.copy()
-    tx_gene.index = [strip_feature_version(f, keep_version) for f in tx_gene.index]
+    tx_gene.index = tx_gene.index.astype(str)
+    by_id = {strip_feature_version(f, keep_version): f for f in tx_gene.index}
     unmatched: List[str] = []
     target_genes: set = set()
     if genes:
@@ -217,8 +220,8 @@ def resolve_target_transcripts(
     sel = tx_gene[tx_gene.isin(target_genes)] if target_genes else tx_gene.iloc[0:0]
     if transcripts:
         ids = [strip_feature_version(t, keep_version) for t in transcripts]
-        present = [t for t in ids if t in tx_gene.index]
-        unmatched.extend([t for t, i in zip(transcripts, ids) if i not in tx_gene.index])
+        present = [by_id[t] for t in ids if t in by_id]
+        unmatched.extend([t for t, i in zip(transcripts, ids) if i not in by_id])
         sel = pd.concat([sel, tx_gene.loc[present]])
     sel = sel[~sel.index.duplicated()]
     return sel, unmatched

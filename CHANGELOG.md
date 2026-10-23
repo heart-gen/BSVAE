@@ -8,6 +8,10 @@ Versions follow the git tags (`vX.Y.Z`). Benchmark results quoted here are simul
 
 * `target-genes --max-target-corr R` (and `target_gene_tests(max_target_corr=...)`): exclude as targets the modules whose eigengene correlates with the gene's own module above `R`, as `isoform-specific` already does. The exclusion applies to the observed best module and inside the permutation, matched and analytic nulls. The output gains `n_targets`, the number of eligible target modules; an isoform with none gets `best_other_module = -1` and `p_value = 1`.
 
+### Fixed
+
+* `target-genes` on matrices whose feature IDs carry versions (GENCODE `ENST….N`): `resolve_target_transcripts` returned version-stripped IDs, which matched no row of the matrix, so `target_gene_tests` returned an empty table and the command failed with `KeyError: 'called'` (or `'gene_id'` with `--bed`). The resolved targets now keep the matrix's own feature IDs.
+
 ## 0.4.0 - 2026-10-17
 
 Transcript-level review: gene-coherent modules and a calibrated isoform-specific residual scan as two independent outputs, targeted-gene and cross-cohort tests, WGCNA-style post-processing, a benchmark harness with comparison methods, and a set of training correctness fixes.
