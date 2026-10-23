@@ -7,6 +7,7 @@ from bsvae.networks.targets import (
     resolve_target_transcripts, target_gene_tests, profile_reliability,
 )
 from bsvae.simulation.scenario import ISOFORM_GENERATOR_DEFAULTS, simulate_params
+from bsvae.utils.isoform import map_transcripts_to_genes
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +75,21 @@ def test_resolve_targets_by_id_symbol_and_transcript():
     tx_gene = pd.Series({"t1.1": "G1", "t2": "G1", "t3": "G2", "t4": "G3"})
     ann = _toy_annotation()
     sel, unmatched = resolve_target_transcripts(tx_gene, genes=["G1", "b", "ZZZ"], transcripts=["t4.2", "t9"], annotation=ann)
-    assert set(sel.index) == {"t1", "t2", "t3", "t4"}
+    assert set(sel.index) == {"t1.1", "t2", "t3", "t4"}        # the matrix's own feature IDs
     assert unmatched == ["ZZZ", "t9"]
+
+
+def test_target_tests_with_versioned_feature_ids(iso_sim):
+    # GENCODE-style matrices keep transcript versions; the resolved targets must still index the matrix.
+    expr, t2g, truth, st, counts, cov = iso_sim
+    expr = expr.rename(index=lambda f: f"{f}.3")
+    t2g = {f"{t}.3": g for t, g in t2g.items()}
+    tx_gene = map_transcripts_to_genes(list(expr.index), t2g)
+    genes = list(st.loc[st["is_switched"] == 1, "gene_id"].unique()[:5])
+    targets, _ = resolve_target_transcripts(tx_gene, genes=genes, transcripts=[str(expr.index[0]).split(".")[0]])
+    assert len(targets) and set(targets.index) <= set(expr.index)
+    res = target_gene_tests(expr, t2g, truth, list(expr.index), targets, null="analytic", seed=0)
+    assert len(res["isoforms"]) == len(targets) and "called" in res["isoforms"]
 
 
 # ---------------------------------------------------------------------------
