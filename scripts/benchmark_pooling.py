@@ -15,7 +15,9 @@ per-region tests dependent).  BSVAE is trained per region, the targeted test
 is run per region on every isoform switched in any region plus an equal
 number of never-switched genes, and the per-region tables are pooled with
 Stouffer's method with and without Strube's dependent-cohort correction and
-with an optional minimum number of single-region calls.
+with an optional minimum number of single-region calls.  ``--min-kme`` is
+the effect-size floor of both the per-region tests and the pooled call
+(``combine_target_tests``); 0 removes it, as the BrainSEQ application does.
 
 Reported per setting: recall of isoforms switched in 1, 2–3 or 4–6 regions,
 the false-positive rate among never-switched isoforms, the observed positive
@@ -121,7 +123,8 @@ def main(argv=None):
                                                             n_perm=args.n_perm, min_kme=args.min_kme, seed=seed)["isoforms"]
 
                 def score(called: np.ndarray, label: str) -> Dict:
-                    row = dict(heterogeneity=het, donors=dname, seed=seed, method=label, n_targets=len(tx), n_null=int(null.sum()),
+                    row = dict(heterogeneity=het, donors=dname, seed=seed, method=label, min_kme=float(args.min_kme),
+                               n_targets=len(tx), n_null=int(null.sum()),
                                fpr=float(called[null].mean()), prevalence=float((n_reg_sw > 0).mean()))
                     for lo, hi, nm in [(1, 1, "sw_1region"), (2, 3, "sw_2to3"), (4, n_reg, f"sw_4to{n_reg}"), (1, n_reg, "sw_any")]:
                         m = (n_reg_sw >= lo) & (n_reg_sw <= hi)
@@ -136,7 +139,8 @@ def main(argv=None):
                 rows.append(score(per_region["r0"]["called"].reindex(tx).fillna(False).values, "single_region"))
                 for corr in ("none", "empirical"):
                     for mc in (0, 2):
-                        comb = combine_target_tests(per_region, n_samples=n_samples, correlation=corr, min_called=mc)
+                        comb = combine_target_tests(per_region, n_samples=n_samples, correlation=corr, min_called=mc,
+                                                    min_kme=args.min_kme)
                         rows.append(score(comb["called"].reindex(tx).fillna(False).values, f"pooled_{corr}_mincalled{mc}"))
                         if corr == "empirical" and mc == 0:
                             rho = comb.attrs["cohort_z_correlation"].values

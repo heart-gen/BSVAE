@@ -12,7 +12,7 @@ independent cohort B of the same truth (``module_preservation``), and reports
   * a size-adjusted cor_kME per method and resolution (linear fit on log size,
     evaluated at 50 and 150 members),
   * a size-matched paired comparison: each BSVAE module is matched to the
-    WGCNA module (same seed, default resolutions) closest in size, and the
+    WGCNA module (same seed) closest in size at each WGCNA resolution, and the
     paired difference in cor_kME is averaged,
   * the same restricted to "true" modules (≥ 70 % of members from one true
     module), to separate real modules from over-clustering remnants.
@@ -49,11 +49,14 @@ RESOLUTIONS = {
         ("ocf3_cut0.40", dict(over_cluster_factor=3.0, merge_cut_height=0.40)),   # default
         ("ocf3_cut0.60", dict(over_cluster_factor=3.0, merge_cut_height=0.60)),
     ],
+    # WGCNA: the merge height alone does not move the module count at this size (0.15-0.40 gave
+    # identical modules), so the sweep varies the dynamic tree cut and the minimum module size too.
     "wgcna": [
-        ("ds2_cut0.15", dict(deep_split=2, merge_cut_height=0.15)),
-        ("ds2_cut0.25", dict(deep_split=2, merge_cut_height=0.25)),             # default
-        ("ds2_cut0.40", dict(deep_split=2, merge_cut_height=0.40)),
-        ("ds4_cut0.25", dict(deep_split=4, merge_cut_height=0.25)),
+        ("ds2_cut0.25", dict(deep_split=2, merge_cut_height=0.25, min_module_size=10)),       # default
+        ("ds4_cut0.25", dict(deep_split=4, merge_cut_height=0.25, min_module_size=10)),
+        ("ds3_cut0.10_min10", dict(deep_split=3, merge_cut_height=0.10, min_module_size=10)),
+        ("ds4_cut0.10_min5", dict(deep_split=4, merge_cut_height=0.10, min_module_size=5)),
+        ("ds4_cut0.05_min5", dict(deep_split=4, merge_cut_height=0.05, min_module_size=5)),
     ],
 }
 DEFAULT_RES = {"bsvae": "ocf3_cut0.40", "wgcna": "ds2_cut0.25"}
@@ -68,7 +71,8 @@ def fit(method: str, name: str, cfg: Dict, expr: pd.DataFrame, tx2gene: Dict[str
         res = run_bsvae(expr, n_modules=10, seed=seed, workdir=workdir, train_cfg=tcfg,
                         post_cfg={"merge_cut_height": cfg["merge_cut_height"]}, over_cluster_factor=cfg["over_cluster_factor"])
     else:
-        res = run_wgcna(expr, workdir=workdir, seed=seed, deep_split=cfg["deep_split"], merge_cut_height=cfg["merge_cut_height"])
+        res = run_wgcna(expr, workdir=workdir, seed=seed, deep_split=cfg["deep_split"], merge_cut_height=cfg["merge_cut_height"],
+                        min_module_size=int(cfg.get("min_module_size", 10)))
     if res.status != "ok":
         raise RuntimeError(f"{method} {name}: {res.message}")
     lab = res.labels.reindex(fids).fillna(-1).astype(int).values
@@ -146,24 +150,28 @@ def main(argv=None):
                     "cor_kME_true_at100": size_adjusted(g[g["true_module"]], 100), "frac_true_modules": g["true_module"].mean()})
     adj = pd.DataFrame(adj); adj.to_csv(outdir / "size_adjusted.tsv", sep="\t", index=False)
     print(adj.round(3).to_string(index=False))
-    print("\n== size-matched paired comparison at default resolutions (BSVAE module vs closest-size WGCNA module, same seed)")
+    print("\n== size-matched paired comparison (default BSVAE module vs closest-size WGCNA module, same seed, per WGCNA resolution)")
     pairs = []
+    wgcna_res = [name for name, _ in RESOLUTIONS["wgcna"]]
     for seed in seeds:
         bs = df[(df["method"] == "bsvae") & (df["resolution"] == DEFAULT_RES["bsvae"]) & (df["seed"] == seed)]
-        wg = df[(df["method"] == "wgcna") & (df["resolution"] == DEFAULT_RES["wgcna"]) & (df["seed"] == seed)]
-        for _, r in bs.iterrows():
-            if wg.empty:
-                continue
-            j = (wg["n_shared"] - r["n_shared"]).abs().idxmin()
-            pairs.append({"seed": seed, "bsvae_size": r["n_shared"], "wgcna_size": wg.loc[j, "n_shared"],
-                          "d_cor_kME": r["cor_kME"] - wg.loc[j, "cor_kME"], "d_Z": r["Z_density"] - wg.loc[j, "Z_density"],
-                          "bsvae_true": r["true_module"], "size_ratio": r["n_shared"] / max(wg.loc[j, "n_shared"], 1)})
+        for wres in wgcna_res:
+            wg = df[(df["method"] == "wgcna") & (df["resolution"] == wres) & (df["seed"] == seed)]
+            for _, r in bs.iterrows():
+                if wg.empty:
+                    continue
+                j = (wg["n_shared"] - r["n_shared"]).abs().idxmin()
+                pairs.append({"seed": seed, "wgcna_resolution": wres, "bsvae_size": r["n_shared"], "wgcna_size": wg.loc[j, "n_shared"],
+                              "d_cor_kME": r["cor_kME"] - wg.loc[j, "cor_kME"], "d_Z": r["Z_density"] - wg.loc[j, "Z_density"],
+                              "bsvae_true": r["true_module"], "size_ratio": r["n_shared"] / max(wg.loc[j, "n_shared"], 1)})
     pairs = pd.DataFrame(pairs); pairs.to_csv(outdir / "size_matched_pairs.tsv", sep="\t", index=False)
-    close = pairs[(pairs["size_ratio"] > 0.5) & (pairs["size_ratio"] < 2.0)]
-    print(f"all pairs: n={len(pairs)} mean d_cor_kME={pairs['d_cor_kME'].mean():.3f} mean d_Z={pairs['d_Z'].mean():.2f}")
-    print(f"pairs within 2x size: n={len(close)} mean d_cor_kME={close['d_cor_kME'].mean():.3f} mean d_Z={close['d_Z'].mean():.2f}")
-    tp = close[close["bsvae_true"]]
-    print(f"within 2x size, true BSVAE modules: n={len(tp)} mean d_cor_kME={tp['d_cor_kME'].mean():.3f} mean d_Z={tp['d_Z'].mean():.2f}")
+    for wres in wgcna_res:
+        pw = pairs[pairs["wgcna_resolution"] == wres] if len(pairs) else pairs
+        close = pw[(pw["size_ratio"] > 0.5) & (pw["size_ratio"] < 2.0)] if len(pw) else pw
+        tp = close[close["bsvae_true"]] if len(close) else close
+        print(f"[{wres}] all pairs: n={len(pw)} mean d_cor_kME={pw['d_cor_kME'].mean() if len(pw) else float('nan'):.3f}; "
+              f"within 2x size: n={len(close)} mean d_cor_kME={close['d_cor_kME'].mean() if len(close) else float('nan'):.3f}; "
+              f"true BSVAE modules within 2x: n={len(tp)} mean d_cor_kME={tp['d_cor_kME'].mean() if len(tp) else float('nan'):.3f}")
 
 
 if __name__ == "__main__":

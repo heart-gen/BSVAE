@@ -33,6 +33,10 @@ Settings (the factorial ``design`` x ``covariates`` x ``max_target_corr`` x
   module_agreement  cross-fitting only: require both folds to pick the same
                     target module
 
+``--null stratum`` scores every setting with the empirical null fitted per
+selection stratum (``bsvae.utils.isoform.stratum_empirical_null``) in place
+of the analytic Bonferroni p; the ``null`` column records which was used.
+
 Output: ``<outdir>/results.tsv`` with one row per (seed, check, setting,
 stratum or switch rate) and the cell parameters as columns, and the trained
 labels under ``<outdir>/seed_<s>/labels_<name>.npy`` so settings can be
@@ -80,6 +84,9 @@ def parse_args(argv=None):
     p.add_argument("--covariates", default="on,off")
     p.add_argument("--target-corrs", default="none,0.6,0.4,0.3")
     p.add_argument("--loo", default="approx,exact", help="Leave-one-gene-out eigengene variants for the full design.")
+    p.add_argument("--null", choices=["analytic", "stratum"], default="analytic",
+                   help="Reference distribution of the best kME: the analytic t/z with Bonferroni over modules, "
+                        "or the empirical null fitted per selection stratum.")
     p.add_argument("--min-kme", type=float, default=0.3)
     p.add_argument("--alpha", type=float, default=0.05, help="q-value threshold behind ``called``.")
     p.add_argument("--reuse-labels", action="store_true", default=False,
@@ -110,10 +117,12 @@ def _settings(args) -> List[Dict]:
             for tc in tcorrs:
                 if design == "full":
                     for loo in loos:
-                        out.append({"design": "full", "covariates": cov, "max_target_corr": tc, "loo": loo, "module_agreement": None})
+                        out.append({"design": "full", "covariates": cov, "max_target_corr": tc, "loo": loo, "module_agreement": None,
+                                    "null": args.null})
                 elif design == "crossfit":
                     for agree in (False, True):
-                        out.append({"design": "crossfit", "covariates": cov, "max_target_corr": tc, "loo": "approx", "module_agreement": agree})
+                        out.append({"design": "crossfit", "covariates": cov, "max_target_corr": tc, "loo": "approx", "module_agreement": agree,
+                                    "null": args.null})
                 else:
                     raise ValueError(f"unknown design {design}")
     return out
@@ -122,7 +131,7 @@ def _settings(args) -> List[Dict]:
 def _setting_cols(s: Dict) -> Dict:
     return {"design": s["design"], "covariates": bool(s["covariates"]),
             "max_target_corr": np.nan if s["max_target_corr"] is None else float(s["max_target_corr"]),
-            "loo": s["loo"], "module_agreement": s["module_agreement"]}
+            "loo": s["loo"], "module_agreement": s["module_agreement"], "null": s.get("null", "analytic")}
 
 
 class Trainer:
@@ -158,7 +167,7 @@ def _libsize(counts: pd.DataFrame, columns) -> pd.DataFrame:
 
 def _calls(setting: Dict, expr, t2g, fids, cov, lab_full, lab_folds, fold, min_kme, alpha) -> pd.DataFrame:
     kw = dict(min_kme=min_kme, alpha=alpha, covariates=cov if setting["covariates"] else None,
-              max_target_corr=setting["max_target_corr"])
+              max_target_corr=setting["max_target_corr"], null=setting.get("null", "analytic"))
     if setting["design"] == "full":
         return isoform_specific_calls(expr, t2g, lab_full, fids, loo_eigengene=setting["loo"], **kw)
     return cross_fit_calls(expr, t2g, lab_folds, fold, fids, require_module_agreement=bool(setting["module_agreement"]),
@@ -257,7 +266,7 @@ def main(argv=None):
     df = pd.DataFrame(rows)
     if not df.empty:
         pd.set_option("display.width", 250)
-        keys = ["check", "design", "covariates", "max_target_corr", "loo", "module_agreement", "stratum", "switch_rate"]
+        keys = ["check", "null", "design", "covariates", "max_target_corr", "loo", "module_agreement", "stratum", "switch_rate"]
         keys = [k for k in keys if k in df.columns]
         num = [c for c in ("type1_0.05", "called_default", "recall", "fpr", "ppv_observed", "fdr_observed") if c in df.columns]
         print(df.groupby(keys, dropna=False)[num].mean().round(3).to_string())
