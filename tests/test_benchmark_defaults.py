@@ -38,10 +38,16 @@ def test_defaults_sweep_writes_every_setting(tmp_path):
     assert power["n_switched"].gt(0).all()
     assert (tmp_path / "seed_0" / "labels_null_full.npy").exists()
     assert (tmp_path / "seed_0" / "labels_switch0.15_xf1.npy").exists()
-    # cell parameters travel with every row
+    # cell parameters and the null travel with every row
     assert (df["n_genes"] == 120).all() and (df["factor_corr"] == 0.3).all()
+    assert (df["null"] == "analytic").all()
     # reuse saved labels: identical results without the model directories
     (tmp_path / "results.tsv").unlink()
     _run(tmp_path, ["--reuse-labels"])
     df2 = pd.read_csv(tmp_path / "results.tsv", sep="\t")
     pd.testing.assert_frame_equal(df.sort_index(axis=1), df2.sort_index(axis=1))
+    # the stratum-aware null runs on the same saved labels and labels its rows
+    _run(tmp_path, ["--reuse-labels", "--null", "stratum"])
+    df3 = pd.read_csv(tmp_path / "results.tsv", sep="\t")
+    assert (df3["null"] == "stratum").all() and len(df3) == len(df)
+    assert df3.loc[df3["check"] == "type1", "type1_0.05"].between(0, 1).all()

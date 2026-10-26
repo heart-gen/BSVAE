@@ -116,6 +116,17 @@ def test_run_wgcna_recovers_blocks(tmp_path):
     assert (tmp_path / "eigengenes.csv").exists() and "soft_power" in res.params
 
 
+@pytest.mark.skipif(not wgcna_available(), reason="Rscript/WGCNA not installed")
+@pytest.mark.slow
+def test_run_wgcna_fixed_k_forces_resolution(tmp_path):
+    expr, _ = _block_expr()
+    res = run_wgcna(expr, workdir=tmp_path, network_type="signed", fixed_k=9)
+    assert res.status == "ok", res.message
+    assert res.labels.nunique() == 9 and res.labels.min() >= 0
+    assert res.params["fixed_k"] == 9 and res.params["n_modules"] == 9
+    assert (tmp_path / "eigengenes.csv").exists()
+
+
 def test_run_bsvae_recovers_blocks(tmp_path):
     expr, gt = _block_expr()
     res = run_bsvae(

@@ -166,6 +166,7 @@ def cross_fit_calls(
     min_kme: float = 0.3,
     alpha: Optional[float] = 0.05,
     require_module_agreement: bool = False,
+    null: str = "analytic",
     **kwargs,
 ) -> pd.DataFrame:
     """
@@ -192,7 +193,11 @@ def cross_fit_calls(
     one), ``label_discordant`` (the transcript's raw label differs from its
     gene's in any fold), per-fold ``kme_fold<f>`` columns and ``called``.
     ``require_module_agreement`` additionally demands ``modules_agree`` for a
-    call (an annotation by default).
+    call (an annotation by default).  ``null="stratum"`` replaces the
+    Bonferroni p of the combined statistic with the empirical null fitted per
+    selection stratum (:func:`stratum_empirical_null` on |z|; scales in
+    ``out.attrs["null_scale"]``); the per-fold scans always use the analytic
+    form since only their kME enter the combination.
     """
     from scipy import stats as sps
 
@@ -239,7 +244,13 @@ def cross_fit_calls(
     rows = np.arange(len(idx))
     z_best = Zc[rows, best_j]
     n_mod = max(1, len(cols))
-    p = np.minimum(2.0 * sps.norm.sf(np.abs(z_best)) * n_mod, 1.0)
+    null_scale: Dict[object, float] = {}
+    if null == "analytic":
+        p = np.minimum(2.0 * sps.norm.sf(np.abs(z_best)) * n_mod, 1.0)
+    elif null == "stratum":
+        p, null_scale = stratum_empirical_null(np.abs(z_best), discordant, n_mod)
+    else:
+        raise ValueError("null must be 'analytic' or 'stratum'")
     q = _bh_adjust(p)
     kme = KW[rows, best_j] / np.maximum(NW[rows, best_j], 1.0)
     agree = np.all(np.vstack(fold_best) == best_j[None, :], axis=0)
@@ -268,6 +279,7 @@ def cross_fit_calls(
         "called": called,
     }, index=idx)
     out.index.name = "feature_id"
+    out.attrs["null_scale"] = null_scale
     logger.info("Cross-fitted isoform-specific calls over %d folds: %d of %d transcripts called",
                 len(folds), int(called.sum()), len(out))
     return out
@@ -284,6 +296,59 @@ def _bh_adjust(p: np.ndarray) -> np.ndarray:
     q = np.empty(n)
     q[order] = np.minimum.accumulate(ranked[::-1])[::-1]
     return np.minimum(q, 1.0)
+
+
+def stratum_empirical_null(stat: np.ndarray, strata: np.ndarray, n_modules: "int | np.ndarray",
+                           min_size: int = 50, levels: Tuple[float, ...] = (0.6, 0.8)) -> Tuple[np.ndarray, Dict[object, float]]:
+    """
+    Empirical null of a best-of-``n_modules`` statistic, fitted per selection stratum.
+
+    ``stat`` is the absolute statistic of each transcript's best module (the
+    |t| of the best residual kME, or the combined |z| of the cross-fit),
+    ``strata`` the stratum each transcript was selected in (the callers pass
+    ``label_discordant``: whether the transcript's own label is the module it
+    is tested against).  Under the null ``stat / sigma_s`` is taken to be the
+    maximum of ``n_modules`` independent |N(0, 1)|, with CDF
+    ``(2 Phi(x) - 1) ** m``; ``sigma_s`` is fitted per stratum by least squares
+    on the ``levels`` quantiles of ``stat`` (default the 60th and 80th
+    percentiles).  The lower quantiles of a best-of-m statistic over
+    correlated modules sit below the independent-module form, so anchoring the
+    fit there (25th/50th) shrinks ``sigma_s`` and inflates the tail; anchors
+    at the 90th percentile or above absorb real divergence once it exceeds
+    about a tenth of a stratum.  The 60th/80th pair keeps the concordant
+    stratum near the analytic calibration and tolerates up to ~15 % of
+    real signal in the upper tail.  A stratum with fewer than
+    ``min_size`` transcripts keeps ``sigma_s = 1``.  At ``sigma_s = 1`` the
+    p-value is Sidak's ``1 - (1 - p_best) ** m`` rather than the Bonferroni
+    ``min(1, m p_best)`` of the analytic null.
+
+    Returns the p-values and the fitted scale per stratum.
+    """
+    from scipy import stats as sps
+
+    a = np.abs(np.asarray(stat, dtype=np.float64))
+    strata = np.asarray(strata)
+    m = np.maximum(np.broadcast_to(np.asarray(n_modules, dtype=np.float64), a.shape), 1.0)
+    levels = np.asarray(levels, dtype=np.float64)
+    p = np.ones_like(a)
+    scales: Dict[object, float] = {}
+    for s in pd.unique(strata):
+        idx = np.where(strata == s)[0]
+        sigma = 1.0
+        if idx.size >= int(min_size):
+            ms = float(np.median(m[idx]))
+            x = sps.norm.ppf((levels ** (1.0 / ms) + 1.0) / 2.0)      # null quantiles at unit scale
+            q = np.quantile(a[idx], levels)
+            sigma = float((q * x).sum() / (x * x).sum())
+            if not np.isfinite(sigma) or sigma <= 0:
+                sigma = 1.0
+        scales[s.item() if hasattr(s, "item") else s] = sigma
+        sf = np.minimum(sps.norm.sf(a[idx] / sigma), 0.5 - 1e-12)
+        p[idx] = -np.expm1(m[idx] * np.log1p(-2.0 * sf))
+    return np.clip(p, 0.0, 1.0), scales
+
+
+__all__.append("stratum_empirical_null")
 
 
 def _residualize_eigengenes(eigengenes: pd.DataFrame, column: int) -> pd.DataFrame:
@@ -317,6 +382,7 @@ def isoform_specific_calls(
     return_kme: bool = False,
     covariates: Optional[pd.DataFrame] = None,
     max_target_corr: Optional[float] = None,
+    null: str = "analytic",
 ) -> "pd.DataFrame | Tuple[pd.DataFrame, pd.DataFrame]":
     """
     Call isoforms whose *gene-programme-removed* profile belongs to a module
@@ -358,6 +424,16 @@ def isoform_specific_calls(
     correlations, so a fixed high ``min_kme`` systematically misses them;
     0.3 with the residualised eigengenes keeps precision above the previous
     0.4 default on the isoform simulations.
+
+    ``null`` chooses the reference distribution of the best kME.
+    ``"analytic"`` (default) is the t-test above, Bonferroni-corrected over
+    modules.  ``"stratum"`` fits an empirical null per selection stratum
+    (``label_discordant`` True / False) with :func:`stratum_empirical_null`:
+    the |t| of the best module is scaled by a stratum-specific factor fitted
+    on the lower half of the stratum's distribution, so transcripts whose
+    own label is the tested module are compared with the distribution that
+    selection actually gives them.  The fitted scales are returned in
+    ``out.attrs["null_scale"]``.
 
     Every multi-isoform transcript is tested, whatever its own module label:
     the residual test is the primary evidence for isoform-specific
@@ -488,17 +564,24 @@ def isoform_specific_calls(
     n = expr.shape[1]
     r2 = np.minimum(best ** 2, 1.0 - 1e-12)
     tval = np.abs(best) * np.sqrt(max(n - 2, 1) / (1.0 - r2))
-    p = np.minimum(2.0 * sps.t.sf(tval, max(n - 2, 1)) * len(cols), 1.0)
+    own = lab.reindex(resid.index).fillna(-1).astype(int).values
+    discordant = (own >= 0) & (gm_per_tx >= 0) & (own != gm_per_tx)
+    null_scale: Dict[object, float] = {}
+    if null == "analytic":
+        p = np.minimum(2.0 * sps.t.sf(tval, max(n - 2, 1)) * len(cols), 1.0)
+    elif null == "stratum":
+        p, null_scale = stratum_empirical_null(tval, discordant, len(cols))
+    else:
+        raise ValueError("null must be 'analytic' or 'stratum'")
     q = _bh_adjust(p)
     called = np.abs(best) >= float(min_kme)
     if alpha is not None:
         called &= q < float(alpha)
-    own = lab.reindex(resid.index).fillna(-1).astype(int).values
     out = pd.DataFrame({
         "gene_id": stats["gene_id"].values,
         "gene_module": gm_per_tx,
         "isoform_module": own,
-        "label_discordant": (own >= 0) & (gm_per_tx >= 0) & (own != gm_per_tx),
+        "label_discordant": discordant,
         "best_other_module": [cols[j] for j in best_j],
         "kme_residual": best,
         "p_value": p,
@@ -509,6 +592,7 @@ def isoform_specific_calls(
         "called": called,
     }, index=resid.index)
     out.index.name = "feature_id"
+    out.attrs["null_scale"] = null_scale
     logger.info("Isoform-specific calls: %d of %d multi-isoform transcripts (kME ≥ %.2f%s)",
                 int(out["called"].sum()), len(out), min_kme, f", FDR < {alpha}" if alpha is not None else "")
     if return_kme:

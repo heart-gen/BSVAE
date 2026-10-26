@@ -5,7 +5,12 @@
 ##   Rscript wgcna.R --expr expr.csv.gz --outdir out [--network-type signed]
 ##          [--soft-power P] [--min-module-size 10] [--deep-split 2]
 ##          [--merge-cut-height 0.25] [--blockwise-threshold 20000]
-##          [--max-block-size 5000] [--threads 1] [--seed 42]
+##          [--max-block-size 5000] [--threads 1] [--seed 42] [--fixed-k 0]
+##
+## --fixed-k K > 0 replaces the dynamic tree cut by a Ward (ward.D2) clustering of the TOM
+## dissimilarity cut into K clusters (no merge step, no size floor): WGCNA's network at a forced
+## resolution. Cutting the average-linkage tree or PAM on the same dissimilarity is not used:
+## both peel off singleton outliers and leave the large clusters whole.
 ##
 ## Writes modules.csv (feature_id, module, module_label; grey -> -1),
 ## eigengenes.csv (samples x modules) and params.json.
@@ -15,7 +20,7 @@ suppressPackageStartupMessages(library(WGCNA))
 args <- commandArgs(trailingOnly = TRUE)
 opt <- list(expr = NULL, outdir = NULL, `network-type` = "signed", `soft-power` = NA,
             `min-module-size` = 10, `deep-split` = 2, `merge-cut-height` = 0.25,
-            `blockwise-threshold` = 20000, `max-block-size` = 5000, threads = 1, seed = 42)
+            `blockwise-threshold` = 20000, `max-block-size` = 5000, threads = 1, seed = 42, `fixed-k` = 0)
 i <- 1
 while (i <= length(args)) {
     key <- sub("^--", "", args[i])
@@ -70,6 +75,9 @@ if (is.na(soft_power)) {
 min_size <- int(opt$`min-module-size`)
 deep_split <- int(opt$`deep-split`)
 cut_height <- num(opt$`merge-cut-height`)
+fixed_k <- int(opt$`fixed-k`)
+if (is.na(fixed_k)) fixed_k <- 0L
+if (fixed_k > 0 && n_feat > int(opt$`blockwise-threshold`)) stop("--fixed-k needs the single-block path (n_feat <= blockwise-threshold)")
 
 if (n_feat > int(opt$`blockwise-threshold`)) {
     log_msg("Blockwise WGCNA (maxBlockSize=%d)", int(opt$`max-block-size`))
@@ -87,6 +95,11 @@ if (n_feat > int(opt$`blockwise-threshold`)) {
     TOM <- TOMsimilarity(adj, TOMType = tom_type, verbose = 0)
     dissTOM <- 1 - TOM
     tree <- hclust(as.dist(dissTOM), method = "average")
+    if (fixed_k > 0) {
+        log_msg("Ward clustering of the TOM dissimilarity cut into %d clusters", fixed_k)
+        labels <- as.integer(cutree(hclust(as.dist(dissTOM), method = "ward.D2"), k = min(fixed_k, n_feat)))
+        MEs <- moduleEigengenes(datExpr, colors = labels)$eigengenes
+    } else {
     dyn <- cutreeDynamic(dendro = tree, distM = dissTOM, deepSplit = deep_split,
                          pamRespectsDendro = FALSE, minClusterSize = min_size, verbose = 0)
     if (length(unique(dyn[dyn != 0])) >= 2) {
@@ -96,6 +109,7 @@ if (n_feat > int(opt$`blockwise-threshold`)) {
     } else {
         labels <- dyn
         MEs <- moduleEigengenes(datExpr, colors = labels)$eigengenes
+    }
     }
 }
 
@@ -121,8 +135,8 @@ colnames(MEs_out) <- paste0("ME", as.integer(relabel[me_names[keep]]))
 MEs_out <- cbind(data.frame(sample_id = rownames(datExpr), stringsAsFactors = FALSE), MEs_out)
 write.csv(MEs_out, file.path(opt$outdir, "eigengenes.csv"), row.names = FALSE, quote = FALSE)
 
-params <- sprintf('{"soft_power": %d, "network_type": "%s", "min_module_size": %d, "deep_split": %d, "merge_cut_height": %s, "n_modules": %d, "n_grey": %d, "blockwise": %s}',
-                  as.integer(soft_power), network_type, min_size, deep_split, format(cut_height),
+params <- sprintf('{"soft_power": %d, "network_type": "%s", "min_module_size": %d, "deep_split": %d, "merge_cut_height": %s, "fixed_k": %d, "n_modules": %d, "n_grey": %d, "blockwise": %s}',
+                  as.integer(soft_power), network_type, min_size, deep_split, format(cut_height), fixed_k,
                   length(uniq), sum(all_module < 0), tolower(as.character(n_feat > int(opt$`blockwise-threshold`))))
 writeLines(params, file.path(opt$outdir, "params.json"))
 log_msg("Done: %d modules, %d grey", length(uniq), sum(all_module < 0))

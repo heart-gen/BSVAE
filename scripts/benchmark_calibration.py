@@ -103,6 +103,11 @@ def main(argv=None):
     checks = set(args.checks.split(","))
     base = dict(BASE) if args.factor_corr is None else dict(BASE, factor_corr=args.factor_corr)
 
+    def frame() -> pd.DataFrame:
+        df = pd.DataFrame(rows)
+        df["max_target_corr"] = np.nan if args.max_target_corr is None else float(args.max_target_corr)
+        return df
+
     def libsize(r, expr):
         if args.no_covariates:
             return None
@@ -139,7 +144,7 @@ def main(argv=None):
                                         max_target_corr=args.max_target_corr)
                 calls.to_csv(outdir / f"seed_{seed}" / f"null_calls_crossfit_{variant}.tsv", sep="\t")
                 rows.extend(null_rows(calls, "raw", seed, variant, check="crossfit_null"))
-        pd.DataFrame(rows).to_csv(outdir / "results.tsv", sep="\t", index=False)
+        frame().to_csv(outdir / "results.tsv", sep="\t", index=False)
         # ---- held-out replication and PPV at each switch prevalence ----
         for rate in rates:
             r = simulate_params(dict(base, switch_rate=rate), seed)
@@ -188,8 +193,8 @@ def main(argv=None):
                 rows.append({"check": "ppv", "seed": seed, "switch_rate": rate, "prevalence": float(sw.mean()),
                              "recall": float(c[sw].mean()), "fpr": float(c[~sw].mean()),
                              "ppv_observed": float((c & sw).sum() / max(c.sum(), 1)), "n_called": int(c.sum())})
-            pd.DataFrame(rows).to_csv(outdir / "results.tsv", sep="\t", index=False)
-    df = pd.DataFrame(rows)
+            frame().to_csv(outdir / "results.tsv", sep="\t", index=False)
+    df = frame()
     pd.set_option("display.width", 250)
     for check in ("null", "crossfit_null", "heldout", "ppv", "crossfit"):
         sub = df[df["check"] == check].drop(columns=["check"])
