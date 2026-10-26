@@ -57,8 +57,8 @@ RESOLUTIONS = {
         ("ds3_cut0.10_min10", dict(deep_split=3, merge_cut_height=0.10, min_module_size=10)),
         ("ds4_cut0.10_min5", dict(deep_split=4, merge_cut_height=0.10, min_module_size=5)),
         ("ds4_cut0.05_min5", dict(deep_split=4, merge_cut_height=0.05, min_module_size=5)),
-        ("k16", dict(fixed_k=16)),   # static cut of the TOM dendrogram: WGCNA forced to the BSVAE default's module count
-        ("k24", dict(fixed_k=24)),
+        ("k16", dict(fixed_k=16)),   # PAM partition of the TOM dissimilarity: WGCNA's network at the BSVAE default's module count
+        ("k32", dict(fixed_k=32)),   # and at twice that, where the median module falls below 50 members
     ],
 }
 DEFAULT_RES = {"bsvae": "ocf3_cut0.40", "wgcna": "ds2_cut0.25"}

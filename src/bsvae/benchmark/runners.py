@@ -129,8 +129,9 @@ def run_wgcna(
 ) -> MethodResult:
     """Run WGCNA on a features × samples matrix via ``Rscript``.
 
-    ``fixed_k`` replaces the dynamic tree cut by a static cut of the TOM dendrogram into that many
-    clusters (no merge step, no size floor): WGCNA at a forced resolution, single-block path only.
+    ``fixed_k`` replaces the dynamic tree cut by a PAM partition of the TOM dissimilarity into that
+    many clusters (no merge step, no size floor): WGCNA's network at a forced resolution,
+    single-block path only.
     """
     params = dict(
         network_type=network_type, soft_power=soft_power, min_module_size=min_module_size,

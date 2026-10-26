@@ -7,8 +7,10 @@
 ##          [--merge-cut-height 0.25] [--blockwise-threshold 20000]
 ##          [--max-block-size 5000] [--threads 1] [--seed 42] [--fixed-k 0]
 ##
-## --fixed-k K > 0 replaces the dynamic tree cut by a static cut of the TOM dendrogram into K
-## clusters (cutree, no merge step, no size floor): WGCNA at a forced resolution.
+## --fixed-k K > 0 replaces the dynamic tree cut by a partition of the TOM dissimilarity into K
+## clusters (PAM, cluster::pam; no merge step, no size floor): WGCNA's network at a forced
+## resolution. A static cut of the average-linkage tree (cutree) is not used: it peels off
+## singletons and leaves one giant cluster.
 ##
 ## Writes modules.csv (feature_id, module, module_label; grey -> -1),
 ## eigengenes.csv (samples x modules) and params.json.
@@ -94,8 +96,9 @@ if (n_feat > int(opt$`blockwise-threshold`)) {
     dissTOM <- 1 - TOM
     tree <- hclust(as.dist(dissTOM), method = "average")
     if (fixed_k > 0) {
-        log_msg("Static cut of the TOM dendrogram into %d clusters", fixed_k)
-        labels <- as.integer(cutree(tree, k = min(fixed_k, n_feat)))
+        log_msg("PAM partition of the TOM dissimilarity into %d clusters", fixed_k)
+        suppressPackageStartupMessages(library(cluster))
+        labels <- as.integer(pam(as.dist(dissTOM), k = min(fixed_k, n_feat - 1), diss = TRUE, cluster.only = TRUE))
         MEs <- moduleEigengenes(datExpr, colors = labels)$eigengenes
     } else {
     dyn <- cutreeDynamic(dendro = tree, distM = dissTOM, deepSplit = deep_split,
