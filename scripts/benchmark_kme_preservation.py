@@ -57,6 +57,8 @@ RESOLUTIONS = {
         ("ds3_cut0.10_min10", dict(deep_split=3, merge_cut_height=0.10, min_module_size=10)),
         ("ds4_cut0.10_min5", dict(deep_split=4, merge_cut_height=0.10, min_module_size=5)),
         ("ds4_cut0.05_min5", dict(deep_split=4, merge_cut_height=0.05, min_module_size=5)),
+        ("k16", dict(fixed_k=16)),   # static cut of the TOM dendrogram: WGCNA forced to the BSVAE default's module count
+        ("k24", dict(fixed_k=24)),
     ],
 }
 DEFAULT_RES = {"bsvae": "ocf3_cut0.40", "wgcna": "ds2_cut0.25"}
@@ -71,8 +73,9 @@ def fit(method: str, name: str, cfg: Dict, expr: pd.DataFrame, tx2gene: Dict[str
         res = run_bsvae(expr, n_modules=10, seed=seed, workdir=workdir, train_cfg=tcfg,
                         post_cfg={"merge_cut_height": cfg["merge_cut_height"]}, over_cluster_factor=cfg["over_cluster_factor"])
     else:
-        res = run_wgcna(expr, workdir=workdir, seed=seed, deep_split=cfg["deep_split"], merge_cut_height=cfg["merge_cut_height"],
-                        min_module_size=int(cfg.get("min_module_size", 10)))
+        res = run_wgcna(expr, workdir=workdir, seed=seed, deep_split=cfg.get("deep_split", 2),
+                        merge_cut_height=cfg.get("merge_cut_height", 0.25),
+                        min_module_size=int(cfg.get("min_module_size", 10)), fixed_k=cfg.get("fixed_k"))
     if res.status != "ok":
         raise RuntimeError(f"{method} {name}: {res.message}")
     lab = res.labels.reindex(fids).fillna(-1).astype(int).values

@@ -28,7 +28,7 @@ def test_stratum_empirical_null_ignores_the_upper_tail_and_small_strata():
     a = _max_abs_normals(rng, 5000, 10, 1.0)
     a[:500] += 4.0                                   # 10 % real signal in the upper tail
     p, scales = stratum_empirical_null(a, np.zeros(5000, bool), 10)
-    assert abs(scales[False] - 1.0) < 0.06
+    assert abs(scales[False] - 1.0) < 0.10                  # the 80th-percentile anchor sits below the signal
     assert (p[:500] < 0.01).mean() > 0.9
     p2, scales2 = stratum_empirical_null(a[:20], np.zeros(20, bool), 10)
     assert scales2[False] == 1.0 and np.all((p2 >= 0) & (p2 <= 1))

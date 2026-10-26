@@ -125,12 +125,18 @@ def run_wgcna(
     n_threads: int = 1,
     seed: int = 42,
     timeout_s: int = 7200,
+    fixed_k: Optional[int] = None,
 ) -> MethodResult:
-    """Run WGCNA on a features × samples matrix via ``Rscript``."""
+    """Run WGCNA on a features × samples matrix via ``Rscript``.
+
+    ``fixed_k`` replaces the dynamic tree cut by a static cut of the TOM dendrogram into that many
+    clusters (no merge step, no size floor): WGCNA at a forced resolution, single-block path only.
+    """
     params = dict(
         network_type=network_type, soft_power=soft_power, min_module_size=min_module_size,
         deep_split=deep_split, merge_cut_height=merge_cut_height,
         blockwise_threshold=blockwise_threshold, max_block_size=max_block_size, seed=seed,
+        fixed_k=fixed_k,
     )
     if not wgcna_available():
         logger.warning("Rscript/WGCNA not available; skipping WGCNA")
@@ -155,6 +161,8 @@ def run_wgcna(
     ]
     if soft_power is not None:
         cmd += ["--soft-power", str(int(soft_power))]
+    if fixed_k is not None:
+        cmd += ["--fixed-k", str(int(fixed_k))]
 
     t0 = time.perf_counter()
     try:

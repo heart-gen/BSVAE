@@ -299,7 +299,7 @@ def _bh_adjust(p: np.ndarray) -> np.ndarray:
 
 
 def stratum_empirical_null(stat: np.ndarray, strata: np.ndarray, n_modules: "int | np.ndarray",
-                           min_size: int = 50) -> Tuple[np.ndarray, Dict[object, float]]:
+                           min_size: int = 50, levels: Tuple[float, ...] = (0.6, 0.8)) -> Tuple[np.ndarray, Dict[object, float]]:
     """
     Empirical null of a best-of-``n_modules`` statistic, fitted per selection stratum.
 
@@ -310,8 +310,14 @@ def stratum_empirical_null(stat: np.ndarray, strata: np.ndarray, n_modules: "int
     is tested against).  Under the null ``stat / sigma_s`` is taken to be the
     maximum of ``n_modules`` independent |N(0, 1)|, with CDF
     ``(2 Phi(x) - 1) ** m``; ``sigma_s`` is fitted per stratum by least squares
-    on the 25th and 50th percentiles of ``stat``, so the upper tail, where
-    real divergence sits, does not enter the fit.  A stratum with fewer than
+    on the ``levels`` quantiles of ``stat`` (default the 60th and 80th
+    percentiles).  The lower quantiles of a best-of-m statistic over
+    correlated modules sit below the independent-module form, so anchoring the
+    fit there (25th/50th) shrinks ``sigma_s`` and inflates the tail; anchors
+    at the 90th percentile or above absorb real divergence once it exceeds
+    about a tenth of a stratum.  The 60th/80th pair keeps the concordant
+    stratum near the analytic calibration and tolerates up to ~15 % of
+    real signal in the upper tail.  A stratum with fewer than
     ``min_size`` transcripts keeps ``sigma_s = 1``.  At ``sigma_s = 1`` the
     p-value is Sidak's ``1 - (1 - p_best) ** m`` rather than the Bonferroni
     ``min(1, m p_best)`` of the analytic null.
@@ -323,7 +329,7 @@ def stratum_empirical_null(stat: np.ndarray, strata: np.ndarray, n_modules: "int
     a = np.abs(np.asarray(stat, dtype=np.float64))
     strata = np.asarray(strata)
     m = np.maximum(np.broadcast_to(np.asarray(n_modules, dtype=np.float64), a.shape), 1.0)
-    levels = np.array([0.25, 0.5])
+    levels = np.asarray(levels, dtype=np.float64)
     p = np.ones_like(a)
     scales: Dict[object, float] = {}
     for s in pd.unique(strata):
