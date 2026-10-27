@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
@@ -35,13 +36,26 @@ logger = logging.getLogger(__name__)
 
 METHODS = ("bsvae", "wgcna")
 KNOWN_METHODS = ("bsvae", "bsvae_raw", "bsvae_coherent", "bsvae_hier", "bsvae_consensus", "bsvae_isoform", "bsvae_regressed",
+                 "bsvae_elbo_k", "bsvae_stability_k",
                  "wgcna", "wgcna_raw", "wgcna_coherent", "wgcna_signed", "wgcna_unsigned", "wgcna_regressed",
                  "usage_network", "ica", "nmf", "acorde", "twn")
+# ``bsvae_elbo_k`` / ``bsvae_stability_k``: the ``bsvae`` method with K chosen from the data (kselect.py);
+# ``wgcna_k<N>``: WGCNA at a forced resolution (Ward cut of the TOM into N clusters), any N.
+_WGCNA_K = re.compile(r"^wgcna_k(\d+)$")
+
+
+def is_known_method(method: str) -> bool:
+    return method in KNOWN_METHODS or bool(_WGCNA_K.match(method))
 # Gene coherence is the default annotation policy whenever the scenario has transcript structure:
 # ``bsvae`` / ``wgcna`` apply it, ``bsvae_raw`` / ``wgcna_raw`` do not, ``*_coherent`` are explicit aliases.
 COHERENT_DEFAULT = {"bsvae": True, "bsvae_raw": False, "bsvae_coherent": True, "bsvae_regressed": True,
+                    "bsvae_elbo_k": True, "bsvae_stability_k": True,
                     "wgcna": True, "wgcna_raw": False, "wgcna_coherent": True, "wgcna_signed": True,
                     "wgcna_unsigned": True, "wgcna_regressed": True}
+
+
+def _coherent(method: str) -> bool:
+    return COHERENT_DEFAULT.get(method, bool(_WGCNA_K.match(method)))
 
 
 def _apply_coherence(result: MethodResult, expr: pd.DataFrame, truth: Dict, post_cfg: Optional[Dict], out_dir: Path) -> MethodResult:
@@ -204,9 +218,9 @@ def _done_keys(path: Path) -> set:
 
 
 def _check_k_mode(k_mode: str) -> None:
-    # K comes from the simulation metadata; no selection procedure is wired in.
-    if k_mode != "oracle":
-        raise ValueError(f"k_mode must be 'oracle' (got {k_mode!r}); the harness has no K-selection mode")
+    # oracle: the planted module count; elbo / stability: one K sweep per dataset (kselect.py).
+    from bsvae.benchmark.kselect import check_k_mode
+    check_k_mode(k_mode)
 
 
 def run_one(
@@ -239,9 +253,33 @@ def run_one(
         method_base = method[: -len("_raw")]
     else:
         method_base = method
+    from bsvae.benchmark.kselect import K_MODE_METHODS
+    fixed_k: Optional[int] = None
+    m_k = _WGCNA_K.match(method)
+    if m_k:
+        method_base, fixed_k = "wgcna", int(m_k.group(1))
+    elif method in K_MODE_METHODS:
+        method_base, k_mode = "bsvae", K_MODE_METHODS[method]
     out_dir = run_dir / "methods" / method / f"seed_{seed}"
     out_dir.mkdir(parents=True, exist_ok=True)
     n_modules = int(truth["metadata"]["summary"].get("n_modules", truth["metadata"]["parameters"].get("n_modules", 20)))
+    k_select: Dict = {}
+    if method_base in ("bsvae", "bsvae_coherent") and k_mode != "oracle":
+        from bsvae.benchmark.kselect import (K_GRID_DEFAULT, STABILITY_REPS_DEFAULT, SWEEP_EPOCHS_DEFAULT,
+                                             run_sweep, select_k)
+        allcfg = dict(bsvae_cfg or {})
+        tx_path = run_dir / "truth" / "tx2gene.tsv"
+        table = run_sweep(
+            run_dir, truth["expr_path"], tx_path if tx_path.exists() else None,
+            train_cfg={k: v for k, v in allcfg.items() if not k.startswith("_")},
+            k_grid=allcfg.get("_k_grid") or K_GRID_DEFAULT,
+            sweep_epochs=allcfg.get("_sweep_epochs") or SWEEP_EPOCHS_DEFAULT,
+            stability_reps=allcfg.get("_stability_reps") or STABILITY_REPS_DEFAULT,
+            seed=seed, no_cuda=bool(allcfg.get("no_cuda", False)),
+        )
+        k_sel, info = select_k(table, k_mode)
+        k_select = {"k_mode": k_mode, "n_modules_oracle": n_modules, "selected_k": int(k_sel), **info}
+        n_modules = int(k_sel)
 
     if method_base in ("bsvae", "bsvae_coherent"):
         cfg = dict(bsvae_cfg or {})
@@ -347,14 +385,22 @@ def run_one(
             cfg["network_type"] = "unsigned"
         elif method_base == "wgcna_signed":
             cfg["network_type"] = "signed"
+        if fixed_k is not None:
+            cfg["fixed_k"] = fixed_k
         result = run_wgcna(expr, workdir=out_dir, seed=seed, **cfg)
     else:
         raise ValueError(f"Unknown method: {method}")
 
     result.method = method
-    if COHERENT_DEFAULT.get(method, False):
+    if k_select:
+        result.params = {**result.params, **k_select}
+    if _coherent(method):
         result = _apply_coherence(result, expr, truth, post_cfg, out_dir)
     metrics = evaluate_run(truth, result) if result.status == "ok" else {}
+    if k_select:
+        metrics = {**metrics, "k_mode": k_mode, "selected_k": k_select["selected_k"], "k_elbo": k_select["k_elbo"],
+                   "k_stability": k_select.get("k_stability"), "stability_ari_at_k": k_select.get("stability_ari_at_k"),
+                   "val_elbo_range": k_select["val_elbo_range"]}
     if result.labels is not None:
         pd.DataFrame({"feature_id": result.labels.index, "module": result.labels.values}).to_csv(
             out_dir / "modules.csv", index=False,
@@ -402,9 +448,9 @@ def run_grid(
     n_reps = int(cfg.get("reps", 1) if reps is None else reps)
     seed_list = list(seeds) if seeds is not None else [0]
     methods = [m for m in methods]
-    unknown = [m for m in methods if m not in KNOWN_METHODS]
+    unknown = [m for m in methods if not is_known_method(m)]
     if unknown:
-        raise ValueError(f"Unknown method(s): {unknown}; choose from {KNOWN_METHODS}")
+        raise ValueError(f"Unknown method(s): {unknown}; choose from {KNOWN_METHODS} or wgcna_k<N>")
     if any(m.startswith("wgcna") for m in methods) and not wgcna_available():
         logger.warning("WGCNA (Rscript + WGCNA package) not available; its rows will be marked skipped")
 

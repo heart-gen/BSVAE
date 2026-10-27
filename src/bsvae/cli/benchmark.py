@@ -31,8 +31,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Comma list of replicate indices to run (e.g. one per SLURM task); overrides --reps.")
     r.add_argument("--seeds", default="0", help="Comma list of method seeds (default: 0).")
     r.add_argument("--scenario-ids", default=None, help="Comma list to restrict scenarios.")
-    r.add_argument("--k-mode", choices=["oracle"], default="oracle",
-                   help="oracle: the true module count times --over-cluster-factor (the only mode).")
+    r.add_argument("--k-mode", choices=["oracle", "elbo", "stability"], default="oracle",
+                   help="oracle: the planted module count (times --over-cluster-factor); elbo / stability: K from one "
+                        "held-out sweep per dataset (bsvae-sweep-k), selected by validation ELBO or by assignment "
+                        "stability across replicates. The methods bsvae_elbo_k / bsvae_stability_k force their mode.")
+    r.add_argument("--k-grid", default=None, help="K grid of the sweep (comma list; default 4,6,8,12,16,24,32).")
+    r.add_argument("--sweep-epochs", type=int, default=None, help="Epochs per sweep fit (default 60).")
+    r.add_argument("--stability-reps", type=int, default=None,
+                   help="Training replicates per K in the sweep (default 3; 1 gives ELBO selection only).")
     r.add_argument("--no-resume", dest="resume", action="store_false", default=True)
     r.add_argument("--no-cuda", action="store_true", default=False)
     r.add_argument("--log-level", default="info")
@@ -87,6 +93,12 @@ def handle_run(args, logger):
                             "bal_type", "normalize_input"])
     if args.no_cuda:
         bsvae_cfg["no_cuda"] = True
+    if args.k_grid:
+        bsvae_cfg["_k_grid"] = [int(x) for x in args.k_grid.split(",") if x.strip()]
+    if args.sweep_epochs is not None:
+        bsvae_cfg["_sweep_epochs"] = args.sweep_epochs
+    if args.stability_reps is not None:
+        bsvae_cfg["_stability_reps"] = args.stability_reps
     post_cfg = _opt(args, ["min_gamma", "min_module_size", "merge_cut_height", "kme_reassign"])
     wgcna_cfg = {}
     for cli_name, key in [("wgcna_network_type", "network_type"), ("wgcna_soft_power", "soft_power"),
