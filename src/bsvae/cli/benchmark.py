@@ -71,6 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--wgcna-min-module-size", type=int, default=None)
     r.add_argument("--wgcna-merge-cut-height", type=float, default=None)
     r.add_argument("--wgcna-threads", type=int, default=None)
+    r.add_argument("--method-timeout", type=int, default=None,
+                   help="Seconds allowed to an external method process (acorde, twn) before the row fails (default 7200).")
 
     s = subs.add_parser("summarize", help="Mean ± sd per scenario and method.")
     s.add_argument("--results", required=True, help="results.tsv written by `run`.")
@@ -118,6 +120,7 @@ def handle_run(args, logger):
         postprocess=not args.no_postprocess, resume=args.resume,
         scenario_ids=[s.strip() for s in args.scenario_ids.split(",")] if args.scenario_ids else None,
         over_cluster_factor=args.over_cluster_factor, consensus_runs=args.consensus_runs,
+        method_timeout=args.method_timeout,
     )
     logger.info("Benchmark complete: %d rows → %s/results.tsv", len(df), args.outdir)
 

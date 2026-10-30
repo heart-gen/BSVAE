@@ -236,8 +236,12 @@ def run_one(
     device=None,
     over_cluster_factor: Optional[float] = None,
     consensus_runs: int = 3,
+    method_timeout: Optional[int] = None,
 ) -> tuple[MethodResult, Dict]:
+    """``method_timeout``: seconds allowed to an external method process (acorde, TWN) before the row is
+    recorded as ``failed``; None keeps each runner's default (7,200 s)."""
     _check_k_mode(k_mode)
+    tmo = {"timeout_s": int(method_timeout)} if method_timeout else {}
     truth = load_truth(run_dir)
     expr = pd.read_csv(truth["expr_path"], sep="\t", index_col=0)
     expr.index = expr.index.astype(str)
@@ -371,13 +375,13 @@ def run_one(
                     min_module_size=(post_cfg or {}).get("min_module_size", 10))
     elif method == "acorde":
         from bsvae.benchmark.methods import run_acorde
-        result = run_acorde(expr, workdir=out_dir, seed=seed)
+        result = run_acorde(expr, workdir=out_dir, seed=seed, **tmo)
     elif method == "twn":
         from bsvae.benchmark.methods import run_twn
         if "tx2gene" not in truth:
             result = MethodResult("twn", "skipped", message="scenario has no transcript structure")
         else:
-            result = run_twn(expr, truth["tx2gene"], workdir=out_dir)
+            result = run_twn(expr, truth["tx2gene"], workdir=out_dir, **tmo)
     elif method_base in ("wgcna", "wgcna_unsigned", "wgcna_signed", "wgcna_coherent"):
         cfg = dict(WGCNA_DEFAULTS)
         cfg.update(wgcna_cfg or {})
@@ -430,6 +434,7 @@ def run_grid(
     device=None,
     over_cluster_factor: Optional[float] = None,
     consensus_runs: int = 3,
+    method_timeout: Optional[int] = None,
 ) -> pd.DataFrame:
     """Run every (scenario, rep, method, seed) and return the tidy results table."""
     _check_k_mode(k_mode)
@@ -473,6 +478,7 @@ def run_grid(
                         run_dir, method, seed, k_mode=k_mode, bsvae_cfg=bsvae_cfg,
                         wgcna_cfg=wgcna_cfg, post_cfg=post_cfg, postprocess=postprocess, device=device,
                         over_cluster_factor=over_cluster_factor, consensus_runs=consensus_runs,
+                        method_timeout=method_timeout,
                     )
                     row = {
                         "scenario_id": sid, "rep": rep, "method": method, "seed": seed,
