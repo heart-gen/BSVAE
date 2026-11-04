@@ -2,15 +2,29 @@
 
 Versions follow the git tags (`vX.Y.Z`). Benchmark results quoted here are simulation results; the full tables and the scripts that produce them are described in [docs/benchmarking.md](docs/benchmarking.md).
 
-## Unreleased
+## 0.4.3 - 2026-11-04
+
+Benchmark harness release for the resolution comparisons: BSVAE with a data-driven K, WGCNA at a fixed resolution, a timeout for the external comparison methods, and a stratum-fitted null for the residual-scan benchmark scripts. No default of a production command changes.
 
 ### Added
 
-* `target-genes --max-target-corr R` (and `target_gene_tests(max_target_corr=...)`): exclude as targets the modules whose eigengene correlates with the gene's own module above `R`, as `isoform-specific` already does. The exclusion applies to the observed best module and inside the permutation, matched and analytic nulls. The output gains `n_targets`, the number of eligible target modules; an isoform with none gets `best_other_module = -1` and `p_value = 1`.
+* `bsvae-benchmark run --k-mode oracle|elbo|stability` (default `oracle`, the planted module count) with `--k-grid` (default `4,6,8,12,16,24,32`), `--sweep-epochs` (default 60) and `--stability-reps` (default 3): `bsvae.benchmark.kselect` runs one `bsvae-sweep-k` per dataset, cached under `<run_dir>/methods/_ksweep` and file-locked so concurrent rows share it, and selects K by held-out ELBO or by assignment stability across replicates. The methods `bsvae_elbo_k` and `bsvae_stability_k` force their mode and plain `bsvae` follows `--k-mode`; `selected_k`, `k_elbo`, `k_stability`, `stability_ari_at_k` and `val_elbo_range` are written to `metrics.json` and the results table.
+* `wgcna_k<N>` (any N): WGCNA at a forced resolution. `run_wgcna(fixed_k=)` / `wgcna.R --fixed-k` replace the dynamic tree cut by a spectral clustering of the TOM (normalised Laplacian, N leading eigenvectors, k-means with 20 restarts; no merge step, no size floor), which gives N balanced clusters on both simulation families. A static cut, PAM and Ward.D2 on the TOM dissimilarity were tried first; each peels singletons or leaves one giant cluster on one of the families.
+* `bsvae-benchmark run --method-timeout SECONDS` for the external method processes (`acorde`, `twn`; default unchanged at 7,200 s). TWN at 2,662 transcripts runs 1–2.5 h single-threaded.
+* `isoform_specific_calls(null="stratum")` / `cross_fit_calls(null="stratum")`: an empirical null of the best-of-m statistic fitted per selection stratum (`label_discordant`) by `stratum_empirical_null`, which fits a stratum-specific scale on the 60th and 80th percentiles of the statistic. The default `null="analytic"` is unchanged; `scripts/benchmark_defaults.py --null` exposes it and records it per row.
+* Benchmark scripts: `benchmark_pooling.py` passes `--min-kme` to the combiner (the pooled call used the combiner's 0.25 default regardless of the per-region floor) and records `min_kme`; `benchmark_calibration.py` records `max_target_corr`; `benchmark_kme_preservation.py` replaces the three WGCNA settings that gave identical modules with a grid over deep split, merge height and minimum module size plus the forced resolutions `k16` and `k32`, and writes size-matched pairs for every WGCNA resolution.
+
+## 0.4.2 - 2026-10-23
 
 ### Fixed
 
 * `target-genes` on matrices whose feature IDs carry versions (GENCODE `ENST….N`): `resolve_target_transcripts` returned version-stripped IDs, which matched no row of the matrix, so `target_gene_tests` returned an empty table and the command failed with `KeyError: 'called'` (or `'gene_id'` with `--bed`). The resolved targets now keep the matrix's own feature IDs.
+
+## 0.4.1 - 2026-10-17
+
+### Added
+
+* `target-genes --max-target-corr R` (and `target_gene_tests(max_target_corr=...)`): exclude as targets the modules whose eigengene correlates with the gene's own module above `R`, as `isoform-specific` already does. The exclusion applies to the observed best module and inside the permutation, matched and analytic nulls. The output gains `n_targets`, the number of eligible target modules; an isoform with none gets `best_other_module = -1` and `p_value = 1`.
 
 ## 0.4.0 - 2026-10-17
 

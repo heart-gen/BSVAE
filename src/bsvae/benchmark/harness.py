@@ -40,7 +40,7 @@ KNOWN_METHODS = ("bsvae", "bsvae_raw", "bsvae_coherent", "bsvae_hier", "bsvae_co
                  "wgcna", "wgcna_raw", "wgcna_coherent", "wgcna_signed", "wgcna_unsigned", "wgcna_regressed",
                  "usage_network", "ica", "nmf", "acorde", "twn")
 # ``bsvae_elbo_k`` / ``bsvae_stability_k``: the ``bsvae`` method with K chosen from the data (kselect.py);
-# ``wgcna_k<N>``: WGCNA at a forced resolution (Ward cut of the TOM into N clusters), any N.
+# ``wgcna_k<N>``: WGCNA at a forced resolution (spectral clustering of the TOM into N clusters), any N.
 _WGCNA_K = re.compile(r"^wgcna_k(\d+)$")
 
 

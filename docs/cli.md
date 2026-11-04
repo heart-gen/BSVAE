@@ -482,13 +482,14 @@ bsvae-benchmark summarize --results results/bench/results.tsv
 
 - `--rep-ids` default `None`: comma list of replicate indices to run; overrides `--reps`
 - `--scenario-ids` default `None`: comma list of scenario ids to restrict the grid
-- `--k-mode` default `oracle`: trains BSVAE with the true module count times `--over-cluster-factor` (the only mode; on real data choose the component count as in [Choosing K](hyperparameters.md#choosing-k))
+- `--k-mode` default `oracle`: how the BSVAE methods set their component count. `oracle` trains with the true module count times `--over-cluster-factor`; `elbo` and `stability` run one `bsvae-sweep-k` per dataset (cached under `<outdir>/methods/_ksweep` and shared by concurrent rows) over `--k-grid` (default `4,6,8,12,16,24,32`) with `--sweep-epochs` (default `60`) and `--stability-reps` (default `3`), and take the held-out-ELBO or the stability-selected K; the methods `bsvae_elbo_k` and `bsvae_stability_k` force a mode. The selected K and both candidates are written to `metrics.json` and the results table. On real data choose the component count as in [Choosing K](hyperparameters.md#choosing-k)
+- `--method-timeout` default `7200`: seconds allowed to an external method process (`acorde`, `twn`) before the row fails
 - `--no-resume`: ignore an existing `results.tsv` and re-run every row (by default finished rows are skipped)
 - `--no-normalize-input`: do not z-score each feature across samples before encoding (the harness turns this on for BSVAE methods; it is `--normalize-input` on `bsvae-train`)
 
 `summarize` groups the rows with `--by` (default `scenario_id,method`, any comma list of columns) and writes to `--output` or stdout. See [Benchmarking](benchmarking.md) for the SLURM layout, output schemas and results.
 
-BSVAE is trained with `--over-cluster-factor` (default 3) times the true module count and merged back by post-processing; pass `--over-cluster-factor 1` to train with the true K. Methods: `bsvae`, `bsvae_consensus` (majority vote over `--consensus-runs` seeds, default 3), `bsvae_isoform` (isoform-specific membership calls, scored by switched-isoform recall/precision/ARI), `bsvae_regressed` / `wgcna_regressed` (batch regressed out of the simulated matrix first), `wgcna` (signed network, the WGCNA authors' recommendation), `wgcna_unsigned`, `wgcna_signed`, and the comparison methods below.
+BSVAE is trained with `--over-cluster-factor` (default 3) times the true module count and merged back by post-processing; pass `--over-cluster-factor 1` to train with the true K. Methods: `bsvae`, `bsvae_consensus` (majority vote over `--consensus-runs` seeds, default 3), `bsvae_isoform` (isoform-specific membership calls, scored by switched-isoform recall/precision/ARI), `bsvae_regressed` / `wgcna_regressed` (batch regressed out of the simulated matrix first), `wgcna` (signed network, the WGCNA authors' recommendation), `wgcna_unsigned`, `wgcna_signed`, `wgcna_k<N>` (WGCNA's network cut into N clusters by spectral clustering of the TOM, for a resolution-matched comparison), `bsvae_elbo_k` / `bsvae_stability_k` (`bsvae` with K chosen from the data, see `--k-mode`), and the comparison methods below.
 
 Comparison methods (`bsvae.benchmark.methods`):
 

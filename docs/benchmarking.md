@@ -25,7 +25,7 @@ bsvae-benchmark summarize --results results/bench/results.tsv --by scenario_id,m
 
 Two options change what is being compared:
 
-- `--over-cluster-factor` (default 3) sets the number of GMM components: BSVAE is trained with the true module count of the scenario times this factor and post-processing merges back. The harness always takes the count from the simulation (`--k-mode oracle`, the only mode); on real data choose it as in [Choosing K](hyperparameters.md#choosing-k).
+- `--over-cluster-factor` (default 3) sets the number of GMM components: BSVAE is trained with the true module count of the scenario times this factor and post-processing merges back. By default the harness takes the count from the simulation (`--k-mode oracle`); `--k-mode elbo|stability` and the methods `bsvae_elbo_k` / `bsvae_stability_k` choose it from the data with one `bsvae-sweep-k` per dataset (see the [CLI reference](cli.md)); on real data choose it as in [Choosing K](hyperparameters.md#choosing-k).
 - `--no-normalize-input` turns off the per-feature z-scoring of the input that the harness applies before encoding (on by default for BSVAE methods; the same step is `--normalize-input` on `bsvae-train`).
 
 ## 2. Methods
@@ -37,6 +37,8 @@ Two options change what is being compared:
 | `bsvae_hier` | `bsvae` trained with the hierarchical gene-to-isoform loss (`--hier-strength`) |
 | `bsvae_isoform` | the isoform-specific residual scan; scored on switched-isoform recall and precision |
 | `wgcna_raw`, `wgcna` | WGCNA without and with the same gene-coherence policy |
+| `wgcna_k<N>` | WGCNA's network cut into N clusters by spectral clustering of the TOM (a resolution-matched comparison) |
+| `bsvae_elbo_k`, `bsvae_stability_k` | `bsvae` with K selected from the data by held-out ELBO or by assignment stability (`--k-mode`) |
 | `acorde`, `twn`, `usage_network`, `ica`, `nmf` | comparison methods; see the [CLI reference](cli.md) |
 
 The gene-level scenarios skip `bsvae_hier` and `bsvae_isoform` because they need a transcript-to-gene map.
