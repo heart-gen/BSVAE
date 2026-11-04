@@ -7,15 +7,31 @@
 ##          [--merge-cut-height 0.25] [--blockwise-threshold 20000]
 ##          [--max-block-size 5000] [--threads 1] [--seed 42] [--fixed-k 0]
 ##
-## --fixed-k K > 0 replaces the dynamic tree cut by a Ward (ward.D2) clustering of the TOM
-## dissimilarity cut into K clusters (no merge step, no size floor): WGCNA's network at a forced
-## resolution. Cutting the average-linkage tree or PAM on the same dissimilarity is not used:
-## both peel off singleton outliers and leave the large clusters whole.
+## --fixed-k K > 0 replaces the dynamic tree cut by a spectral clustering of the TOM into K clusters
+## (normalised Laplacian D^-1/2 TOM D^-1/2, its K leading eigenvectors row-normalised, k-means with 20
+## restarts; no merge step, no size floor): WGCNA's network at a forced resolution. The other fixed-K
+## rules on the same network fail on one of the benchmark families: cutting the average-linkage tree
+## or PAM on the TOM dissimilarity peel off singletons (PAM recovers the gene-level modules but gives
+## singletons on isoform data and whenever K exceeds the number of real clusters), and Ward (ward.D2) on
+## the TOM dissimilarity leaves one giant cluster on gene-level data (ARI 0.08 against 0.62 for the
+## dynamic cut at the planted K). Spectral clustering gives K balanced clusters on both.
 ##
 ## Writes modules.csv (feature_id, module, module_label; grey -> -1),
 ## eigengenes.csv (samples x modules) and params.json.
 
 suppressPackageStartupMessages(library(WGCNA))
+
+## Spectral clustering of a similarity matrix into exactly K clusters (Ng-Jordan-Weiss): the K leading
+## eigenvectors of D^-1/2 S D^-1/2, rows normalised to unit length, k-means with 20 restarts.
+spectral_fixed_k <- function(S, K, seed) {
+    d <- pmax(rowSums(S), .Machine$double.eps)
+    L <- sweep(sweep(S, 1, sqrt(d), "/"), 2, sqrt(d), "/")
+    ev <- eigen(L, symmetric = TRUE)
+    U <- ev$vectors[, seq_len(K), drop = FALSE]
+    U <- U / pmax(sqrt(rowSums(U^2)), .Machine$double.eps)
+    set.seed(seed)
+    as.integer(kmeans(U, centers = K, nstart = 20, iter.max = 200)$cluster)
+}
 
 args <- commandArgs(trailingOnly = TRUE)
 opt <- list(expr = NULL, outdir = NULL, `network-type` = "signed", `soft-power` = NA,
@@ -96,8 +112,8 @@ if (n_feat > int(opt$`blockwise-threshold`)) {
     dissTOM <- 1 - TOM
     tree <- hclust(as.dist(dissTOM), method = "average")
     if (fixed_k > 0) {
-        log_msg("Ward clustering of the TOM dissimilarity cut into %d clusters", fixed_k)
-        labels <- as.integer(cutree(hclust(as.dist(dissTOM), method = "ward.D2"), k = min(fixed_k, n_feat)))
+        log_msg("Spectral clustering of the TOM into %d clusters (normalised Laplacian, k-means)", fixed_k)
+        labels <- spectral_fixed_k(TOM, min(fixed_k, n_feat), int(opt$seed))
         MEs <- moduleEigengenes(datExpr, colors = labels)$eigengenes
     } else {
     dyn <- cutreeDynamic(dendro = tree, distM = dissTOM, deepSplit = deep_split,

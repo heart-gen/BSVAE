@@ -270,3 +270,66 @@ def test_k_mode_other_than_oracle_is_rejected(tmp_path):
         run_grid({"scenarios": []}, tmp_path, k_mode="sweep")
     with pytest.raises(SystemExit):
         build_parser().parse_args(["run", "--config", "c.yaml", "--outdir", str(tmp_path), "--k-mode", "sweep"])
+
+
+def test_select_k_reads_both_selections(tmp_path):
+    from bsvae.benchmark.kselect import select_k
+
+    csv = tmp_path / "sweep_results.csv"
+    csv.write_text(
+        "k,val_elbo_mean,val_elbo_std,val_loss_mean,stability_ari_mean,stability_ari_std,reps,out_dir\n"
+        "4,0.90,0,0.7,0.40,0.1,3,x\n8,0.88,0,0.7,0.70,0.1,3,x\n12,0.89,0,0.7,0.70,0.1,3,x\n16,0.91,0,0.7,0.50,0.1,3,x\n"
+    )
+    k, info = select_k(csv, "elbo")
+    assert k == 8 and info["k_elbo"] == 8 and info["k_grid"] == [4, 8, 12, 16]
+    k2, info2 = select_k(csv, "stability")
+    assert k2 == 8 and info2["k_stability"] == 8          # tie at 0.70 broken by the lower ELBO
+    assert info2["stability_ari_at_k"] == pytest.approx(0.70)
+    csv.write_text("k,val_elbo_mean,val_elbo_std,val_loss_mean,stability_ari_mean,stability_ari_std,reps,out_dir\n"
+                   "4,0.90,0,0.7,,,1,x\n8,0.88,0,0.7,,,1,x\n")
+    assert select_k(csv, "elbo")[0] == 8
+    with pytest.raises(ValueError, match="stability"):
+        select_k(csv, "stability")
+    with pytest.raises(ValueError, match="oracle"):
+        select_k(csv, "oracle")
+
+
+def test_method_names_for_k_modes_and_fixed_resolution():
+    from bsvae.benchmark.harness import _coherent, is_known_method
+    from bsvae.cli.benchmark import build_parser
+
+    assert is_known_method("bsvae_elbo_k") and is_known_method("bsvae_stability_k")
+    assert is_known_method("wgcna_k12") and is_known_method("wgcna_k6") and not is_known_method("wgcna_kx")
+    assert _coherent("wgcna_k12") and _coherent("bsvae_elbo_k") and not _coherent("wgcna_raw")
+    a = build_parser().parse_args(["run", "--config", "c.yaml", "--outdir", "o", "--k-mode", "stability",
+                                   "--k-grid", "4,8", "--stability-reps", "2"])
+    assert a.k_mode == "stability" and a.k_grid == "4,8" and a.stability_reps == 2
+
+
+def test_run_grid_data_driven_k_shares_one_sweep(tmp_path):
+    from bsvae.benchmark.kselect import sweep_results_path
+
+    cfg = {
+        "base_seed": 3, "reps": 1,
+        "generator": dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=120, n_samples=30, n_modules=3),
+        "grid": {"alpha": [1.0]},
+        "outputs": {"emit_gnvae_folds": False},
+    }
+    bs = {"epochs": 4, "warmup_epochs": 1, "transition_epochs": 1, "hidden_dims": [16], "no_cuda": True,
+          "_k_grid": [2, 3], "_sweep_epochs": 3, "_stability_reps": 2}
+    df = run_grid(cfg, tmp_path, methods=("bsvae", "bsvae_elbo_k", "bsvae_stability_k"), seeds=[0], bsvae_cfg=bs)
+    assert len(df) == 3 and (df["status"] == "ok").all()
+    run_dir = tmp_path / "scenarios" / df["scenario_id"].iloc[0] / "rep_000"
+    table = sweep_results_path(run_dir)
+    assert table.exists()
+    sw = pd.read_csv(table)
+    assert sorted(sw["k"]) == [2, 3] and sw["stability_ari_mean"].notna().all()
+    dk = df[df["method"] != "bsvae"].set_index("method")
+    assert set(dk["k_mode"]) == {"elbo", "stability"}
+    assert dk["selected_k"].isin([2, 3]).all() and dk["k_elbo"].isin([2, 3]).all()
+    oracle = df[df["method"] == "bsvae"].iloc[0]
+    assert "k_mode" not in oracle or pd.isna(oracle["k_mode"])
+    for m in ("bsvae_elbo_k", "bsvae_stability_k"):
+        assert (run_dir / "methods" / m / "seed_0" / "modules.csv").exists()
+        p = json.loads((run_dir / "methods" / m / "seed_0" / "metrics.json").read_text())["params"]
+        assert p["n_modules_oracle"] == 3 and p["selected_k"] == p["n_modules_expected"]

@@ -129,9 +129,11 @@ def run_wgcna(
 ) -> MethodResult:
     """Run WGCNA on a features × samples matrix via ``Rscript``.
 
-    ``fixed_k`` replaces the dynamic tree cut by a Ward clustering of the TOM dissimilarity cut
-    into that many clusters (no merge step, no size floor): WGCNA's network at a forced
-    resolution, single-block path only.
+    ``fixed_k`` replaces the dynamic tree cut by a spectral clustering of the TOM into that many
+    clusters (normalised Laplacian, k-means; no merge step, no size floor): WGCNA's network at a
+    forced resolution, single-block path only. Ward on the TOM dissimilarity (the first
+    implementation) leaves one giant cluster on gene-level data and PAM peels singletons on isoform
+    data, so neither serves as a resolution comparator across the benchmark families.
     """
     params = dict(
         network_type=network_type, soft_power=soft_power, min_module_size=min_module_size,
