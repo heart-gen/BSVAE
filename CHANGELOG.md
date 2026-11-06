@@ -2,6 +2,15 @@
 
 Versions follow the git tags (`vX.Y.Z`). Benchmark results quoted here are simulation results; the full tables and the scripts that produce them are described in [docs/benchmarking.md](docs/benchmarking.md).
 
+## 0.4.4 - 2026-11-06
+
+Benchmark-script release for the rare-isoform figure. No default of a production command changes.
+
+### Changed
+
+* `scripts/benchmark_rare_isoforms.py` scores the residual scan with the production call rule by default: a call is BH FDR < `--alpha` (0.05) with no effect-size floor (`--min-kme`, default 0; previously the scan's 0.3 floor applied), log library size regressed out of residuals and eigengenes (`--covariates libsize|none`, default `libsize`, the covariate of `benchmark_calibration.py`), and optional target-module exclusion (`--max-target-corr`). `called_high_kme` reports the share of calls with |kME| >= 0.3 as a confidence tier. `--n-genes` and `--n-modules` size the scenarios (defaults 600 and 10, unchanged).
+* The script writes `<outdir>/<scenario>/seed_<s>/<variant>/per_isoform.tsv.gz` (truth flags, abundance tercile of the switched isoforms, residual kME, p, q, call) so calls can be re-graded downstream, and records the settings (`n_samples`, `n_genes`, `n_modules`, `epochs`, `min_kme`, `alpha`, `covariates`, `max_target_corr`) on every row of `results.tsv` and `oracle_ceiling.tsv`.
+
 ## 0.4.3 - 2026-11-04
 
 Benchmark harness release for the resolution comparisons: BSVAE with a data-driven K, WGCNA at a fixed resolution, a timeout for the external comparison methods, and a stratum-fitted null for the residual-scan benchmark scripts. No default of a production command changes.

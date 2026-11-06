@@ -109,7 +109,7 @@ The study is organised in stages, each with its own `_h/` job scripts and `_m/` 
 
 Environment variables the wrappers honour: `BSVAE_ENV`, `BSVAE_SRC`, `EPOCHS` (150), `METHODS`, `SEEDS` (10), `ARRAY_THROTTLE`, `REFRESH_TASKS=1` (rebuild the task tables), `ROWS=r,r,...` (run selected rows). On the PSC cluster used for the study, jobs request `--cpus-per-task` and memory scales with it (2000 MB per CPU), so do not pass `--mem`. See [HPC](hpc.md) for a generic SLURM pattern.
 
-Other scripts in `scripts/` you can run directly: `benchmark_sims.py` (seven laptop-sized reference scenarios), `benchmark_confounding.py` (abundance-only, usage-only and switch-versus-usage sets), `benchmark_rare_isoforms.py` (recovery of low-abundance switched isoforms and the remedies tried), and `calibrate_nb_from_gtex.py` (refits the simulator's negative-binomial parameters from GTEx).
+Other scripts in `scripts/` you can run directly: `benchmark_sims.py` (seven laptop-sized reference scenarios), `benchmark_confounding.py` (abundance-only, usage-only and switch-versus-usage sets), `benchmark_rare_isoforms.py` (recovery of low-abundance switched isoforms and the remedies tried; the residual scan uses the production call rule, FDR only with the library-size covariate, and per-isoform tables are written for re-grading), and `calibrate_nb_from_gtex.py` (refits the simulator's negative-binomial parameters from GTEx).
 
 ### The defaults sweep
 

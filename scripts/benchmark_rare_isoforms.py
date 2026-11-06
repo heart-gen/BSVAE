@@ -17,9 +17,19 @@ the residual scan calls it, and its abundance tercile; it also reports the oracl
 the correlation of each switched isoform's sibling residual with the true factor of its
 target module, and how often that oracle ranks the target module first.
 
+The residual scan follows the production call rule by default: a call is FDR < --alpha with
+no effect-size floor (--min-kme 0; a floor only grades confidence and can be applied to the
+per-isoform tables afterwards), with log library size regressed out of residuals and
+eigengenes (--covariates libsize, as in benchmark_calibration.py) and optional target-module
+exclusion (--max-target-corr).  Every scenario x seed x variant also writes
+<outdir>/<scenario>/seed_<s>/<variant>/per_isoform.tsv.gz (truth flags, abundance tercile of
+the switched isoforms, residual kME, p, q, call) so calls can be re-graded downstream; the
+settings travel with every row of results.tsv and oracle_ceiling.tsv.
+
 Usage:
   poetry run python scripts/benchmark_rare_isoforms.py --outdir results/rare \\
-    [--seeds 0,1,2] [--n-samples 150] [--epochs 150] [--variants base,masked,filter,pearson,wgcna]
+    [--seeds 0,1,2] [--n-samples 150] [--epochs 150] [--variants base,masked,filter,pearson,wgcna] \\
+    [--min-kme 0] [--alpha 0.05] [--covariates libsize|none] [--max-target-corr 0.4]
 """
 from __future__ import annotations
 
@@ -40,8 +50,8 @@ from bsvae.utils.preprocess import pearson_residuals
 logger = logging.getLogger("rare")
 
 
-def scenarios(n_samples: int) -> Dict[str, Dict]:
-    iso = dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=600, n_samples=n_samples, n_modules=10, switch_rate=0.15)
+def scenarios(n_samples: int, n_genes: int = 600, n_modules: int = 10) -> Dict[str, Dict]:
+    iso = dict(ISOFORM_GENERATOR_DEFAULTS, n_genes=n_genes, n_samples=n_samples, n_modules=n_modules, switch_rate=0.15)
     return {
         "hard": dict(iso, alpha=1.0, dominant_isoform_frac=0.6),
         "hard_rare": dict(iso, alpha=1.0, dominant_isoform_frac=0.9),
@@ -70,14 +80,24 @@ def per_isoform(labels: pd.Series, truth: pd.Series, st: pd.DataFrame, expr: pd.
         "correct": (mapped == t) & (p >= 0), "separated": (p >= 0) & (dom_p >= 0) & (p != dom_p), "grey": p < 0,
     }, index=fids)
     if calls is not None:
-        out["called"] = calls["called"].reindex(fids).fillna(False).values
+        # transcripts the scan did not test (single-isoform genes, filtered features) are not called
+        for col in ["label_discordant", "kme_residual", "p_value", "q_value"]:
+            out[col] = calls[col].reindex(fids).values
+        out["called"] = calls["called"].reindex(fids).fillna(False).astype(bool).values
     return out
+
+
+def switched_terciles(table: pd.DataFrame) -> pd.Series:
+    """Abundance tercile (low / mid / high) of the switched isoforms; NaN for the rest."""
+    sw = table[table["is_switched"]]
+    q = pd.qcut(sw["mean_expr"].rank(method="first"), 3, labels=["low", "mid", "high"])
+    return pd.Series(q.astype(str).values, index=sw.index).reindex(table.index)
 
 
 def summarise(rows: List[Dict]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     keys = ["scenario", "variant", "stratum"]
-    cols = [c for c in df.columns if c not in keys + ["seed"]]
+    cols = [c for c in df.select_dtypes("number").columns if c not in keys + ["seed"]]
     return df.groupby(keys)[cols].mean()
 
 
@@ -86,10 +106,19 @@ def parse_args(argv=None):
     p.add_argument("--outdir", default="results/rare")
     p.add_argument("--seeds", default="0,1,2")
     p.add_argument("--n-samples", type=int, default=150)
+    p.add_argument("--n-genes", type=int, default=600)
+    p.add_argument("--n-modules", type=int, default=10)
     p.add_argument("--epochs", type=int, default=150)
     p.add_argument("--variants", default="base,masked,filter,pearson,wgcna")
     p.add_argument("--filter-min-mean", type=float, default=1.0)
     p.add_argument("--scenarios", default="hard,hard_rare,partial,partial_rare")
+    p.add_argument("--min-kme", type=float, default=0.0,
+                   help="Effect-size floor on the residual call (default 0: the call is FDR only, as in production).")
+    p.add_argument("--alpha", type=float, default=0.05, help="BH FDR level of the residual call.")
+    p.add_argument("--covariates", choices=["libsize", "none"], default="libsize",
+                   help="Regress log library size out of residuals and eigengenes (default) or nothing.")
+    p.add_argument("--max-target-corr", type=float, default=None,
+                   help="Exclude target modules whose eigengene correlates above this with the gene's module.")
     p.add_argument("--no-cuda", action="store_true", default=False)
     p.add_argument("--log-level", default="info")
     return p.parse_args(argv)
@@ -106,7 +135,10 @@ def main(argv=None):
     variants = [v.strip() for v in args.variants.split(",")]
     tcfg = {"epochs": args.epochs, "warmup_epochs": min(30, max(2, args.epochs // 3)), "transition_epochs": min(10, max(1, args.epochs // 10))}
     rows: List[Dict] = []; ceiling: List[Dict] = []
-    for sname, gen in scenarios(args.n_samples).items():
+    settings = dict(n_samples=args.n_samples, n_genes=args.n_genes, n_modules=args.n_modules, epochs=args.epochs,
+                    min_kme=float(args.min_kme), alpha=float(args.alpha), covariates=args.covariates,
+                    max_target_corr=np.nan if args.max_target_corr is None else float(args.max_target_corr))
+    for sname, gen in scenarios(args.n_samples, args.n_genes, args.n_modules).items():
         if sname not in args.scenarios.split(","):
             continue
         for seed in seeds:
@@ -117,6 +149,9 @@ def main(argv=None):
             truth = r.modules_hard.set_index("feature_id")["module"]; truth.index = truth.index.astype(str)
             st = r.extra_truth["switch_table.tsv.gz"].set_index("transcript_id"); st.index = st.index.astype(str)
             Z = r.module_latents.reindex(expr.columns); Zc = (Z - Z.mean()) / Z.std(ddof=0)
+            cov = None
+            if args.covariates == "libsize":
+                cov = pd.DataFrame({"log_libsize": np.log(counts.sum(axis=0).values + 1.0)}, index=expr.columns)
             # oracle ceiling from the sibling residual against the true factors
             resid, _ = isoform_residuals(expr, t2g)
             sw_ids = [t for t in resid.index if st.loc[t, "is_switched"] == 1]
@@ -129,7 +164,7 @@ def main(argv=None):
                 m = q == b
                 ceiling.append(dict(scenario=sname, seed=seed, stratum=b, n=int(m.sum()), mean_expr=float(me_sw.values[m].mean()),
                                     oracle_abs_cor=float(np.abs(cor[m, tgt[m]]).mean()),
-                                    oracle_rank1=float((np.abs(cor[m]).argmax(axis=1) == tgt[m]).mean())))
+                                    oracle_rank1=float((np.abs(cor[m]).argmax(axis=1) == tgt[m]).mean()), **settings))
             for variant in variants:
                 wd = outdir / sname / f"seed_{seed}" / variant
                 if variant == "wgcna":
@@ -145,30 +180,33 @@ def main(argv=None):
                         X = expr.loc[expr.mean(axis=1) >= args.filter_min_mean]
                     elif variant == "pearson":
                         X = pearson_residuals(counts, theta=100.0)
-                    res = run_bsvae(X, n_modules=10, seed=seed, workdir=wd, train_cfg=cfg, device=dev)
+                    res = run_bsvae(X, n_modules=args.n_modules, seed=seed, workdir=wd, train_cfg=cfg, device=dev)
                     if res.status != "ok":
                         raise RuntimeError(res.message)
                     lab = res.labels.reindex(X.index).fillna(-1).astype(int).values
-                    calls = isoform_specific_calls(X if variant != "pearson" else expr, t2g, lab, list(X.index))
+                    calls = isoform_specific_calls(X if variant != "pearson" else expr, t2g, lab, list(X.index),
+                                                   min_kme=args.min_kme, alpha=args.alpha, covariates=cov,
+                                                   max_target_corr=args.max_target_corr)
                     table = per_isoform(res.labels, truth, st, expr, calls)
+                table["tercile"] = switched_terciles(table)
+                wd.mkdir(parents=True, exist_ok=True)
+                table.rename_axis("feature_id").to_csv(wd / "per_isoform.tsv.gz", sep="\t")
                 ari = evaluate_labels(truth.values, normalize_labels(res.labels.reindex(truth.index).fillna(-1).astype(int).values))["ari_assigned"]
                 sw = table[table["is_switched"]]
-                qq = pd.qcut(sw["mean_expr"].rank(method="first"), 3, labels=["low", "mid", "high"])
-                for stratum, sub in [("all", sw)] + [(b, sw[qq == b]) for b in ["low", "mid", "high"]]:
+                ns = table[table["minor"] & ~table["is_switched"]]
+                strata = [("all", sw)] + [(b, sw[sw["tercile"] == b]) for b in ["low", "mid", "high"]] + [("unswitched_minor", ns)]
+                for stratum, sub in strata:
                     row = dict(scenario=sname, seed=seed, variant=variant, stratum=stratum, n=len(sub), ari_assigned=ari,
-                               mean_expr=float(sub["mean_expr"].mean()), correct=float(sub["correct"].mean()),
-                               separated=float(sub["separated"].mean()), grey=float(sub["grey"].mean()))
+                               mean_expr=float(sub["mean_expr"].mean()),
+                               correct=float(sub["correct"].mean()) if stratum != "unswitched_minor" else np.nan,
+                               separated=float(sub["separated"].mean()), grey=float(sub["grey"].mean()), **settings)
                     if "called" in sub:
                         row["called"] = float(sub["called"].mean())
+                        # confidence tier only (|kME| >= 0.3 among calls); never a filter on the call itself
+                        row["called_high_kme"] = float((sub["called"] & (sub["kme_residual"].abs() >= 0.3)).mean())
                     rows.append(row)
-                ns = table[table["minor"] & ~table["is_switched"]]
-                row = dict(scenario=sname, seed=seed, variant=variant, stratum="unswitched_minor", n=len(ns), ari_assigned=ari,
-                           mean_expr=float(ns["mean_expr"].mean()), correct=np.nan, separated=float(ns["separated"].mean()), grey=float(ns["grey"].mean()))
-                if "called" in ns:
-                    row["called"] = float(ns["called"].mean())
-                rows.append(row)
-                logger.info("%s seed %d %s: ari %.3f switched correct %.2f called %s", sname, seed, variant, ari,
-                            rows[-2]["correct"] if rows[-2]["stratum"] == "high" else float("nan"), rows[-1].get("called"))
+                logger.info("%s seed %d %s: ari %.3f switched correct %.2f called %s (unswitched minor %s)", sname, seed, variant, ari,
+                            rows[-5]["correct"], rows[-5].get("called"), rows[-1].get("called"))
                 pd.DataFrame(rows).to_csv(outdir / "results.tsv", sep="\t", index=False)
                 pd.DataFrame(ceiling).to_csv(outdir / "oracle_ceiling.tsv", sep="\t", index=False)
     pd.set_option("display.width", 250)
