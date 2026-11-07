@@ -87,6 +87,22 @@ def per_isoform(labels: pd.Series, truth: pd.Series, st: pd.DataFrame, expr: pd.
     return out
 
 
+HIGH_KME = 0.3   # confidence tier of a call, never a filter on it
+
+
+def call_confidence(sub: pd.DataFrame, threshold: float = HIGH_KME) -> Dict[str, float]:
+    """Calls in a stratum and their confidence tier.
+
+    ``n_called`` counts calls and ``n_called_high_kme`` the calls with |kME| >= ``threshold``;
+    ``frac_calls_high_kme`` is their ratio, the share *of calls* in the high tier. A stratum without calls has
+    no such share, so it is NaN (never 0), and recall stays in the separate ``called`` column."""
+    called = sub["called"].astype(bool)
+    n_called = int(called.sum())
+    n_high = int((sub.loc[called, "kme_residual"].abs() >= threshold).sum())
+    return {"n_called": n_called, "n_called_high_kme": n_high,
+            "frac_calls_high_kme": n_high / n_called if n_called else float("nan")}
+
+
 def switched_terciles(table: pd.DataFrame) -> pd.Series:
     """Abundance tercile (low / mid / high) of the switched isoforms; NaN for the rest."""
     sw = table[table["is_switched"]]
@@ -202,8 +218,7 @@ def main(argv=None):
                                separated=float(sub["separated"].mean()), grey=float(sub["grey"].mean()), **settings)
                     if "called" in sub:
                         row["called"] = float(sub["called"].mean())
-                        # confidence tier only (|kME| >= 0.3 among calls); never a filter on the call itself
-                        row["called_high_kme"] = float((sub["called"] & (sub["kme_residual"].abs() >= 0.3)).mean())
+                        row.update(call_confidence(sub))
                     rows.append(row)
                 logger.info("%s seed %d %s: ari %.3f switched correct %.2f called %s (unswitched minor %s)", sname, seed, variant, ari,
                             rows[-5]["correct"], rows[-5].get("called"), rows[-1].get("called"))
