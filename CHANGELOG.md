@@ -2,6 +2,21 @@
 
 Versions follow the git tags (`vX.Y.Z`). Benchmark results quoted here are simulation results; the full tables and the scripts that produce them are described in [docs/benchmarking.md](docs/benchmarking.md).
 
+## 0.4.4 - 2026-11-06
+
+Benchmark-script release for the rare-isoform figure, with two fixes for pandas copy-on-write (the pandas 3 default). No default of a production command changes.
+
+### Fixed
+
+* `bsvae-networks target-genes-combine` / `combine_target_tests` with `--correlation empirical` (the default) wrote the unit diagonal of the between-cohort correlation into `DataFrame.values`, which is read-only under copy-on-write and raised `ValueError: underlying array is read-only` with pandas 3; it now writes into a copy.
+* `isoform_specific_calls(residualize_eigengenes=False)` updated a read-only `.values` view during the leave-one-gene-out pass and raised under copy-on-write; the kME matrix is now a writable copy. The default (`residualize_eigengenes=True`) was not affected.
+* `tests/test_copy_on_write.py` runs both paths with copy-on-write switched on, so the pandas 2 CI rows guard them, and the test workflow gains a Python 3.12 row with pandas 3 as an informational compatibility check (it cannot fail the run). The dependency pin stays `pandas >=2.3.2,<3.0.0` until that row is green; the full test suite passes locally with pandas 3.1.1.
+
+### Changed
+
+* `scripts/benchmark_rare_isoforms.py` scores the residual scan with the production call rule by default: a call is BH FDR < `--alpha` (0.05) with no effect-size floor (`--min-kme`, default 0; previously the scan's 0.3 floor applied), log library size regressed out of residuals and eigengenes (`--covariates libsize|none`, default `libsize`, the covariate of `benchmark_calibration.py`), and optional target-module exclusion (`--max-target-corr`). Each stratum reports `n_called`, `n_called_high_kme` and `frac_calls_high_kme`, the share *of calls* with |kME| >= 0.3 (a confidence tier, never a filter; NaN for a stratum without calls), beside the recall in `called`. `--n-genes` and `--n-modules` size the scenarios (defaults 600 and 10, unchanged).
+* The script writes `<outdir>/<scenario>/seed_<s>/<variant>/per_isoform.tsv.gz` (truth flags, abundance tercile of the switched isoforms, residual kME, p, q, call) so calls can be re-graded downstream, and records the settings (`n_samples`, `n_genes`, `n_modules`, `epochs`, `min_kme`, `alpha`, `covariates`, `max_target_corr`) on every row of `results.tsv` and `oracle_ceiling.tsv`.
+
 ## 0.4.3 - 2026-11-04
 
 Benchmark harness release for the resolution comparisons: BSVAE with a data-driven K, WGCNA at a fixed resolution, a timeout for the external comparison methods, and a stratum-fitted null for the residual-scan benchmark scripts. No default of a production command changes.

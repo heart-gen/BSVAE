@@ -489,7 +489,8 @@ def isoform_specific_calls(
             E = _residualize_eigengenes(eigengenes, cols.index(int(gm))) if gm in cols else eigengenes
             kme[rows_idx] = compute_kme(resid.iloc[rows_idx], E, list(resid.index[rows_idx])).values
     else:
-        kme = compute_kme(resid, eigengenes, list(resid.index)).values
+        # a writable copy: the leave-one-out pass below updates kme in place (read-only view under copy-on-write)
+        kme = compute_kme(resid, eigengenes, list(resid.index)).to_numpy(dtype=np.float64, copy=True)
     mode = {True: "exact", False: "off"}.get(loo_eigengene, loo_eigengene)
     if mode not in ("exact", "approx", "off"):
         raise ValueError("loo_eigengene must be True/False, 'exact' or 'approx'")

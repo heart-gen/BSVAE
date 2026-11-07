@@ -676,7 +676,10 @@ def combine_target_tests(
         null_like = zmat[(zmat.max(axis=1) < sps.norm.isf(0.05)) | zmat.isna().any(axis=1)]
         src = null_like if len(null_like) >= 20 else zmat
         rho = src.corr(min_periods=5).fillna(0.0).clip(lower=0.0)
-        np.fill_diagonal(rho.values, 1.0)
+        # write the unit diagonal into a copy: under pandas copy-on-write (the pandas 3 default) .values is read-only
+        r = rho.to_numpy(dtype=float, copy=True)
+        np.fill_diagonal(r, 1.0)
+        rho = pd.DataFrame(r, index=rho.index, columns=rho.columns)
     rows = []
     for tx, g in long.groupby(level=0):
         p = np.clip(g["p_value"].values.astype(float), 1e-300, 1.0)
