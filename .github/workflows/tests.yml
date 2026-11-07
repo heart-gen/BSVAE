@@ -9,10 +9,17 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    # the pandas 3 row is a compatibility check while the package still pins pandas < 3: it reports but never
+    # fails the run (the release workflow calls this one before publishing)
+    continue-on-error: ${{ matrix.pandas == '3' }}
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
+        pandas: ["locked"]
+        include:
+          - python-version: "3.12"
+            pandas: "3"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,6 +33,9 @@ jobs:
           pipx inject poetry "poetry-dynamic-versioning[plugin]"
       - name: Install package with test dependencies
         run: poetry install --with dev --extras "anndata yaml"
+      - name: Use pandas 3 (compatibility check)
+        if: matrix.pandas == '3'
+        run: poetry run pip install "pandas>=3,<4"
       - name: Run fast test suite
         # slow tests are deselected by addopts in pyproject.toml
         run: poetry run pytest -q -p no:cacheprovider
